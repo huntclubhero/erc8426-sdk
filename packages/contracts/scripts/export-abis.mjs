@@ -29,6 +29,7 @@ const CONTRACTS = [
   ["RentalPass.sol", "RentalPass"],
   ["MockERC20.sol", "MockERC20"],
   ["MockERC721.sol", "MockERC721"],
+  ["MockSmartAccount.sol", "MockSmartAccount"],
 ];
 
 if (!existsSync(outDir)) {

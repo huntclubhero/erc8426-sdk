@@ -11,7 +11,7 @@ ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wall
 | `src/extensions/ERC721WalletPassRentable.sol` | ERC-4907 rentals with a documented entitlement precedence (`passHolderOf`). |
 | `src/utils/BoundedAction.sol` | The on-chain half of the spec's capability configuration: operator actions limited by action id, rate and value, inspectable, revocable per token by its owner. |
 | `src/examples/*.sol` | `PetPass`, `StoredValueCard`, `StakingPass`, `EventTicketPass`, `MembershipPass`, `IdentityCredential`, `RentalPass`. |
-| `src/mocks/*.sol` | `MockERC20` (6 decimal stablecoin stand-in) and `MockERC721`, open minting, for tests and local demos only. |
+| `src/mocks/*.sol` | `MockERC20` (6 decimal stablecoin stand-in), `MockERC721` (open minting), and `MockSmartAccount` (one-signer ERC-1271 contract account that holds ERC-721s), for tests and local demos only. |
 | `src/interfaces/` | `IERC4907`, `IERC5192`. |
 | `abi/*.json` | ABI arrays for TypeScript (`import petPassAbi from "@erc8426/contracts/abi/PetPass.json"`). |
 | `artifacts/*.json` | `{ contractName, abi, bytecode }` for each deployable contract (examples and mocks). |
