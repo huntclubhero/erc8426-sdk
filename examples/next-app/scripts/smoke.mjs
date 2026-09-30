@@ -132,6 +132,13 @@ const rotated = await passes.rotatePassLinks(token, { signer: bob });
 step(rotated.status === 200, "owner-requested rotation via client.rotatePassLinks");
 const afterRotate = await post(bobFeed);
 step(afterRotate.res.status === 404, "a rotated link answers 404", `HTTP ${afterRotate.res.status}`);
+const oldPreview = await getJson(bobPass.manifest.formats.preview);
+step(oldPreview.res.status === 404, "the pre-rotation pass download answers 404", `HTTP ${oldPreview.res.status}`);
+// Rotation mints a new serial and returns no manifest: the owner re-fetches
+// it with a fresh acquire proof.
+const afterPass = await passes.getManifest(token, { signer: bob });
+const afterBody = (await getJson(afterPass.manifest.formats.preview)).body;
+step(afterBody.serial && afterBody.serial !== bobPreview.body.serial, "after rotation the owner re-acquires and gets a new serial");
 
 // 12. The documented bound holds on the capability path: 4 plays a day,
 // enforced on chain by BoundedAction, then 429 bound_reached.
