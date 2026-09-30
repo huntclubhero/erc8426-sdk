@@ -6,13 +6,45 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "src", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "sideEffects": false,
-  "repository": { "type": "git", "url": "git+https://github.com/huntclubhero/erc8426-sdk.git", "directory": "packages/conformance" },
-  "keywords": ["erc-8426", "wallet-pass", "apple-wallet", "google-wallet", "nft", "erc-721"],
-  "publishConfig": { "access": "public" },
-  "scripts": { "build": "tsc -p tsconfig.build.json" },
-  "dependencies": { "@erc8426/core": "workspace:*", "@erc8426/client": "workspace:*" },
-  "peerDependencies": { "viem": "^2.21.0" }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huntclubhero/erc8426-sdk.git",
+    "directory": "packages/conformance"
+  },
+  "keywords": [
+    "erc-8426",
+    "wallet-pass",
+    "apple-wallet",
+    "google-wallet",
+    "nft",
+    "erc-721"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@erc8426/core": "workspace:*",
+    "@erc8426/client": "workspace:*"
+  },
+  "peerDependencies": {
+    "viem": "^2.21.0"
+  },
+  "bin": {
+    "erc8426-conformance": "./dist/cli.js"
+  }
 }

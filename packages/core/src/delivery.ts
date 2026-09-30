@@ -110,3 +110,26 @@ export interface PassFormatProvider {
   /// Push updated content to installed passes where the platform supports it.
   notifyUpdate?(ctx: PassContext): Promise<void>;
 }
+
+/// A pass file the issuer serves itself.
+export interface PassFile {
+  body: Uint8Array | string;
+  contentType: string;
+  filename?: string;
+}
+
+/// A platform whose pass is a file (Apple's .pkpass). The issuer hosts the
+///  download at a rotating capability URL it owns, so the provider never has
+///  to host or rotate download links: rotation stays in one place.
+export interface PassFileProvider {
+  readonly format: string;
+  passFile(ctx: PassContext): Promise<PassFile>;
+  notifyUpdate?(ctx: PassContext): Promise<void>;
+}
+
+/// Either kind of delivery provider.
+export type PassDeliveryProvider = PassFormatProvider | PassFileProvider;
+
+export function isPassFileProvider(p: PassDeliveryProvider): p is PassFileProvider {
+  return typeof (p as PassFileProvider).passFile === "function";
+}

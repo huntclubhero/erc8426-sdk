@@ -24,6 +24,30 @@ export type WalletPassErrorCode =
   | "link_invalid"
   | "not_found";
 
+/// Every code at runtime, for validating an `error` member off the wire.
+export const WALLET_PASS_ERROR_CODES: readonly WalletPassErrorCode[] = [
+  "invalid_message",
+  "domain_mismatch",
+  "nonce_invalid",
+  "challenge_expired",
+  "not_yet_valid",
+  "binding_mismatch",
+  "signature_invalid",
+  "not_owner",
+  "read_failed",
+  "proof_required",
+  "malformed_proof",
+  "invalid_address",
+  "invalid_token",
+  "unknown_action",
+  "link_invalid",
+  "not_found",
+] as const;
+
+export function isWalletPassErrorCode(value: unknown): value is WalletPassErrorCode {
+  return typeof value === "string" && (WALLET_PASS_ERROR_CODES as readonly string[]).includes(value);
+}
+
 /// 400 for malformed or mis-scoped input, 401 for a failed possession or
 ///  freshness check, 403 ONLY for a verified proof from a non-entitled
 ///  account, 503 for a read that could not be taken. The 403 is reserved by

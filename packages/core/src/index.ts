@@ -6,4 +6,4 @@ export * from "./manifest.js";
 export * from "./challenge.js";
 export * from "./proof.js";
 export * from "./errors.js";
-export type * from "./delivery.js";
+export * from "./delivery.js";
