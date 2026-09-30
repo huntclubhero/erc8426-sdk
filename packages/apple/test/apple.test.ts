@@ -516,7 +516,7 @@ describe("appleFormatProvider", () => {
     const { p } = provider();
     expect(p.format).toBe("apple");
     const url = await p.acquisitionUrl(ctx(OWNER_A));
-    expect(url).toMatch(/^https:\/\/issuer\.example\/wallet-pass\/apple\/passes\/s3r1al\/[0-9a-f]{64}\.pkpass$/);
+    expect(url).toMatch(/^https:\/\/issuer\.example\/apple\/passes\/s3r1al\/[0-9a-f]{64}\.pkpass$/);
     // Repeat claim by the same owner: same URL, no rotation.
     expect(await p.acquisitionUrl(ctx(OWNER_A))).toBe(url);
     const res = await p.handle(new Request(url));
@@ -525,7 +525,7 @@ describe("appleFormatProvider", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     const pass = JSON.parse(unzip(new Uint8Array(await res.arrayBuffer()))["pass.json"]!.toString());
     const record = (await p.store.getPass("s3r1al"))!;
-    expect(pass.webServiceURL).toBe("https://issuer.example/wallet-pass/apple");
+    expect(pass.webServiceURL).toBe("https://issuer.example/apple");
     expect(pass.authenticationToken).toBe(record.authenticationToken);
     // A guessed capability is a 404, like an unknown serial.
     expect((await p.handle(new Request(url.replace(/[0-9a-f]{64}/, "0".repeat(64))))).status).toBe(404);
@@ -542,7 +542,7 @@ describe("appleFormatProvider", () => {
     expect((await p.handle(new Request(newUrl))).status).toBe(200);
 
     const refresh = await p.handle(
-      new Request(`https://issuer.example/wallet-pass/apple/v1/passes/${PASS_TYPE}/s3r1al`, { headers: { authorization: `ApplePass ${oldToken}` } }),
+      new Request(`https://issuer.example/apple/v1/passes/${PASS_TYPE}/s3r1al`, { headers: { authorization: `ApplePass ${oldToken}` } }),
     );
     expect(refresh.status).toBe(200);
     const pass = JSON.parse(unzip(new Uint8Array(await refresh.arrayBuffer()))["pass.json"]!.toString());
@@ -593,7 +593,7 @@ describe("appleFormatProvider", () => {
     expect(apns.pushed).toEqual(["s3r1al", "s3r1al"]);
     // The standalone routes need the secret.
     await expect(p.acquisitionUrl(ctx(OWNER_B))).rejects.toThrow(/linkSecret/);
-    expect((await p.handle(new Request("https://issuer.example/wallet-pass/apple/passes/s3r1al/" + "0".repeat(64) + ".pkpass"))).status).toBe(404);
+    expect((await p.handle(new Request("https://issuer.example/apple/passes/s3r1al/" + "0".repeat(64) + ".pkpass"))).status).toBe(404);
   });
 
   it("omits the web service on an http origin", async () => {

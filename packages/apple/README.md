@@ -66,14 +66,14 @@ export const apple = appleFormatProvider({
   teamIdentifier: "ABCDE12345",
   certificates,
   origin: "https://passes.example.com",
-  basePath: "/wallet-pass/apple",
+  basePath: "/apple",
   linkSecret: process.env.PASS_LINK_SECRET!, // 32+ random bytes, never stored with the passes
   store,
   apns,
   images: { icon: { url: "https://passes.example.com/icon.png" }, logo: { url: "https://passes.example.com/logo.png" } },
 });
 
-// Next.js: app/wallet-pass/apple/[...path]/route.ts
+// Next.js: app/apple/[...path]/route.ts
 export const GET = (req: Request) => apple.handle(req);
 export const POST = GET;
 export const DELETE = GET;

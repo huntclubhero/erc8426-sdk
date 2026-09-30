@@ -27,7 +27,7 @@ export interface AppleFormatProviderOptions {
   ///  URLs and the web service live here. The spec asks that pass endpoints
   ///  share an origin with the collection's published web presence.
   origin: string;
-  /// Where `handle` is mounted. Defaults to "/wallet-pass/apple".
+  /// Where `handle` is mounted. Defaults to "/apple", outside the issuer's "/wallet-pass" route tree so the two never overlap.
   basePath?: string;
   /// Server-only secret, at least 32 bytes, that standalone download
   ///  capabilities are derived with. Kept out of the store on purpose: a
@@ -123,7 +123,7 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
     if (secretLength < 32) throw new Error("linkSecret must be at least 32 bytes");
   }
   const origin = new URL(opts.origin).origin;
-  const basePath = `/${(opts.basePath ?? "/wallet-pass/apple").replace(/^\/+|\/+$/g, "")}`;
+  const basePath = `/${(opts.basePath ?? "/apple").replace(/^\/+|\/+$/g, "")}`;
   // Apple only calls an https web service; an http origin (local dev) gets
   // passes that install but never update, rather than passes that fail.
   const webServiceURL = origin.startsWith("https://") ? `${origin}${basePath}` : undefined;
