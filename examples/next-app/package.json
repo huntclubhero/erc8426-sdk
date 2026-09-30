@@ -4,9 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "chain": "node scripts/chain.mjs",
+    "deploy": "node scripts/deploy.mjs",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@erc8426/apple": "workspace:*",
