@@ -32,7 +32,7 @@ export function TokenPage({ contract, tokenId, walletClient }) {
 
 What the button does:
 
-- Fetches the manifest **when clicked**, never on render, and navigates to the chosen platform's acquisition URL. Nothing is cached (spec Client requirements).
+- Fetches the manifest **when clicked**, never on render, and navigates to the chosen platform's acquisition URL. Nothing is cached (spec Client requirements). It refuses to navigate anywhere but https (or http on localhost), including through a custom `navigate`.
 - Labels itself "Add to Apple Wallet" or "Save to Google Wallet" once the platform is known (forced with `platform`, or detected from the user agent after mount), and "Add to Wallet" before that.
 - Shows the issuing contract under the button, "Issued by contract 0x5F9B...c2e1", with the full address in `title` and linked through `aria-describedby`. The spec says clients SHOULD present the issuing contract alongside the action; turn it off with `showIssuer={false}` only if you show it elsewhere.
 - Sets `aria-busy` and disables itself while working, and renders failures in a `role="alert"` element with a plain sentence (for example "The connected wallet does not own this token.").

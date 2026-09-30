@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Context} from "@openzeppelin/contracts/utils/Context.sol";
+
 /// @title BoundedAction
 /// @notice The on-chain half of ERC-8426's capability configuration. It lets
 ///  a token contract expose a pass-reachable function to an issuer operator
@@ -12,6 +14,9 @@ pragma solidity ^0.8.24;
 ///  - Scoped authority ("SHOULD be limited on chain to the function the
 ///    link invokes"): an operator can call only functions guarded by
 ///    `onlyBoundedAction`, and only for the action id each function names.
+///    An operator appointed with `_setActionOperatorFor` is further limited
+///    to the action ids it was appointed for; one appointed with
+///    `_setActionOperator` may run every bounded action.
 ///  - Bounded repetition: each (token, action) pair may run at most
 ///    `maxPerWindow` times per window of `windowSeconds`, and may move at
 ///    most `maxValuePerCall` per call and `maxValuePerWindow` per window.
@@ -19,13 +24,19 @@ pragma solidity ^0.8.24;
 ///  - Documented bound: `actionBound(actionId)` returns the parameters, and
 ///    `actionUsage` / `remainingInWindow` return live usage, so the bound
 ///    can be read and published by anyone.
-///  - The owner's remedy: the current owner of a token can revoke any
-///    operator for that token with `setOperatorRevoked`. Revocation is keyed
-///    to the owner who set it, so it lasts for that owner's tenure and a new
-///    owner starts with the issuer's defaults. (Off chain, the owner's other
-///    remedy is capability URL rotation on request.)
+///  - The owner's remedy: the current owner of a token can switch off every
+///    operator for that token with `setAllOperatorsRevoked`, which also
+///    covers operators the issuer appoints later (a rotated relayer key), or
+///    revoke one operator with `setOperatorRevoked`. Only the owner can
+///    restore either. (Off chain, the owner's other remedy is capability URL
+///    rotation on request.)
 ///  - Optional commitment: `_freezeActionBound` makes an action's bound
 ///    one-way, so the issuer can later tighten it but never loosen it.
+///
+///  Revocations are keyed to (token, owner): they last for that owner's
+///  tenure, and a new owner starts with the issuer's defaults. Because the
+///  key includes the owner, a revocation comes back if the same owner holds
+///  the token again (A to B to A): an owner's choice follows the owner.
 ///
 ///  What this contract does NOT do: it does not perform ERC-8426 check (2),
 ///  the fresh entitlement read. That read is off chain, by the verifier,
@@ -39,11 +50,14 @@ pragma solidity ^0.8.24;
 ///  `2 * maxPerWindow` uses (and `2 * maxValuePerWindow` value) land inside
 ///  any single span of `windowSeconds`. Document the bound with that factor.
 ///
+///  Callers are read with `_msgSender()`, so the contract works behind an
+///  ERC-2771 trusted forwarder when the inheriting contract overrides it.
+///
 ///  Integration: implement `_boundedActionOwner` (usually `_requireOwned`
 ///  on an ERC-721), gate your own `setActionOperator` / `configureAction`
 ///  wrappers with your access control, and guard each pass-reachable
 ///  function with `onlyBoundedAction` or `_consumeBoundedAction`.
-abstract contract BoundedAction {
+abstract contract BoundedAction is Context {
     /// @notice Parameters bounding one action.
     /// @param maxPerWindow Maximum calls per token per window. Zero disables
     ///  the action for operators.
@@ -70,7 +84,9 @@ abstract contract BoundedAction {
     mapping(bytes32 actionId => ActionBound) private _bounds;
     mapping(uint256 tokenId => mapping(bytes32 actionId => ActionUsage)) private _usage;
     mapping(address operator => bool) private _operators;
+    mapping(address operator => mapping(bytes32 actionId => bool)) private _scopedOperators;
     mapping(uint256 tokenId => mapping(address owner => mapping(address operator => bool))) private _revoked;
+    mapping(uint256 tokenId => mapping(address owner => bool)) private _revokedAll;
 
     /// @notice Emitted when an action's bound is set or changed.
     event ActionBoundConfigured(
@@ -84,12 +100,21 @@ abstract contract BoundedAction {
     /// @notice Emitted when an action's bound becomes tighten-only.
     event ActionBoundFrozen(bytes32 indexed actionId);
 
-    /// @notice Emitted when the issuer adds or removes an operator.
+    /// @notice Emitted when the issuer adds or removes an operator for every
+    ///  bounded action.
     event ActionOperatorSet(address indexed operator, bool allowed);
 
-    /// @notice Emitted when a token owner revokes or restores an operator
+    /// @notice Emitted when the issuer adds or removes an operator for one
+    ///  action id.
+    event ActionOperatorScopeSet(address indexed operator, bytes32 indexed actionId, bool allowed);
+
+    /// @notice Emitted when a token owner revokes or restores one operator
     ///  for their token.
     event ActionOperatorRevoked(uint256 indexed tokenId, address indexed owner, address indexed operator, bool revoked);
+
+    /// @notice Emitted when a token owner switches every operator off (or
+    ///  back on) for their token, including operators appointed later.
+    event AllActionOperatorsRevoked(uint256 indexed tokenId, address indexed owner, bool revoked);
 
     /// @notice Emitted each time an operator consumes a bounded action.
     event BoundedActionUsed(
@@ -107,10 +132,10 @@ abstract contract BoundedAction {
     error BoundedActionNotTokenOwner(uint256 tokenId, address account);
 
     /// @dev Guard a pass-reachable function: the caller must be an operator
-    ///  not revoked for `tokenId`, and the call is counted against
-    ///  `actionId`'s bound with `value` moved.
+    ///  for `actionId`, not revoked for `tokenId`, and the call is counted
+    ///  against `actionId`'s bound with `value` moved.
     modifier onlyBoundedAction(bytes32 actionId, uint256 tokenId, uint256 value) {
-        _consumeBoundedAction(actionId, tokenId, msg.sender, value);
+        _consumeBoundedAction(actionId, tokenId, _msgSender(), value);
         _;
     }
 
@@ -154,42 +179,78 @@ abstract contract BoundedAction {
         value = used >= b.maxValuePerWindow ? 0 : b.maxValuePerWindow - used;
     }
 
-    /// @notice Whether `operator` is an issuer-appointed operator.
+    /// @notice Whether `operator` is appointed for every bounded action.
     function isActionOperator(address operator) public view virtual returns (bool) {
         return _operators[operator];
     }
 
-    /// @notice Whether the current owner of `tokenId` has revoked `operator`.
-    function isOperatorRevoked(uint256 tokenId, address operator) public view virtual returns (bool) {
-        return _revoked[tokenId][_boundedActionOwner(tokenId)][operator];
+    /// @notice Whether `operator` may run `actionId`: appointed for every
+    ///  action, or scoped to this one.
+    function isActionOperatorFor(address operator, bytes32 actionId) public view virtual returns (bool) {
+        return _operators[operator] || _scopedOperators[operator][actionId];
     }
 
-    /// @notice Whether `operator` may currently act on `tokenId` at all
-    ///  (appointed and not revoked). Rate and value limits still apply.
+    /// @notice Whether the current owner of `tokenId` has revoked `operator`,
+    ///  individually or by revoking every operator.
+    function isOperatorRevoked(uint256 tokenId, address operator) public view virtual returns (bool) {
+        address holder = _boundedActionOwner(tokenId);
+        return _revokedAll[tokenId][holder] || _revoked[tokenId][holder][operator];
+    }
+
+    /// @notice Whether the current owner of `tokenId` has switched off every
+    ///  operator for it.
+    function areAllOperatorsRevoked(uint256 tokenId) public view virtual returns (bool) {
+        return _revokedAll[tokenId][_boundedActionOwner(tokenId)];
+    }
+
+    /// @notice Whether `operator` may currently act on `tokenId` for at
+    ///  least one action (appointed, globally or scoped, and not revoked).
+    ///  Use `canOperateFor` for a specific action. Limits still apply.
     function canOperate(uint256 tokenId, address operator) public view virtual returns (bool) {
         return _operators[operator] && !isOperatorRevoked(tokenId, operator);
     }
 
+    /// @notice Whether `operator` may currently run `actionId` on `tokenId`.
+    ///  Rate and value limits still apply.
+    function canOperateFor(uint256 tokenId, address operator, bytes32 actionId) public view virtual returns (bool) {
+        return isActionOperatorFor(operator, actionId) && !isOperatorRevoked(tokenId, operator);
+    }
+
     // Owner remedy
 
-    /// @notice Revoke (or restore) `operator` for `tokenId`. Only the
-    ///  current owner of the token may call this. This is the on-chain
-    ///  remedy for a leaked capability link under an unchanged owner: it
-    ///  stops the operator acting for this token at once, without waiting
-    ///  for the issuer.
+    /// @notice Revoke (or restore) one `operator` for `tokenId`. Only the
+    ///  current owner of the token may call this.
     function setOperatorRevoked(uint256 tokenId, address operator, bool revoked) public virtual {
-        address owner = _boundedActionOwner(tokenId);
-        if (msg.sender != owner) revert BoundedActionNotTokenOwner(tokenId, msg.sender);
-        _revoked[tokenId][owner][operator] = revoked;
-        emit ActionOperatorRevoked(tokenId, owner, operator, revoked);
+        address holder = _requireBoundedActionOwner(tokenId);
+        _revoked[tokenId][holder][operator] = revoked;
+        emit ActionOperatorRevoked(tokenId, holder, operator, revoked);
+    }
+
+    /// @notice Switch every operator off (or back on) for `tokenId`,
+    ///  including operators the issuer appoints after this call. Only the
+    ///  current owner of the token may call this, and only the owner can
+    ///  restore it. This is the on-chain remedy for a leaked capability link
+    ///  under an unchanged owner: it holds even if the issuer rotates or adds
+    ///  relayer keys.
+    function setAllOperatorsRevoked(uint256 tokenId, bool revoked) public virtual {
+        address holder = _requireBoundedActionOwner(tokenId);
+        _revokedAll[tokenId][holder] = revoked;
+        emit AllActionOperatorsRevoked(tokenId, holder, revoked);
     }
 
     // Internal configuration (wrap these with your access control)
 
-    /// @dev Appoint or remove an operator.
+    /// @dev Appoint or remove an operator for every bounded action.
     function _setActionOperator(address operator, bool allowed) internal virtual {
         _operators[operator] = allowed;
         emit ActionOperatorSet(operator, allowed);
+    }
+
+    /// @dev Appoint or remove an operator for one action id only, so a key
+    ///  can be limited to the one function its links invoke.
+    function _setActionOperatorFor(address operator, bytes32 actionId, bool allowed) internal virtual {
+        _scopedOperators[operator][actionId] = allowed;
+        emit ActionOperatorScopeSet(operator, actionId, allowed);
     }
 
     /// @dev Set the bound for `actionId`. `maxPerWindow` of zero disables the
@@ -237,9 +298,11 @@ abstract contract BoundedAction {
         internal
         virtual
     {
-        if (!_operators[operator]) revert BoundedActionUnauthorizedOperator(operator);
-        address owner = _boundedActionOwner(tokenId);
-        if (_revoked[tokenId][owner][operator]) revert BoundedActionOperatorRevoked(tokenId, operator);
+        if (!isActionOperatorFor(operator, actionId)) revert BoundedActionUnauthorizedOperator(operator);
+        address holder = _boundedActionOwner(tokenId);
+        if (_revokedAll[tokenId][holder] || _revoked[tokenId][holder][operator]) {
+            revert BoundedActionOperatorRevoked(tokenId, operator);
+        }
 
         ActionBound memory b = _bounds[actionId];
         if (b.maxPerWindow == 0) revert BoundedActionDisabled(actionId);
@@ -254,16 +317,24 @@ abstract contract BoundedAction {
         if (u.count >= b.maxPerWindow) {
             revert BoundedActionRateLimited(tokenId, actionId, uint256(u.windowStart) + b.windowSeconds);
         }
-        // value <= maxValuePerCall <= type(uint128).max, so the cast is safe.
+        // value <= maxValuePerCall <= type(uint128).max, so the sum fits.
         uint256 newValue = uint256(u.value) + value;
         if (newValue > b.maxValuePerWindow) {
-            revert BoundedActionWindowCapExceeded(tokenId, actionId, value, b.maxValuePerWindow - u.value);
+            // Saturating: a cap lowered below what this window already used
+            // leaves nothing remaining, rather than underflowing.
+            uint256 remaining = u.value >= b.maxValuePerWindow ? 0 : b.maxValuePerWindow - u.value;
+            revert BoundedActionWindowCapExceeded(tokenId, actionId, value, remaining);
         }
         u.count += 1;
         // Safe: newValue <= maxValuePerWindow, a uint128.
         // forge-lint: disable-next-line(unsafe-typecast)
         u.value = uint128(newValue);
         emit BoundedActionUsed(tokenId, actionId, operator, value, u.count);
+    }
+
+    function _requireBoundedActionOwner(uint256 tokenId) private view returns (address holder) {
+        holder = _boundedActionOwner(tokenId);
+        if (_msgSender() != holder) revert BoundedActionNotTokenOwner(tokenId, _msgSender());
     }
 
     /// @dev The current owner of `tokenId`. Must revert for a nonexistent

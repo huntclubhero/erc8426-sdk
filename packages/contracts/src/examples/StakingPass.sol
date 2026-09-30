@@ -6,8 +6,10 @@ import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {ERC721WalletPass} from "../ERC721WalletPass.sol";
+import {BoundedAction} from "../utils/BoundedAction.sol";
 
 /// @title StakingPass (example)
 /// @notice Use case: stake an NFT from another collection and carry the
@@ -16,16 +18,22 @@ import {ERC721WalletPass} from "../ERC721WalletPass.sol";
 ///  shows accrued rewards and carries a Claim link.
 /// @dev Capability analysis (ERC-8426, "The capability configuration"):
 ///
-///  Pass-reachable through a capability link:
-///  - `claim`. It is permissionless: anyone (the holder, a relayer, a
-///    stranger holding a forwarded link) may call it, and it always pays
-///    the receipt's current owner and nobody else. It cannot transfer, burn
-///    or approve anything, and its effect under unlimited repetition is
-///    bounded by construction: the total paid can never exceed the rewards
-///    accrued, so repeating it only moves the holder's own rewards to the
-///    holder sooner. No operator key or `BoundedAction` is needed. This is
-///    the pattern of permissionless claims that can only pay the token's
-///    own owner (or the token's own account).
+///  Pass-reachable through a capability link, via the issuer operator:
+///  - `claim`. The owner or an approved account may call it directly; an
+///    appointed operator may call it within the CLAIM bound (by default 24
+///    claims per receipt per day). It always pays the receipt's current
+///    owner and nobody else, cannot transfer, burn or approve anything, and
+///    its value under unlimited repetition is bounded by construction: the
+///    total paid can never exceed the rewards accrued, so repeating it only
+///    moves the owner's own rewards to the owner sooner.
+///
+///  Why claim is not permissionless: when the receipt sits in a contract
+///  (a vault, a lending pool, a listing escrow), a stranger could push the
+///  accrued rewards into that contract, where they may be stuck, and the
+///  depositor would get the receipt back with nothing accrued. Limiting
+///  callers to the owner, an approved account, or the bounded operator (the
+///  issuer's relayer, which acts only after its fresh ownership read) keeps
+///  that decision with the owner.
 ///
 ///  Needs the owner's own signed transaction:
 ///  - `unstake`: burns the receipt and returns the staked NFT. ERC-8426
@@ -42,7 +50,9 @@ import {ERC721WalletPass} from "../ERC721WalletPass.sol";
 ///  Accrual is passive: rewards grow each second with no transaction and no
 ///  event. Render the balance as a rate on the pass, or refresh it on a
 ///  schedule; `PassUpdate` fires on stake, claim and unstake.
-contract StakingPass is ERC721WalletPass, Ownable {
+contract StakingPass is ERC721WalletPass, BoundedAction, Ownable, ReentrancyGuard {
+    bytes32 public constant CLAIM = keccak256("CLAIM");
+
     using SafeERC20 for IERC20;
 
     /// @notice The collection that can be staked.
@@ -87,6 +97,22 @@ contract StakingPass is ERC721WalletPass, Ownable {
         stakedCollection = stakedCollection_;
         rewardToken = rewardToken_;
         rewardPerSecond = rewardPerSecond_;
+        // Value moves only to the owner and is capped by accrual, so the
+        // bound limits the rate of operator claims and moves no value.
+        _configureAction(CLAIM, 24, 1 days, 0, 0);
+    }
+
+    function setActionOperator(address operator, bool allowed) external onlyOwner {
+        _setActionOperator(operator, allowed);
+    }
+
+    function setActionOperatorFor(address operator, bytes32 actionId, bool allowed) external onlyOwner {
+        _setActionOperatorFor(operator, actionId, allowed);
+    }
+
+    /// @notice Change how often an operator may claim per receipt.
+    function configureClaimBound(uint32 maxPerWindow, uint32 windowSeconds) external onlyOwner {
+        _configureAction(CLAIM, maxPerWindow, windowSeconds, 0, 0);
     }
 
     function setPassBaseURI(string calldata newBase) external onlyOwner {
@@ -95,7 +121,7 @@ contract StakingPass is ERC721WalletPass, Ownable {
 
     /// @notice Stake `stakedTokenId` (approve this contract first) and
     ///  receive a receipt. The receipt mint emits `PassUpdate`.
-    function stake(uint256 stakedTokenId) external returns (uint256 receiptId) {
+    function stake(uint256 stakedTokenId) external nonReentrant returns (uint256 receiptId) {
         receiptId = ++_nextReceiptId;
         uint64 nowTs = uint64(block.timestamp);
         _positions[receiptId] = Position(stakedTokenId, nowTs, nowTs);
@@ -105,9 +131,13 @@ contract StakingPass is ERC721WalletPass, Ownable {
     }
 
     /// @notice Pay accrued rewards for `receiptId` to its current owner.
-    ///  Callable by anyone: safe to expose through a capability link.
-    function claim(uint256 receiptId) external returns (uint256 amount) {
+    ///  Callable by the owner, an approved account, or an appointed operator
+    ///  within the CLAIM bound (the pass-reachable path).
+    function claim(uint256 receiptId) external nonReentrant returns (uint256 amount) {
         address holder = _requireOwned(receiptId);
+        if (!_isAuthorized(holder, _msgSender(), receiptId)) {
+            _consumeBoundedAction(CLAIM, receiptId, _msgSender(), 0);
+        }
         amount = pendingRewards(receiptId);
         if (amount == 0) revert StakingNothingToClaim();
         uint256 available = rewardPool();
@@ -122,7 +152,7 @@ contract StakingPass is ERC721WalletPass, Ownable {
     /// @notice Burn `receiptId`, return the staked NFT and pay accrued
     ///  rewards to the receipt owner. Owner only. Never blocks on an empty
     ///  reward pool: the shortfall is recorded in `owedRewards`.
-    function unstake(uint256 receiptId) external {
+    function unstake(uint256 receiptId) external nonReentrant {
         address holder = _requireOwned(receiptId);
         if (holder != msg.sender) revert StakingNotReceiptOwner(receiptId, msg.sender);
 
@@ -145,7 +175,7 @@ contract StakingPass is ERC721WalletPass, Ownable {
     }
 
     /// @notice Pay rewards owed to the caller from an earlier unstake.
-    function claimOwed() external returns (uint256 amount) {
+    function claimOwed() external nonReentrant returns (uint256 amount) {
         amount = owedRewards[msg.sender];
         if (amount == 0) revert StakingNothingToClaim();
         uint256 balance = rewardToken.balanceOf(address(this));
@@ -167,6 +197,10 @@ contract StakingPass is ERC721WalletPass, Ownable {
     function pendingRewards(uint256 receiptId) public view returns (uint256) {
         _requireOwned(receiptId);
         return (block.timestamp - _positions[receiptId].lastClaimAt) * rewardPerSecond;
+    }
+
+    function _boundedActionOwner(uint256 tokenId) internal view override returns (address) {
+        return _requireOwned(tokenId);
     }
 
     /// @notice Reward tokens available to `claim` (balance minus owed).

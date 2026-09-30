@@ -32,6 +32,7 @@ export {
   type KvSetOptions,
   type LinkBinding,
   type LinkStore,
+  type MemoryStoreOptions,
   type NonceRecord,
   type NonceStore,
   type PassRecord,
@@ -40,6 +41,7 @@ export {
 export {
   DELEGATE_REGISTRY_V2,
   delegateRegistryAbi,
+  isNonexistentTokenRevert,
   isRevert,
   publicClientChainReader,
   type ChainReader,
@@ -65,6 +67,7 @@ export {
   type SignatureVerifier,
   type VerifyMessageClient,
 } from "./signature.js";
+export { MAX_BODY_BYTES } from "./http.js";
 export { authorize, type AuthorizeDeps, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
 export { defaultConfirmPage, newLinkToken, newSerial } from "./capability.js";
 export { watchPassUpdates, watchTransfers, type WatchEventClient, type WatchOptions } from "./watcher.js";

@@ -38,7 +38,7 @@ When the issuer resolves a manifest it calls `google.acquisitionUrl({ token, own
 
 ## Transfers
 
-A Google object is shared by every account that saved it, so a new owner gets a **new object**: on a different owner, the provider expires the previous object (state `EXPIRED`, links removed, a message saying it was replaced) and issues a fresh random object id. Generated classes set `multipleDevicesAndHoldersAllowedStatus: ONE_USER_ALL_DEVICES`, so a leaked save link cannot put the live card in a second account. `google.rotate(serial)` does the same on the owner's request.
+A Google object is shared by every account that saved it, so a new owner gets a **new object**: on a different owner, the provider expires the previous object (state `EXPIRED`, links removed, a message saying it was replaced) and issues a fresh random object id. Generated classes set `multipleDevicesAndHoldersAllowedStatus: ONE_USER_ALL_DEVICES`, so a leaked save link cannot put the live card in a second account. `google.rotate(serial)` does the same on the owner's request. Voided content (what the issuer sends for a superseded serial, on transfer or on the owner's rotation) expires the object, clears its links and posts one message saying a newer pass replaced it. Because PATCH merges, the provider always sends the links and text modules, empty when the content has none, so removed links never linger on a saved card.
 
 Pass content maps to `state` as well: `voided` becomes `INACTIVE` and a past `expiresAt` becomes `EXPIRED`, which moves the pass out of the holder's active list.
 

@@ -56,9 +56,10 @@ describe("capability links (The capability configuration)", () => {
     const dead = await h.post(links.feed!);
     expect(dead.status).toBe(404);
     expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
-    // Links minted at the transfer are issued to no one until the buyer claims.
+    // Links minted at the transfer are issued to no one until the buyer
+    // claims: 404, since no verified account was refused.
     const minted = new URL((await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!).pathname;
-    expect((await h.post(minted)).status).toBe(403);
+    expect((await h.post(minted)).status).toBe(404);
     await claim(h, buyer);
     expect((await h.post(minted)).status).toBe(200);
     expect(h.executed[0]!.account).toBe(buyer.address);
@@ -193,33 +194,55 @@ describe("rotation on the owner's signed request", () => {
     expect((await h.post(links.feed!)).status).toBe(200);
   });
 
-  it("the owner's rotate proof retires every link and download URL and keeps the serial", async () => {
+  it("the owner's rotate proof retires every link and download URL, and the response carries no manifest", async () => {
     const h = buildHarness();
     const owner = newSigner();
     const links = await issuePassTo(h, owner);
     const before = await claim(h, owner);
     const res = await h.post(ROTATE, undefined, proof(await signChallenge(h, owner, TOKEN_ID, "rotate")));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { rotated: boolean; formats: Record<string, string> };
-    expect(body.rotated).toBe(true);
-    expect(body.formats.apple).not.toBe(before.body.formats.apple);
-    // Same holder, same card: the serial is kept so the push lands on it.
-    expect(body.formats.google).toBe(before.body.formats.google);
+    // A proof for any other action MUST NOT resolve the manifest.
+    expect(await res.json()).toEqual({ ok: true, rotated: true });
     expect((await h.post(links.feed!)).status).toBe(404);
     expect((await h.get(before.body.formats.apple)).status).toBe(404);
+    // The holder of record is unchanged; the owner re-adds with an acquire proof.
+    expect((await h.issuer.stores.passes.get(TOKEN_ID))!.lastIssuedTo).toBe(owner.address);
+    const again = await claim(h, owner);
+    expect(again.body.formats.apple).not.toBe(before.body.formats.apple);
+    expect((await h.get(again.body.formats.apple)).status).toBe(200);
     const fresh = new URL((await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!).pathname;
     expect((await h.post(fresh)).status).toBe(200);
   });
 
-  it("pushes the fresh links to the owner's installed pass", async () => {
+  it("cuts off leaked copies: a new serial, and the old serial pushed superseded with no links", async () => {
     const h = buildHarness();
     const owner = newSigner();
     await issuePassTo(h, owner);
+    const oldSerial = (await h.issuer.stores.passes.get(TOKEN_ID))!.serial;
+    h.notified.length = 0;
     await h.post(ROTATE, { ...(await signChallenge(h, owner, TOKEN_ID, "rotate")) });
-    const pushed = h.notified.filter((n) => !n.ctx.content.voided);
-    expect(pushed).toHaveLength(2);
-    const fresh = Object.values(await h.issuer.capabilityLinksFor(TOKEN_ID)).sort();
-    expect(pushed[0]!.ctx.content.links!.map((l) => l.url).sort()).toEqual(fresh);
+    const newSerial = (await h.issuer.stores.passes.get(TOKEN_ID))!.serial;
+    expect(newSerial).not.toBe(oldSerial);
+    expect(h.notified.map((n) => n.format).sort()).toEqual(["apple", "google"]);
+    for (const n of h.notified) {
+      expect(n.ctx.content).toMatchObject({ serial: oldSerial, voided: true, links: [] });
+    }
+    // Nothing pushed anywhere carries the fresh links.
+    const fresh = Object.values(await h.issuer.capabilityLinksFor(TOKEN_ID));
+    expect(JSON.stringify(h.notified.map((n) => n.ctx.content))).not.toContain(fresh[0]!);
+  });
+
+  it("an owner excluded from acquire by an exclusive rental cannot rotate the renter's pass", async () => {
+    const { rental4907 } = await import("@erc8426/issuer");
+    const h = buildHarness({ entitlement: rental4907({ actions: ["acquire", "feed", "water", "levelUp"] }) });
+    const owner = newSigner();
+    const renter = newSigner();
+    h.chain.setOwner(TOKEN_ID, owner.address);
+    h.chain.setUser(TOKEN_ID, renter.address, BigInt(Math.floor(h.clock.now() / 1000) + 86_400));
+    expect((await claim(h, renter)).res.status).toBe(200);
+    const res = await h.post(ROTATE, await signChallenge(h, owner, TOKEN_ID, "rotate"));
+    expect(res.status).toBe(403);
+    expect((await h.issuer.stores.passes.get(TOKEN_ID))!.lastIssuedTo).toBe(renter.address);
   });
 
   it("programmatic rotate retires links too", async () => {

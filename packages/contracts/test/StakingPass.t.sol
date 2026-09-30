@@ -7,6 +7,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 import {StakingPass} from "../src/examples/StakingPass.sol";
+import {BoundedAction} from "../src/utils/BoundedAction.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 import {MockERC721} from "../src/mocks/MockERC721.sol";
 
@@ -31,6 +32,8 @@ contract StakingPassTest is Test {
         reward = new MockERC20("Reward", "RWD", 18);
         staking = new StakingPass("https://stake.example/", issuer, IERC721(address(nfts)), IERC20(address(reward)), RATE);
         reward.mint(address(staking), 1_000e18);
+        vm.prank(issuer);
+        staking.setActionOperator(relayer, true);
         nftId = nfts.mint(holder);
     }
 
@@ -67,7 +70,7 @@ contract StakingPassTest is Test {
         assertEq(staking.pendingRewards(r), RATE * 1 days);
     }
 
-    function test_AnyoneCanClaimButOnlyOwnerIsPaid() public {
+    function test_OperatorClaimPaysOnlyOwner() public {
         uint256 r = _stake();
         vm.warp(block.timestamp + 1 days);
         uint256 expected = RATE * 1 days;
@@ -76,7 +79,7 @@ contract StakingPassTest is Test {
         emit Claimed(r, holder, expected);
         vm.expectEmit(true, false, false, true, address(staking));
         emit PassUpdate(r);
-        vm.prank(relayer); // a forwarded link, a relayer, anyone
+        vm.prank(relayer); // the issuer's relayer, following a pass link
         staking.claim(r);
 
         assertEq(reward.balanceOf(holder), expected);
@@ -100,6 +103,7 @@ contract StakingPassTest is Test {
         for (uint256 i; i < gaps.length; ++i) {
             vm.warp(block.timestamp + bound(gaps[i], 0, 30 days));
             // Some claims revert (nothing accrued yet); only the totals matter.
+            vm.prank(holder);
             (bool ok,) = address(staking).call(abi.encodeCall(StakingPass.claim, (r)));
             ok;
         }
@@ -112,6 +116,7 @@ contract StakingPassTest is Test {
         vm.warp(block.timestamp + 1 days);
         vm.prank(holder);
         staking.transferFrom(holder, buyer, r);
+        vm.prank(relayer);
         staking.claim(r);
         assertEq(reward.balanceOf(buyer), RATE * 1 days);
         assertEq(reward.balanceOf(holder), 0);
@@ -125,7 +130,53 @@ contract StakingPassTest is Test {
         vm.stopPrank();
         vm.warp(block.timestamp + 1 days);
         vm.expectRevert(abi.encodeWithSelector(StakingPass.StakingInsufficientRewardPool.selector, RATE * 1 days, 0));
+        vm.prank(holder);
         dry.claim(r);
+    }
+
+    function test_StrangerCannotClaim() public {
+        uint256 r = _stake();
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionUnauthorizedOperator.selector, buyer));
+        vm.prank(buyer);
+        staking.claim(r);
+    }
+
+    function test_OwnerAndApprovedCanClaim() public {
+        uint256 r = _stake();
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(holder);
+        staking.claim(r);
+        vm.prank(holder);
+        staking.approve(buyer, r);
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(buyer); // approved: still pays the owner
+        staking.claim(r);
+        assertEq(reward.balanceOf(holder), 2 * RATE * 1 days);
+        assertEq(reward.balanceOf(buyer), 0);
+    }
+
+    function test_OperatorClaimsAreRateLimited() public {
+        uint256 r = _stake();
+        vm.startPrank(relayer);
+        for (uint256 i; i < 24; ++i) {
+            vm.warp(block.timestamp + 60);
+            staking.claim(r);
+        }
+        vm.warp(block.timestamp + 60);
+        vm.expectRevert();
+        staking.claim(r);
+        vm.stopPrank();
+    }
+
+    function test_OwnerRevokesClaimOperator() public {
+        uint256 r = _stake();
+        vm.warp(block.timestamp + 1 days);
+        vm.prank(holder);
+        staking.setAllOperatorsRevoked(r, true);
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionOperatorRevoked.selector, r, relayer));
+        vm.prank(relayer);
+        staking.claim(r);
     }
 
     function test_UnstakeReturnsNftAndPays() public {

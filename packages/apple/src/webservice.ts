@@ -1,7 +1,7 @@
 import { PKPASS_MEDIA_TYPE } from "@erc8426/core";
 
 import type { ApplePassRecord, ApplePassStore } from "./store.js";
-import { responseBody, safeEqual } from "./util.js";
+import { readJsonCapped, responseBody, safeEqual } from "./util.js";
 
 /// Apple's PassKit Web Service as one Fetch API handler, so it mounts in any
 ///  runtime that speaks Request and Response (Node 20+, Next.js route
@@ -47,6 +47,11 @@ export interface PassKitWebServiceOptions {
   onLog?(lines: string[]): void;
 }
 
+/// Body caps. The log route is unauthenticated by Apple's design, so its
+///  body is bounded before it is parsed; a registration body is one push
+///  token and needs far less.
+export const MAX_LOG_BODY_BYTES = 16 * 1024;
+export const MAX_REGISTRATION_BODY_BYTES = 1024;
 const MAX_LOG_ENTRIES = 20;
 const MAX_LOG_CHARS = 300;
 /// Apple push tokens are hex; bound the length so the store never holds junk.
@@ -94,7 +99,9 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
     // POST /v1/log
     if (seg.length === 2 && seg[1] === "log") {
       if (method !== "POST") return empty(405);
-      const body = (await req.json().catch(() => null)) as { logs?: unknown } | null;
+      const parsed = await readJsonCapped(req, MAX_LOG_BODY_BYTES);
+      if (parsed === "too_large") return empty(413);
+      const body = parsed as { logs?: unknown } | null;
       const logs = Array.isArray(body?.logs) ? body.logs : [];
       const safe = logs
         .slice(0, MAX_LOG_ENTRIES)
@@ -134,7 +141,9 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
         // new devices to the serial it no longer represents.
         const a = await auth(req, serial);
         if (a.result !== "current") return empty(401);
-        const body = (await req.json().catch(() => null)) as { pushToken?: unknown } | null;
+        const parsed = await readJsonCapped(req, MAX_REGISTRATION_BODY_BYTES);
+        if (parsed === "too_large") return empty(413);
+        const body = parsed as { pushToken?: unknown } | null;
         const pushToken = body?.pushToken;
         if (typeof pushToken !== "string" || !PUSH_TOKEN_RE.test(pushToken)) return empty(400);
         const created = await opts.store.register({ deviceLibraryIdentifier: device, passTypeIdentifier: passType, serial, pushToken });

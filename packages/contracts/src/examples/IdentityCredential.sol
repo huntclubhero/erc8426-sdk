@@ -16,8 +16,13 @@ import {IERC5192} from "../interfaces/IERC5192.sol";
 ///  the chain with `isValid`.
 /// @dev Soulbound per ERC-5192: `locked` is always true, `Locked` is emitted
 ///  at issue, and transfers and approvals revert. The holder may burn
-///  (renounce) their own credential; the attester revokes by flagging, so the
-///  record survives for audit.
+///  (renounce) their own credential; the attester revokes by flagging. The
+///  credential record survives both, so a revocation stays on chain for
+///  audit even after the holder renounces.
+///
+///  Only the attester that issued a credential may revoke or extend it (and
+///  only while it still holds ATTESTER_ROLE); DEFAULT_ADMIN_ROLE may override,
+///  for example to act on a compromised attester's credentials.
 ///
 ///  Capability analysis (ERC-8426): nothing here is reachable through a
 ///  capability link. Issue, revoke and extend need the attester's
@@ -57,6 +62,8 @@ contract IdentityCredential is ERC721WalletPass, AccessControl, IERC5192 {
     error CredentialNotHolder(uint256 tokenId, address caller);
     error CredentialAlreadyRevoked(uint256 tokenId);
     error CredentialInvalidExpiry();
+    error CredentialNotAttester(uint256 tokenId, address caller);
+    error CredentialUnknown(uint256 tokenId);
 
     constructor(string memory passBaseURI_, address admin)
         ERC721("Identity Credential", "IDC")
@@ -83,18 +90,20 @@ contract IdentityCredential is ERC721WalletPass, AccessControl, IERC5192 {
         emit CredentialIssued(tokenId, to, msg.sender, claimHash, expiresAt);
     }
 
-    function revoke(uint256 tokenId) external onlyRole(ATTESTER_ROLE) {
+    function revoke(uint256 tokenId) external {
         _requireOwned(tokenId);
         Credential storage c = _credentials[tokenId];
+        _checkAttesterOf(tokenId, c);
         if (c.revoked) revert CredentialAlreadyRevoked(tokenId);
         c.revoked = true;
         emit CredentialRevoked(tokenId, msg.sender);
         _passUpdate(tokenId);
     }
 
-    function extend(uint256 tokenId, uint64 expiresAt) external onlyRole(ATTESTER_ROLE) {
+    function extend(uint256 tokenId, uint64 expiresAt) external {
         _requireOwned(tokenId);
         Credential storage c = _credentials[tokenId];
+        _checkAttesterOf(tokenId, c);
         if (c.revoked) revert CredentialAlreadyRevoked(tokenId);
         if (expiresAt <= c.expiresAt) revert CredentialInvalidExpiry();
         c.expiresAt = expiresAt;
@@ -108,10 +117,10 @@ contract IdentityCredential is ERC721WalletPass, AccessControl, IERC5192 {
 
     // Holder
 
-    /// @notice Burn your own credential.
+    /// @notice Burn your own credential. The record (including any
+    ///  revocation) is kept for audit; only the token is burned.
     function renounce(uint256 tokenId) external {
         if (_requireOwned(tokenId) != msg.sender) revert CredentialNotHolder(tokenId, msg.sender);
-        delete _credentials[tokenId];
         _burn(tokenId);
     }
 
@@ -133,9 +142,12 @@ contract IdentityCredential is ERC721WalletPass, AccessControl, IERC5192 {
         return true;
     }
 
+    /// @notice The credential record, also for a renounced (burned) token.
+    ///  Reverts only for an id that was never issued.
     function credential(uint256 tokenId) external view returns (Credential memory) {
-        _requireOwned(tokenId);
-        return _credentials[tokenId];
+        Credential memory c = _credentials[tokenId];
+        if (c.issuedAt == 0) revert CredentialUnknown(tokenId);
+        return c;
     }
 
     /// @notice Exists, not revoked, not expired.
@@ -162,6 +174,13 @@ contract IdentityCredential is ERC721WalletPass, AccessControl, IERC5192 {
         returns (bool)
     {
         return interfaceId == ERC5192_INTERFACE_ID || super.supportsInterface(interfaceId);
+    }
+
+    /// @dev The issuing attester (still holding ATTESTER_ROLE), or an admin.
+    function _checkAttesterOf(uint256 tokenId, Credential storage c) private view {
+        address caller = _msgSender();
+        bool issuer = caller == c.attester && hasRole(ATTESTER_ROLE, caller);
+        if (!issuer && !hasRole(DEFAULT_ADMIN_ROLE, caller)) revert CredentialNotAttester(tokenId, caller);
     }
 
     /// @dev Only mint (from zero) and burn (to zero) are allowed.

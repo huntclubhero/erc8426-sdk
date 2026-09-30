@@ -127,11 +127,12 @@ export interface Issuer {
   issueChallenge(input: { tokenId: string | number | bigint; account: string; action?: string }): Promise<IssuedChallenge>;
   /// Run the two-check floor for a signed proof. Spends the nonce.
   authorize(input: AuthorizeInput): Promise<AuthorizeResult>;
-  /// Rotate every link for a token (owner request). The caller is
-  ///  responsible for having authorized the request; the HTTP rotate route
-  ///  does so with a signed rotate proof. `account` is who the fresh links are
-  ///  issued to (default: the current holder of record).
-  rotate(tokenId: string | number | bigint, options?: { account?: string }): Promise<void>;
+  /// Rotate every link for a token (owner request): a new serial, fresh
+  ///  links, and the old serial pushed as superseded so leaked copies go
+  ///  dead. The holder of record is unchanged; they re-add the pass through
+  ///  the manifest. The caller is responsible for having authorized the
+  ///  request; the HTTP rotate route does so with a signed rotate proof.
+  rotate(tokenId: string | number | bigint): Promise<void>;
   /// A transfer was observed (watcher, indexer webhook). Rotates the token's
   ///  links and marks the previous holder's pass superseded. A transfer to
   ///  the zero address is a burn: the holder's passes are voided (without
@@ -166,7 +167,9 @@ export interface IssuerInternals {
   entitled(tokenId: string, account: Address, action: string): Promise<EntitlementResult>;
   ownerOf(tokenId: string): Promise<Address | null>;
   recordIssuance(tokenId: string, account: Address): Promise<PassRecord>;
-  rotateOnRequest(tokenId: string, account: Address): Promise<PassRecord>;
+  rotateOnRequest(tokenId: string): Promise<PassRecord>;
+  /// The account passes were last issued to, or null.
+  holderOf(tokenId: string): Promise<Address | null>;
   buildManifest(record: PassRecord, owner: Address): Promise<PassManifest>;
   renderContent(record: PassRecord, owner: Address, superseded: boolean): Promise<PassContent>;
   resolveLink(linkToken: string, kind: LinkBinding["kind"]): Promise<{ binding: LinkBinding; record: PassRecord } | null>;
@@ -299,18 +302,21 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   }
 
   // Retire every link and download token the record holds and mint fresh
-  // ones. A change of holder also gets a new serial, and the previous
-  // holder's pass is pushed as superseded; a rotation on the owner's request
-  // keeps the serial and pushes the fresh links to the owner's own pass.
+  // ones under a NEW serial, then push the old serial as superseded (voided,
+  // no links). Every copy of the old pass, the holder's own and any that
+  // leaked (a forwarded .pkpass, a shared Google save link), refreshes into
+  // a dead card and never receives the new links. That is what makes a
+  // rotation on the owner's request a remedy for a leak: the owner re-adds
+  // the new pass by fetching the manifest again with an acquire proof.
+  //  - "transfer": the holder of record is cleared until the next claim.
+  //  - "claim": a new account's first claim; it becomes the holder.
+  //  - "owner_request": the holder of record is unchanged.
   async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
-    if (reason === "owner_request" && holder && record.lastIssuedTo && !isAddressEqual(holder, record.lastIssuedTo)) {
-      reason = "claim";
-    }
     const next: PassRecord = {
       ...record,
       generation: record.generation + 1,
-      serial: reason === "owner_request" ? record.serial : newSerial(),
-      lastIssuedTo: reason === "transfer" ? null : (holder ?? record.lastIssuedTo),
+      serial: newSerial(),
+      lastIssuedTo: reason === "transfer" ? null : reason === "claim" ? holder : record.lastIssuedTo,
       links: {},
       downloads: {},
       rotatedAt: nowSeconds(),
@@ -321,11 +327,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // even if deleting them below fails.
     await stores.passes.put(next);
     await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
-    if (reason !== "owner_request" && record.lastIssuedTo) {
-      await notify(record, record.lastIssuedTo, true, "supersede");
-    } else if (reason === "owner_request" && next.lastIssuedTo) {
-      await notify(next, next.lastIssuedTo, false, "rotate");
-    }
+    if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, true, "supersede");
     return next;
   }
 
@@ -434,11 +436,28 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         return record;
       }
       if (isAddressEqual(record.lastIssuedTo, account)) return record;
+      // Under an additive policy (delegation) the holder of record may still
+      // be entitled: then this is not a new holder, just another entitled
+      // account, and it shares the holder's pass rather than voiding it. The
+      // pass stays issued to the holder of record, so its links keep acting
+      // on that account's entitlement. Only when the holder of record is no
+      // longer entitled (a sale, an exclusive rental) is this a first claim.
+      let previousStillEntitled: boolean;
+      try {
+        previousStillEntitled = (await internals.entitled(tokenId, record.lastIssuedTo, ACQUIRE_ACTION)).entitled;
+      } catch {
+        throw new IssuerError("read_failed", "the fresh entitlement read of the previous holder could not be taken");
+      }
+      if (previousStillEntitled) return record;
       return rotateRecord(record, "claim", account);
     },
 
-    async rotateOnRequest(tokenId, account) {
-      return rotateRecord(await loadOrCreate(tokenId), "owner_request", account);
+    async holderOf(tokenId) {
+      return (await stores.passes.get(tokenId))?.lastIssuedTo ?? null;
+    },
+
+    async rotateOnRequest(tokenId) {
+      return rotateRecord(await loadOrCreate(tokenId), "owner_request", null);
     },
 
     async buildManifest(record, owner) {
@@ -549,11 +568,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     challengeUri,
     issueChallenge: internals.issueChallenge,
     authorize: internals.authorize,
-    async rotate(tokenId, opts = {}) {
+    async rotate(tokenId) {
       const id = normalizeTokenId(tokenId);
       const record = await stores.passes.get(id);
       if (!record) return;
-      await rotateRecord(record, "owner_request", opts.account ? getAddress(opts.account) : null);
+      await rotateRecord(record, "owner_request", null);
     },
     async onTransfer(tokenId, _from, to) {
       const id = normalizeTokenId(tokenId);

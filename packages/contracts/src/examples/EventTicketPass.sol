@@ -55,12 +55,16 @@ contract EventTicketPass is ERC721WalletPass, ERC2981, AccessControl {
     mapping(uint256 showId => Show) private _shows;
     mapping(uint256 tokenId => uint256 showId) public showOf;
     mapping(uint256 tokenId => uint64) public checkedInAt;
+
+    /// @notice How long before a show starts the doors open for check-in.
+    uint64 public doorsOpenBefore = 2 hours;
     uint256 public showCount;
     uint256 private _nextReservedId = 1;
 
     event ShowCreated(uint256 indexed showId, uint64 startsAt, uint64 endsAt, uint256 firstTokenId, uint256 capacity);
     event CheckedIn(uint256 indexed tokenId, uint256 indexed showId, address indexed door);
     event ShowEnded(uint256 indexed showId);
+    event DoorsOpenBeforeSet(uint64 secondsBeforeStart);
 
     error TicketInvalidShow(uint256 showId);
     error TicketInvalidSchedule();
@@ -69,6 +73,7 @@ contract EventTicketPass is ERC721WalletPass, ERC2981, AccessControl {
     error TicketShowOver(uint256 showId);
     error TicketShowNotOver(uint256 showId);
     error TicketShowAlreadyEnded(uint256 showId);
+    error TicketDoorsNotOpen(uint256 showId, uint256 doorsOpenAt);
 
     constructor(string memory passBaseURI_, address admin, address royaltyReceiver, uint96 royaltyBps)
         ERC721("Event Ticket Pass", "TIX")
@@ -110,18 +115,35 @@ contract EventTicketPass is ERC721WalletPass, ERC2981, AccessControl {
         _setPassBaseURI(newBase);
     }
 
+    /// @notice Set how long before a show's start check-in opens.
+    function setDoorsOpenBefore(uint64 secondsBeforeStart) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        doorsOpenBefore = secondsBeforeStart;
+        emit DoorsOpenBeforeSet(secondsBeforeStart);
+    }
+
+    /// @notice When check-in opens for `showId`.
+    function doorsOpenAt(uint256 showId) public view returns (uint256) {
+        Show storage s = _requireShow(showId);
+        return s.startsAt > doorsOpenBefore ? s.startsAt - doorsOpenBefore : 0;
+    }
+
     function setDefaultRoyalty(address receiver, uint96 bps) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setDefaultRoyalty(receiver, bps);
     }
 
     // Door
 
-    /// @notice Check ticket `tokenId` in. Once per ticket, before the show ends.
+    /// @notice Check ticket `tokenId` in. Once per ticket, from the time the
+    ///  doors open (`doorsOpenBefore` ahead of the start) until the show ends.
+    ///  Refusing early check-in keeps a leaked barcode from being spent days
+    ///  before the show, which would shut the real holder out.
     function checkIn(uint256 tokenId) external onlyRole(DOOR_ROLE) {
         _requireOwned(tokenId);
         uint256 showId = showOf[tokenId];
         Show storage s = _shows[showId];
         if (block.timestamp >= s.endsAt) revert TicketShowOver(showId);
+        uint256 opensAt = doorsOpenAt(showId);
+        if (block.timestamp < opensAt) revert TicketDoorsNotOpen(showId, opensAt);
         if (checkedInAt[tokenId] != 0) revert TicketAlreadyCheckedIn(tokenId);
         checkedInAt[tokenId] = uint64(block.timestamp);
         emit CheckedIn(tokenId, showId, msg.sender);

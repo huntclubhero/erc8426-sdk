@@ -75,11 +75,11 @@ export async function main(): Promise<void> {
     await tapLink(linkOf(rotated.content, "water"));
     ok("the holder's fresh water link works");
 
-    step("Remedy 2: the owner revokes the relayer for this pet on chain");
-    await s.chain.send(holder, contract, pet.abi, "setOperatorRevoked", [1n, relayer.address, true]);
+    step("Remedy 2: the owner switches every relayer off for this pet on chain");
+    await s.chain.send(holder, contract, pet.abi, "setAllOperatorsRevoked", [1n, true]);
     await mustRefuse("play link while the relayer is revoked", () => tapLink(linkOf(rotated.content, "play")));
-    await s.chain.send(holder, contract, pet.abi, "setOperatorRevoked", [1n, relayer.address, false]);
-    ok("owner restored the relayer");
+    await s.chain.send(holder, contract, pet.abi, "setAllOperatorsRevoked", [1n, false]);
+    ok("owner switched the relayers back on (only the owner can)");
 
     step("The relayer cannot move the pet, whatever the server wants");
     const why = await expectRevert(() => s.chain.send(relayer, contract, pet.abi, "transferFrom", [holder.address, relayer.address, 1n]));

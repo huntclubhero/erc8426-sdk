@@ -1,3 +1,4 @@
+import { MAX_BODY_BYTES } from "./http.js";
 import type { Issuer } from "./issuer.js";
 
 /// Node and Express adapters for the fetch handler, typed structurally so
@@ -32,7 +33,12 @@ const SKIP_HEADERS = new Set(["connection", "keep-alive", "transfer-encoding", "
 /// Convert a Node request into a WHATWG Request. The origin is only used to
 ///  build a parseable URL: the issuer builds every absolute URL it emits from
 ///  its configured baseUrl, never from the request's Host.
-export async function toFetchRequest(req: NodeRequestLike, origin = "http://localhost"): Promise<Request> {
+///
+///  The body is read with a running byte count and never buffered past
+///  `maxBodyBytes + 1`: an oversized body is cut there, which the issuer's
+///  handler then refuses as too large, so an anonymous client cannot make
+///  the adapter hold an unbounded body in memory.
+export async function toFetchRequest(req: NodeRequestLike, origin = "http://localhost", maxBodyBytes = MAX_BODY_BYTES): Promise<Request> {
   const method = (req.method ?? "GET").toUpperCase();
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
@@ -51,8 +57,15 @@ export async function toFetchRequest(req: NodeRequestLike, origin = "http://loca
     body = typeof req.body === "string" ? req.body : new Uint8Array(req.body);
   } else {
     const chunks: Uint8Array[] = [];
-    for await (const chunk of req) chunks.push(typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk);
-    const total = chunks.reduce((n, c) => n + c.length, 0);
+    let total = 0;
+    for await (const raw of req) {
+      let chunk = typeof raw === "string" ? new TextEncoder().encode(raw) : raw;
+      if (total + chunk.length > maxBodyBytes + 1) chunk = chunk.subarray(0, maxBodyBytes + 1 - total);
+      chunks.push(chunk);
+      total += chunk.length;
+      // Leaving the loop stops pulling from the socket.
+      if (total > maxBodyBytes) break;
+    }
     const joined = new Uint8Array(total);
     let offset = 0;
     for (const c of chunks) {

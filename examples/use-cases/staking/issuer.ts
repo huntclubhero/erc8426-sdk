@@ -30,14 +30,16 @@ export interface StakingIssuerOptions {
   domain: string;
   contract: Address;
   chain: Chain8426;
-  /// Pays gas for claims. Holds no authority: claim is permissionless.
+  /// The appointed claim operator. Its only authority is CLAIM, rate
+  ///  limited on chain, and a claim can only pay the owner.
   relayer: Actor;
   providers: PassDeliveryProvider[];
 }
 
-/// The claim action. Capability-safe by construction: StakingPass.claim is
-///  permissionless, pays ONLY the receipt's current owner, and never more
-///  than has accrued, so repeating it only pays the owner sooner.
+/// The claim action. Capability-safe by construction: StakingPass.claim pays
+///  ONLY the receipt's current owner, never more than has accrued, and the
+///  relayer's calls are rate limited on chain (24 per receipt per day), so
+///  repeating it only pays the owner sooner.
 export const claimAction = (o: StakingIssuerOptions): ActionDefinition => ({
   description: "Claim accrued rewards to the receipt owner's wallet",
   capability: true,
@@ -54,7 +56,7 @@ export const claimAction = (o: StakingIssuerOptions): ActionDefinition => ({
 });
 
 /// Staking receipts on a pass, mirroring the Rare Friends Pass split: Claim
-///  is a one-tap capability link (a relayer sends a permissionless call that
+///  is a one-tap capability link (the appointed relayer sends a claim that
 ///  can only pay the owner), while Unstake burns the receipt and returns the
 ///  NFT, which a capability link MUST NOT do, so its link only opens a page
 ///  where the owner confirms the transaction in their own wallet.

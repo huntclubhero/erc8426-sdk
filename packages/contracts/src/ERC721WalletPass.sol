@@ -50,8 +50,13 @@ abstract contract ERC721WalletPass is ERC721, IERC4906, IERC721WalletPass {
     ///  exceed `to`.
     error ERC721WalletPassInvalidRange(uint256 fromTokenId, uint256 toTokenId);
 
+    /// @notice Raised by `passURI` while no pass base URI is set: an empty
+    ///  string is not a URI that resolves to a manifest, so the view refuses
+    ///  rather than returning one.
+    error ERC721WalletPassNoPassBaseURI();
+
     /// @param passBaseURI_ Initial pass base URI. May be empty and set later
-    ///  with `_setPassBaseURI`.
+    ///  with `_setPassBaseURI`; until then `passURI` reverts.
     constructor(string memory passBaseURI_) {
         _passBaseURI = passBaseURI_;
     }
@@ -59,11 +64,13 @@ abstract contract ERC721WalletPass is ERC721, IERC4906, IERC721WalletPass {
     /// @inheritdoc IERC721WalletPass
     /// @dev Reverts with `ERC721NonexistentToken` for an unminted or burned
     ///  token, as the specification requires ("Throws if `tokenId` is not a
-    ///  valid token").
+    ///  valid token"), and with `ERC721WalletPassNoPassBaseURI` while no base
+    ///  is set, because the returned URI MUST resolve to a pass manifest.
     function passURI(uint256 tokenId) public view virtual returns (string memory) {
         _requireOwned(tokenId);
         string memory base = _passBaseURI;
-        return bytes(base).length == 0 ? "" : string.concat(base, tokenId.toString());
+        if (bytes(base).length == 0) revert ERC721WalletPassNoPassBaseURI();
+        return string.concat(base, tokenId.toString());
     }
 
     /// @notice The current pass base URI.

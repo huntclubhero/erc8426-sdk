@@ -8,6 +8,7 @@ import { createWalletPassClient } from "@erc8426/client";
 import {
   AddToWalletButton,
   WalletPassProvider,
+  defaultNavigate,
   usePassUpdates,
   useSupportsWalletPass,
   useWalletPass,
@@ -147,5 +148,28 @@ describe("hooks", () => {
   it("throws a clear error outside a provider", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect(() => renderHook(() => useSupportsWalletPass(CONTRACT))).toThrow(/WalletPassProvider/);
+  });
+});
+
+describe("audit #2: navigation is https only", () => {
+  it("defaultNavigate refuses javascript:, data: and non-local http", () => {
+    for (const url of ["javascript:alert(1)", "data:text/html,x", "http://issuer.example/p.pkpass"]) {
+      expect(() => defaultNavigate(url)).toThrow(/not https/);
+    }
+  });
+
+  it("the hook never hands an unsafe URL to a custom navigate", async () => {
+    const { client } = setup("public");
+    const hostile = { ...client, addToWallet: async () => ({ url: "javascript:alert(1)", platform: "apple", configuration: "public", manifest: { formats: {} } }) } as unknown as typeof client;
+    const navigate = vi.fn();
+    const onError = vi.fn();
+    const wrapper = ({ children }: { children: ReactNode }) => <WalletPassProvider client={hostile}>{children}</WalletPassProvider>;
+    const { result } = renderHook(() => useWalletPass({ contract: CONTRACT, tokenId: 1, platform: "apple", navigate, onError }), { wrapper });
+    await act(async () => {
+      await result.current.addToWallet();
+    });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(result.current.status).toBe("error");
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "invalid_manifest" }));
   });
 });

@@ -764,6 +764,11 @@
   },
   {
     "type": "error",
+    "name": "ERC721WalletPassNoPassBaseURI",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "OwnableInvalidOwner",
     "inputs": [
       {

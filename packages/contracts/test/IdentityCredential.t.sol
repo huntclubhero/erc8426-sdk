@@ -103,13 +103,30 @@ contract IdentityCredentialTest is Test {
     }
 
     function test_HolderCannotRevokeOrExtend() public {
-        bytes32 role = ids.ATTESTER_ROLE();
         vm.startPrank(holder);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, holder, role));
+        vm.expectRevert(abi.encodeWithSelector(IdentityCredential.CredentialNotAttester.selector, id, holder));
         ids.revoke(id);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, holder, role));
+        vm.expectRevert(abi.encodeWithSelector(IdentityCredential.CredentialNotAttester.selector, id, holder));
         ids.extend(id, expiresAt + 1);
         vm.stopPrank();
+    }
+
+    function test_AttesterWhoLostRoleCannotRevoke() public {
+        // holder is the admin of this deployment; attester issues, then loses the role.
+        IdentityCredential second = new IdentityCredential("https://id.example/", holder);
+        bytes32 role = second.ATTESTER_ROLE();
+        vm.prank(holder);
+        second.grantRole(role, attester);
+        vm.prank(attester);
+        uint256 t = second.issue(holder, CLAIM, expiresAt);
+        vm.prank(holder);
+        second.revokeRole(role, attester);
+        vm.expectRevert(abi.encodeWithSelector(IdentityCredential.CredentialNotAttester.selector, t, attester));
+        vm.prank(attester);
+        second.revoke(t);
+        vm.prank(holder); // DEFAULT_ADMIN_ROLE override
+        second.revoke(t);
+        assertTrue(second.credential(t).revoked);
     }
 
     function test_ExpiryAndExtend() public {

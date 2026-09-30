@@ -164,6 +164,38 @@
   },
   {
     "type": "function",
+    "name": "doorsOpenAt",
+    "inputs": [
+      {
+        "name": "showId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "doorsOpenBefore",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "endShow",
     "inputs": [
       {
@@ -540,6 +572,19 @@
   },
   {
     "type": "function",
+    "name": "setDoorsOpenBefore",
+    "inputs": [
+      {
+        "name": "secondsBeforeStart",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setPassBaseURI",
     "inputs": [
       {
@@ -817,6 +862,19 @@
         "type": "address",
         "indexed": true,
         "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "DoorsOpenBeforeSet",
+    "inputs": [
+      {
+        "name": "secondsBeforeStart",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
       }
     ],
     "anonymous": false
@@ -1216,10 +1274,31 @@
   },
   {
     "type": "error",
+    "name": "ERC721WalletPassNoPassBaseURI",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "TicketAlreadyCheckedIn",
     "inputs": [
       {
         "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TicketDoorsNotOpen",
+    "inputs": [
+      {
+        "name": "showId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "doorsOpenAt",
         "type": "uint256",
         "internalType": "uint256"
       }

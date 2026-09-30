@@ -661,5 +661,10 @@
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "ERC721WalletPassNoPassBaseURI",
+    "inputs": []
   }
 ]

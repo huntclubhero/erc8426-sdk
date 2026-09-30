@@ -91,7 +91,7 @@ All under `basePath` (default `/wallet-pass`). Every response carries `Cache-Con
 | `GET /:tokenId` | The manifest. Public: served to anyone. Gated: 401 `{ error: "proof_required", challenge }` without a proof, the manifest with a valid `acquire` proof in `X-Wallet-Pass-Proof` / `X-Wallet-Pass-Signature`. |
 | `GET /:tokenId/challenge?address=&action=` | A fresh ERC-4361 challenge. `action` defaults to `acquire`. 400 on a missing or invalid address or an unknown action. |
 | `POST /:tokenId/actions/:action` | Signed action. Body `{ message, signature, params? }` (or the proof headers). |
-| `POST /:tokenId/rotate` | Rotate every link on the owner's signed `rotate` proof. |
+| `POST /:tokenId/rotate` | Rotate on a signed `rotate` proof from the holder of record (or an account entitled to acquire). Answers `{ ok, rotated }` only, never the manifest: the holder re-adds the new pass with an acquire proof. |
 | `GET /links/:link` | Describe a capability link. No side effects: a confirm page for browsers, JSON otherwise. |
 | `POST /links/:link` | Perform a capability link's action. |
 | `GET /passes/:link` | Download a pass file from a file provider (Apple `.pkpass`). `HEAD` answers the same headers with no body. |
@@ -112,7 +112,10 @@ Status codes follow the spec: 400 malformed or mis-scoped, 401 failed possession
 | Contract accounts | With `publicClient`, signatures verify through `verifyMessage` (ERC-1271 and ERC-6492). |
 | Failed read reported as a refusal | Reads throw on failure; the issuer answers 503, and 403 means only "not entitled". |
 | Previous owner's URLs after transfer | Rotation on an observed transfer (`onTransfer`, watcher) or on the new owner's first claim, whichever comes first. The previous pass is pushed as voided. |
-| Leaked URL under an unchanged owner | Rotation on the owner's signed request (a MUST in the capability configuration). |
+| Leaked URL or pass under an unchanged owner | Rotation on the owner's signed request (a MUST in the capability configuration). It mints a new serial and pushes the old one as voided with no links, so a forwarded .pkpass or shared Google object refreshes into a dead card and never receives the new links. |
+| Rotate used to take a pass | The rotate route never returns the manifest, never changes the holder of record, and requires the holder of record or an account entitled to acquire, so an owner excluded by an exclusive rental cannot disturb the renter's pass. |
+| Unbounded pre-auth input | Bodies are read with a running byte count and cut at 64 KiB (`MAX_BODY_BYTES`), in the fetch handler and the Node adapter alike; oversized proof headers and token ids are refused before parsing. |
+| A revert read as a burn | Only a nonexistent-token revert (`ERC721NonexistentToken`, or the OpenZeppelin 4 strings) or a zero owner means "no owner". Any other revert (a paused contract) is `read_failed`, never a burn. |
 | Guessable links | 256-bit random link tokens, bound server-side to one token and one action or format. Serials are random. |
 | Capability link reaching a dangerous action | Config validation refuses capability actions without a documented `bound`, flagged `transfersOrBurns`, or outside the gated configuration. |
 | Prefetching crawlers triggering actions | `GET` on a link never executes or reads; only `POST` does. |
@@ -130,7 +133,7 @@ createIssuer({ ...config, entitlement: anyOf(rental4907(), delegateRegistry()) }
 ```
 
 - `rental4907({ exclusive = true, actions? })`: an active ERC-4907 user is entitled, and by default exclusive of the owner (and everyone else) for covered actions. An expired rental falls back to the owner.
-- `delegateRegistry({ registry?, rights? })`: delegate.xyz v2 delegates of the current owner are entitled in addition to the owner.
+- `delegateRegistry({ registry?, rights? })`: delegate.xyz v2 delegates of the current owner are entitled in addition to the owner. Because delegation is additive, a delegate's claim does not void the owner's pass: while the holder of record is still entitled, another entitled account shares that pass (same serial, same links, acting on the holder's entitlement). The residual: revoking a delegation does not retire links the delegate already holds; the owner rotates on request to cut them off, then re-adds the pass.
 - `anyOf(...)` precedence: any veto (an exclusive rental) wins, otherwise the first allow, otherwise refused.
 
 ## Chain events
@@ -153,11 +156,15 @@ await issuer.onPassUpdate(fromTokenId, toTokenId); // inclusive range
 
 A lagging watcher degrades hygiene, never authorization: the fresh read refuses the previous owner's links until rotation catches up.
 
-Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so either hook may see it first. `onTransfer(id, from, zeroAddress)` treats it as a burn, and `onPassUpdate` takes a fresh `ownerOf` read before rendering and treats a token with no owner the same way. Either way the holder's installed passes are pushed as voided and every link and download is retired, and `render` is never called for the dead token (it would read a token that no longer exists). Pass `renderBurned` to choose what the voided card says. `onPassUpdate` also rotates when the read finds the token held by someone the pass was not issued to (a transfer no watcher has seen), so it never pushes a new owner's state to the previous holder's pass. A read that cannot be taken is reported through `onError` and `onPassUpdate` throws `IssuerError` `read_failed` after processing the rest of the range; nothing is rendered for that token.
+Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so either hook may see it first. `onTransfer(id, from, zeroAddress)` treats it as a burn, and `onPassUpdate` takes a fresh `ownerOf` read before rendering and treats a token with no owner the same way. Either way the holder's installed passes are pushed as voided and every link and download is retired, and `render` is never called for the dead token (it would read a token that no longer exists). Pass `renderBurned` to choose what the voided card says. `onPassUpdate` also rotates when the read finds the token held by someone the pass was not issued to (a transfer no watcher has seen), so it never pushes a new owner's state to the previous holder's pass. Only a nonexistent-token revert or a zero owner counts as burned; any other revert is a failed read. A read that cannot be taken is reported through `onError` and `onPassUpdate` throws `IssuerError` `read_failed` after processing the rest of the range; nothing is rendered for that token.
 
 ## Stores
 
-The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. `kvStores(kv)` builds all three stores on this interface:
+The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another.
+
+Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood: rate limit `GET /:tokenId/challenge` (per IP, per address) in front of the issuer, since a flood past the cap evicts honest users' pending challenges.
+
+`kvStores(kv)` builds all three stores on this interface:
 
 ```ts
 interface KeyValueStore {
@@ -215,7 +222,7 @@ Cloudflare Workers KV is eventually consistent and has no atomic read and delete
 - `createIssuer(options)` returns `{ config, stores, chain, handler, route, passUri, challengeUri, issueChallenge, authorize, rotate, onTransfer, onPassUpdate, capabilityLinksFor }`.
 - Providers: core's `PassDeliveryProvider`, either a `PassFormatProvider` (returns an acquisition URL) or a `PassFileProvider` (`passFile(ctx)` returns the file bytes and the issuer serves them at a rotating capability URL). `domain` must equal `baseUrl`'s host, because clients refuse to sign a challenge for any other domain.
 - `ActionError(status, code, message?)`: throw from `execute` to refuse with a chosen status (never 403).
-- `authorize`, `publicClientChainReader`, `publicClientSignatureVerifier`, `eoaSignatureVerifier`, `memoryStores`, `kvStores`, `memoryKv`, `toNodeHandler`, `expressMiddleware` are exported for custom wiring.
+- `issuer.rotate(tokenId)` rotates programmatically with the same effect as the route (the caller authorizes). `authorize`, `publicClientChainReader`, `publicClientSignatureVerifier`, `eoaSignatureVerifier`, `memoryStores`, `kvStores`, `memoryKv`, `toNodeHandler`, `expressMiddleware` are exported for custom wiring.
 
 ## License
 

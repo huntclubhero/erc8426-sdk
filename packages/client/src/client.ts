@@ -25,7 +25,7 @@ import { choosePlatform, detectPlatform, type FormatKey, type WalletPlatform } f
 import { checkChallengeScope, domainsForUrl, DEFAULT_MAX_CHALLENGE_TTL_SECONDS } from "./scope.js";
 import type { WalletPassSigner } from "./signer.js";
 import { normalizePassUpdateLog, type PassUpdateNotice } from "./updates.js";
-import { decodeDataUri, passBase, resolveUri, uriOrigin, type GatewayOptions } from "./uri.js";
+import { decodeDataUri, isAllowedUrl, isSafeNavigationUrl, passBase, resolveUri, uriOrigin, type GatewayOptions } from "./uri.js";
 
 /// A token as callers usually hold it. The chain comes from the public client.
 export interface TokenInput {
@@ -41,10 +41,18 @@ export interface WalletPassClientOptions extends GatewayOptions {
   fetch?: typeof fetch;
   /// Longest challenge lifetime the client will agree to sign. Default 3600.
   maxChallengeTtlSeconds?: number;
-  /// Extra SIWE domains accepted in challenges, beyond the host the challenge
-  ///  was fetched from. For development setups whose verifier identity is not
-  ///  the serving host; leave empty in production.
+  /// Extra SIWE domains accepted in challenges, beyond the host the proof is
+  ///  sent to. For development setups whose verifier identity is not the
+  ///  serving host; leave empty in production.
   trustedChallengeDomains?: readonly string[];
+  /// Follow a challenge URL on a different origin from the endpoint the proof
+  ///  will be presented to. Off by default: a signature for one verifier must
+  ///  never be handed to another, and a manifest server must not be able to
+  ///  steer the client at arbitrary hosts. Development only.
+  allowCrossOriginChallenge?: boolean;
+  /// Fetch plain http from non-loopback hosts. Off by default (https, or
+  ///  http on localhost only). Server-side development only.
+  allowInsecureHttp?: boolean;
 }
 
 export type ManifestConfiguration = "public" | "gated";
@@ -94,6 +102,10 @@ export interface ChallengeResult {
 export interface RequestChallengeOptions {
   /// Challenge endpoint to use instead of discovering it.
   endpoint?: string;
+  /// The URL the signed proof will be presented to. The challenge must name
+  ///  its host as the SIWE domain and be served from its origin. Defaults to
+  ///  the resolved passURI.
+  presentTo?: string;
   signal?: AbortSignal;
 }
 
@@ -196,6 +208,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
   };
   const maxTtlSeconds = options.maxChallengeTtlSeconds ?? DEFAULT_MAX_CHALLENGE_TTL_SECONDS;
   const trustedDomains = options.trustedChallengeDomains ?? [];
+  const urlPolicy = { allowInsecureHttp: options.allowInsecureHttp === true };
 
   // The chain id is fixed for a client, so it is the one thing worth memoizing.
   let chainIdPromise: Promise<number> | undefined;
@@ -211,6 +224,13 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
   const toRef = async (token: TokenInput): Promise<TokenRef> => tokenRef(await chainId(), token.contract, token.tokenId);
 
   const request = async (url: string, init: RequestInit): Promise<{ res: Response; body: unknown }> => {
+    // Every URL here came from a contract or an issuer response, so none is
+    // fetched unless it is https (or http on a loopback host).
+    if (!isAllowedUrl(url, urlPolicy)) {
+      throw new WalletPassClientError("unsupported", `refusing to fetch ${url}: only https (or http on localhost) is allowed`, {
+        source: "client",
+      });
+    }
     let res: Response;
     try {
       res = await doFetch(url, init);
@@ -281,14 +301,27 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     return resolveUri(uri, gateways);
   }
 
+  /// Fetch and scope-check a challenge. `presentTo` is the URL the signed
+  ///  proof will be sent to: the challenge must be served from that origin
+  ///  and must name that host as its verifier, so a signature meant for one
+  ///  verifier can never be handed to another.
   async function fetchChallenge(
     challengeUrl: string,
+    presentTo: string,
     action: string,
     ref: TokenRef,
     account: Address,
     signal?: AbortSignal,
   ): Promise<ChallengeResult> {
     const url = new URL(challengeUrl);
+    const target = new URL(presentTo);
+    if (url.origin !== target.origin && !options.allowCrossOriginChallenge) {
+      throw new WalletPassClientError(
+        "domain_mismatch",
+        `refusing a challenge from ${url.origin} for a proof that would be sent to ${target.origin}`,
+        { source: "client" },
+      );
+    }
     // searchParams.set, not concatenation: an issuer's 401 can name a
     // challenge URL that already carries a query, such as ?action=rotate.
     // The action is always explicit so a URL naming another one is overridden.
@@ -312,7 +345,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       token: ref,
       action,
       account,
-      domains: [...domainsForUrl(url.toString()), ...trustedDomains],
+      domains: [...domainsForUrl(target.toString()), ...trustedDomains],
       maxTtlSeconds: maxTtlSeconds,
     });
     if (!scope.ok) {
@@ -362,7 +395,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       );
     }
     const ref = await toRef(token);
-    const challenge = await fetchChallenge(challengeUrl, ACQUIRE_ACTION, ref, opts.signer.address, opts.signal);
+    const challenge = await fetchChallenge(challengeUrl, url, ACQUIRE_ACTION, ref, opts.signer.address, opts.signal);
     const signature = await opts.signer.signMessage({ message: challenge.message });
     const second = await request(url, {
       method: "GET",
@@ -383,7 +416,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     if (!url) {
       throw new WalletPassClientError("unsupported", `this pass has no ${platform} format`, { source: "client" });
     }
-    return url;
+    return safeNavigation(url);
   }
 
   async function addToWallet(token: TokenInput, opts: AddToWalletOptions = {}): Promise<AddToWalletResult> {
@@ -404,11 +437,21 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       );
     }
     return {
-      url: result.manifest.formats[platform] as string,
+      url: safeNavigation(result.manifest.formats[platform] as string),
       platform,
       configuration: result.configuration,
       manifest: result.manifest,
     };
+  }
+
+  /// Defence in depth: core's parseManifest already refuses non-https
+  ///  acquisition URLs, but nothing that reaches window.location may be
+  ///  anything else, whatever path it took.
+  function safeNavigation(url: string): string {
+    if (!isSafeNavigationUrl(url)) {
+      throw new WalletPassClientError("invalid_manifest", "refusing an acquisition URL that is not https", { source: "client" });
+    }
+    return url;
   }
 
   async function readMetadataMirror(token: TokenInput): Promise<MetadataMirrorResult> {
@@ -436,7 +479,10 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     return { authoritative: false, tokenUri, result: readMirror(metadata) };
   }
 
-  async function discoverChallengeEndpoint(token: TokenInput, signal?: AbortSignal): Promise<{ challengeUrl: string; base: string }> {
+  async function discoverChallengeEndpoint(
+    token: TokenInput,
+    signal?: AbortSignal,
+  ): Promise<{ challengeUrl: string; base: string; url: string }> {
     const url = resolvePassURI(await getPassURI(token));
     if (/^data:/i.test(url)) {
       throw new WalletPassClientError("unsupported", "an inline passURI has no issuer to challenge", { source: "client" });
@@ -449,7 +495,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     });
     const named = res.status === 401 ? (body as { challenge?: unknown } | null)?.challenge : undefined;
     const challengeUrl = typeof named === "string" ? new URL(named, url).toString() : `${base}/challenge`;
-    return { challengeUrl, base };
+    return { challengeUrl, base, url };
   }
 
   async function requestChallenge(
@@ -462,8 +508,14 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       throw new WalletPassClientError("unknown_action", `invalid action name: ${action}`, { source: "client" });
     }
     const ref = await toRef(token);
-    const challengeUrl = opts.endpoint ?? (await discoverChallengeEndpoint(token, opts.signal)).challengeUrl;
-    return fetchChallenge(challengeUrl, action, ref, getAddress(account), opts.signal);
+    let challengeUrl = opts.endpoint;
+    let presentTo = opts.presentTo;
+    if (!challengeUrl || !presentTo) {
+      const found = await discoverChallengeEndpoint(token, opts.signal);
+      challengeUrl ??= found.challengeUrl;
+      presentTo ??= found.url;
+    }
+    return fetchChallenge(challengeUrl, presentTo, action, ref, getAddress(account), opts.signal);
   }
 
   async function signedAction(opts: SignedActionOptions): Promise<SignedActionResult> {
@@ -486,7 +538,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       endpoint ??= `${found.base}/actions/${action}`;
       challengeUrl ??= found.challengeUrl;
     }
-    const challenge = await fetchChallenge(challengeUrl, action, ref, signer.address, opts.signal);
+    const challenge = await fetchChallenge(challengeUrl, endpoint, action, ref, signer.address, opts.signal);
     const signature = await signer.signMessage({ message: challenge.message });
     const { res, body } = await request(endpoint, {
       method: "POST",
@@ -522,7 +574,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       endpoint ??= `${found.base}/rotate`;
       challengeUrl ??= found.challengeUrl;
     }
-    const challenge = await fetchChallenge(challengeUrl, ROTATE_ACTION, ref, opts.signer.address, opts.signal);
+    const challenge = await fetchChallenge(challengeUrl, endpoint, ROTATE_ACTION, ref, opts.signer.address, opts.signal);
     const signature = await opts.signer.signMessage({ message: challenge.message });
     const { res, body } = await request(endpoint, {
       method: "POST",

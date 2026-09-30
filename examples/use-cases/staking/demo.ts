@@ -29,6 +29,7 @@ export async function main(): Promise<void> {
     const reward = await s.chain.deploy(issuerKey, "MockERC20", ["Reward", "RWD", 18]);
     const contract = await s.chain.deploy(issuerKey, "StakingPass", ["", issuerKey.address, nft, reward, parseEther("1") / BigInt(DAY)]);
     await s.chain.send(issuerKey, reward, tokenAbi, "mint", [contract, parseEther("1000")]);
+    await s.chain.send(issuerKey, contract, stakingAbi, "setActionOperator", [relayer.address, true]);
 
     const server = await startIssuerServer(({ baseUrl, domain }) =>
       createStakingIssuer({ baseUrl, domain, contract, chain: s.chain, relayer, providers: [previewProvider(push)] }),
@@ -85,6 +86,8 @@ export async function main(): Promise<void> {
     await tapLink(claim); // tapped by the stranger the link was forwarded to
     expect((await bal(stranger.address)) === 0n, "the stranger received nothing");
     ok(`the holder was paid again: ${rwd((await bal(holder.address)) - holderAfterClaim)}`);
+    const direct = await expectRevert(() => s.chain.send(stranger, contract, stakingAbi, "claim", [1n]));
+    ok(`a stranger calling claim on chain directly is refused (${direct}): only the owner, an approved account or the rate-limited relayer may claim`);
 
     step("Unstake is never pass-reachable: the relayer cannot do it");
     say(`the pass's Unstake link is a plain page: ${linkOf(pass.content, "unstake")}`);

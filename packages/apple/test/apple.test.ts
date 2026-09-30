@@ -9,6 +9,10 @@ import {
   appleFormatProvider,
   buildPkpass,
   createApnsClient,
+  fetchImage,
+  isPng,
+  isPrivateAddress,
+  MAX_LOG_BODY_BYTES,
   hexToRgb,
   newPassRecord,
   rotatedRecord,
@@ -27,6 +31,7 @@ const TEAM = "TEAM123456";
 const OWNER_A = "0x2B7E9A4c1F0d8e63A5b2C4D6E8F0A1b3C5d7E9F2";
 const OWNER_B = "0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1";
 const PUSH_TOKEN = "a".repeat(64);
+const publicDns = async () => ["93.184.216.34"];
 
 let certs: TestCerts;
 beforeAll(() => {
@@ -201,19 +206,53 @@ describe("buildPkpass", () => {
     }) as unknown as typeof fetch;
     const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM, certificates: certs };
     const files = unzip(
-      await buildPkpass(content({ images: { icon: { url: "https://cdn.example/icon.png" } } }), { ...base, imageFetch: { fetch: fakeFetch } }),
+      await buildPkpass(content({ images: { icon: { url: "https://cdn.example/icon.png" } } }), { ...base, imageFetch: { fetch: fakeFetch, lookup: publicDns } }),
     );
     expect(Buffer.from(files["icon.png"]!).equals(Buffer.from(TINY_PNG))).toBe(true);
     expect(seen).toEqual(["https://cdn.example/icon.png"]);
     await expect(
-      buildPkpass(content({ images: { icon: { url: "https://cdn.example/big.png" } } }), { ...base, imageFetch: { fetch: fakeFetch, maxBytes: 1024 } }),
+      buildPkpass(content({ images: { icon: { url: "https://cdn.example/big.png" } } }), { ...base, imageFetch: { fetch: fakeFetch, lookup: publicDns, maxBytes: 1024 } }),
     ).rejects.toThrow(/cap/);
     await expect(
-      buildPkpass(content({ images: { icon: { url: "https://cdn.example/jpeg.png" } } }), { ...base, imageFetch: { fetch: fakeFetch } }),
+      buildPkpass(content({ images: { icon: { url: "https://cdn.example/jpeg.png" } } }), { ...base, imageFetch: { fetch: fakeFetch, lookup: publicDns } }),
     ).rejects.toThrow(/PNG/);
     await expect(
-      buildPkpass(content({ images: { icon: { url: "file:///etc/passwd" } } }), { ...base, imageFetch: { fetch: fakeFetch } }),
-    ).rejects.toThrow(/http/);
+      buildPkpass(content({ images: { icon: { url: "file:///etc/passwd" } } }), { ...base, imageFetch: { fetch: fakeFetch, lookup: publicDns } }),
+    ).rejects.toThrow(/https/);
+  });
+
+  it("refuses image destinations on private networks, on every redirect hop (SSRF)", async () => {
+    const seen: string[] = [];
+    const fakeFetch = (async (url: string) => {
+      seen.push(url);
+      if (url.endsWith("/bounce.png")) return new Response(null, { status: 302, headers: { location: "http://169.254.169.254/latest/meta-data" } });
+      if (url.endsWith("/bounce-internal.png")) return new Response(null, { status: 302, headers: { location: "https://internal.example/x.png" } });
+      if (url.endsWith("/hop.png")) return new Response(null, { status: 301, headers: { location: "/icon.png" } });
+      return new Response(TINY_PNG);
+    }) as unknown as typeof fetch;
+    const dns = async (host: string) => (host === "internal.example" ? ["10.0.0.5"] : host === "mixed.example" ? ["93.184.216.34", "127.0.0.1"] : ["93.184.216.34"]);
+    const go = (url: string, extra: Record<string, unknown> = {}) => fetchImage(url, { fetch: fakeFetch, lookup: dns, ...extra });
+    await expect(go("http://cdn.example/icon.png")).rejects.toThrow(/https/);
+    for (const url of [
+      "https://127.0.0.1/x.png",
+      "https://169.254.169.254/x.png",
+      "https://[::1]/x.png",
+      "https://[::ffff:10.0.0.1]/x.png",
+      "https://localhost/x.png",
+      "https://internal.example/x.png",
+      "https://mixed.example/x.png",
+    ]) {
+      await expect(go(url)).rejects.toThrow(/private/);
+    }
+    await expect(go("https://cdn.example/bounce.png")).rejects.toThrow(/https/);
+    await expect(go("https://cdn.example/bounce-internal.png")).rejects.toThrow(/private/);
+    expect(seen).not.toContain("https://internal.example/x.png");
+    // A public relative redirect is followed, and re-checked.
+    expect(isPng(await go("https://cdn.example/hop.png"))).toBe(true);
+    // Development escape hatch.
+    expect(isPng(await go("http://localhost:3000/icon.png", { allowPrivateNetwork: true }))).toBe(true);
+    expect(isPrivateAddress("8.8.8.8")).toBe(false);
+    expect(isPrivateAddress("2606:4700::1111")).toBe(false);
   });
 });
 
@@ -336,6 +375,33 @@ describe("PassKit web service", () => {
     expect(lines[0]![0]).toBe("a forged line");
     expect(lines[0]![1]).toHaveLength(300);
     expect(lines[0]!.length).toBeLessThanOrEqual(20);
+  });
+
+  it("caps pre-auth bodies: the unauthenticated log route and registration", async () => {
+    const lines: string[][] = [];
+    const handler = applePassKitWebService({
+      store: new MemoryApplePassStore(),
+      passTypeIdentifier: PASS_TYPE,
+      buildPass: async () => new Uint8Array(),
+      onLog: (l) => lines.push(l),
+    });
+    const big = JSON.stringify({ logs: ["x".repeat(MAX_LOG_BODY_BYTES)] });
+    expect((await handler(new Request("https://issuer.example/v1/log", { method: "POST", body: big }))).status).toBe(413);
+    // No Content-Length: the cap is enforced while streaming.
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (let i = 0; i < 40; i++) c.enqueue(new Uint8Array(1024).fill(0x20));
+        c.close();
+      },
+    });
+    const streamed = new Request("https://issuer.example/v1/log", { method: "POST", body: stream, duplex: "half" } as RequestInit);
+    expect(streamed.headers.get("content-length")).toBeNull();
+    expect((await handler(streamed)).status).toBe(413);
+    expect(lines).toEqual([]);
+
+    const { call, record } = await setup();
+    const res = await call("POST", regPath, { token: record.authenticationToken, body: { pushToken: PUSH_TOKEN, pad: "y".repeat(4096) } });
+    expect(res.status).toBe(413);
   });
 });
 
@@ -594,6 +660,61 @@ describe("appleFormatProvider", () => {
     // The standalone routes need the secret.
     await expect(p.acquisitionUrl(ctx(OWNER_B))).rejects.toThrow(/linkSecret/);
     expect((await p.handle(new Request("https://issuer.example/apple/passes/s3r1al/" + "0".repeat(64) + ".pkpass"))).status).toBe(404);
+  });
+
+  const refreshWith = (p: ReturnType<typeof provider>["p"], token: string) =>
+    p.handle(new Request(`https://issuer.example/apple/v1/passes/${PASS_TYPE}/s3r1al`, { headers: { authorization: `ApplePass ${token}` } }));
+  const registerWith = (p: ReturnType<typeof provider>["p"], token: string) =>
+    p.handle(
+      new Request(`https://issuer.example/apple/v1/devices/dev9/registrations/${PASS_TYPE}/s3r1al`, {
+        method: "POST",
+        headers: { authorization: `ApplePass ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ pushToken: "f".repeat(64) }),
+      }),
+    );
+  const passJsonOf = async (res: Response) => JSON.parse(unzip(new Uint8Array(await res.arrayBuffer()))["pass.json"]!.toString());
+
+  it("a superseded serial (voided, as the issuer sends on owner rotation) cuts off a leaked copy", async () => {
+    const { p, apns } = provider();
+    const file = await p.passFile(ctx(OWNER_A));
+    const leakedToken = JSON.parse(unzip(file.body as Uint8Array)["pass.json"]!.toString()).authenticationToken as string;
+
+    // The issuer minted a new serial and voids this one: same owner, no links.
+    await p.notifyUpdate(ctx(OWNER_A, content({ voided: true, links: [] })));
+    expect(apns.pushed).toEqual(["s3r1al"]);
+
+    const refresh = await refreshWith(p, leakedToken);
+    expect(refresh.status).toBe(200);
+    const pass = await passJsonOf(refresh);
+    expect(pass.voided).toBe(true);
+    expect(pass.barcodes).toBeUndefined();
+    expect(JSON.stringify(pass)).not.toContain("https://issuer.example/a?");
+    expect(pass.storeCard.backFields[0].value).toMatch(/^A newer pass replaced this one/);
+    // The leaked copy can no longer attach devices.
+    expect((await registerWith(p, leakedToken)).status).toBe(401);
+    // A second voided notify does not rotate again.
+    const token2 = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    await p.notifyUpdate(ctx(OWNER_A, content({ voided: true, links: [] })));
+    expect((await p.store.getPass("s3r1al"))!.authenticationToken).toBe(token2);
+  });
+
+  it("rotate(serial, content) cuts off a leaked copy and gives the owner the fresh links", async () => {
+    const { p, apns } = provider();
+    await p.acquisitionUrl(ctx(OWNER_A));
+    const leakedToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    const fresh = content({ links: [{ key: "act", label: "Do the thing", url: "https://issuer.example/fresh-link" }] });
+    const url = await p.rotate("s3r1al", fresh);
+    expect(url).toMatch(/\.pkpass$/);
+    expect(apns.pushed).toEqual(["s3r1al"]);
+
+    const leaked = await passJsonOf(await refreshWith(p, leakedToken));
+    expect(leaked.voided).toBe(true);
+    expect(JSON.stringify(leaked)).not.toContain("fresh-link");
+    expect((await registerWith(p, leakedToken)).status).toBe(401);
+
+    const owners = await passJsonOf(await p.handle(new Request(url!)));
+    expect(JSON.stringify(owners)).toContain("fresh-link");
+    expect(owners.voided).toBeUndefined();
   });
 
   it("omits the web service on an http origin", async () => {

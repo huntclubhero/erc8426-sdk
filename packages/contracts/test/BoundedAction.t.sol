@@ -330,6 +330,62 @@ contract BoundedActionTest is Test {
         assertTrue(h.isOperatorRevoked(1, relayer));
     }
 
+    function test_RevokeAllCoversLaterOperators() public {
+        vm.prank(holder);
+        h.setAllOperatorsRevoked(1, true);
+        assertTrue(h.areAllOperatorsRevoked(1));
+        h.setActionOperator(stranger, true); // appointed after the revocation
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionOperatorRevoked.selector, 1, stranger));
+        vm.prank(stranger);
+        h.ping(1);
+        vm.prank(relayer);
+        h.ping(2); // other tokens unaffected
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionNotTokenOwner.selector, 1, relayer));
+        vm.prank(relayer);
+        h.setAllOperatorsRevoked(1, false);
+        vm.prank(holder);
+        h.setAllOperatorsRevoked(1, false);
+        vm.prank(stranger);
+        h.ping(1);
+    }
+
+    function test_RevokeAllDoesNotBindNewOwner() public {
+        vm.prank(holder);
+        h.setAllOperatorsRevoked(1, true);
+        vm.prank(holder);
+        h.transferFrom(holder, buyer, 1);
+        assertFalse(h.areAllOperatorsRevoked(1));
+        vm.prank(relayer);
+        h.ping(1);
+    }
+
+    function test_ScopedOperator() public {
+        h.setActionOperatorFor(stranger, PING, true);
+        assertTrue(h.isActionOperatorFor(stranger, PING));
+        assertFalse(h.isActionOperatorFor(stranger, SPEND));
+        assertFalse(h.isActionOperator(stranger));
+        vm.prank(stranger);
+        h.ping(1);
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionUnauthorizedOperator.selector, stranger));
+        vm.prank(stranger);
+        h.spend(1, 1);
+        h.setActionOperatorFor(stranger, PING, false);
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionUnauthorizedOperator.selector, stranger));
+        vm.prank(stranger);
+        h.ping(1);
+    }
+
+    function test_LoweredCapSaturates() public {
+        vm.startPrank(relayer);
+        h.spend(1, 25e6);
+        h.spend(1, 25e6);
+        vm.stopPrank();
+        h.configureAction(SPEND, 10, 1 days, 10e6, 40e6);
+        vm.expectRevert(abi.encodeWithSelector(BoundedAction.BoundedActionWindowCapExceeded.selector, 1, SPEND, 1, 0));
+        vm.prank(relayer);
+        h.spend(1, 1);
+    }
+
     // Freezing
 
     function test_FrozenBoundCanTighten() public {

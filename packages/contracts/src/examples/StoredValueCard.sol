@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {ERC721WalletPass} from "../ERC721WalletPass.sol";
 import {BoundedAction} from "../utils/BoundedAction.sol";
@@ -29,7 +30,10 @@ import {BoundedAction} from "../utils/BoundedAction.sol";
 ///    operator or an arbitrary address. It cannot transfer, burn or approve
 ///    the token. The documented worst case of a leaked QR code is the daily
 ///    cap spent at registered merchants until the owner revokes the operator
-///    or rotates the pass.
+///    or rotates the pass. The daily cap bounds the RATE of loss; the total
+///    exposure over time is the card balance, which the owner controls by
+///    what they top up and by revoking (`setAllOperatorsRevoked` switches
+///    every relayer off, including ones the issuer appoints later).
 ///  - `redeemReward`: bounded by rewards actually earned, moves no value.
 ///
 ///  Anyone may call:
@@ -40,7 +44,19 @@ import {BoundedAction} from "../utils/BoundedAction.sol";
 ///    an unbounded value transfer to a chosen recipient, exactly what a
 ///    capability link must never reach; it is the owner's exit, not a pass
 ///    action.
-///  - transfer, approve, burn, and `setOperatorRevoked` (the remedy).
+///  - transfer, approve, burn, and the revocations (the remedy).
+///
+///  An ERC-721 approval exposes the balance. `withdraw` itself is owner
+///  only, but an approved account (`approve` or `setApprovalForAll`, for
+///  example a marketplace conduit) can transfer the card to itself and then
+///  withdraw. Treat approving a card like handing over its balance.
+///
+///  The CHARGE bound is frozen at deployment: the issuer can lower the caps
+///  with `setChargeCaps` but never raise them, so the published bound is a
+///  commitment. Deploy a new card contract to offer higher limits.
+///
+///  Every function that moves tokens is `nonReentrant`, so a token with
+///  transfer hooks cannot re-enter a top up, charge or withdrawal.
 ///
 ///  Mapping to an ERC-6551 design: in the production variant each card owns
 ///  a token-bound account holding the stablecoin. The account's owner-only
@@ -55,7 +71,7 @@ import {BoundedAction} from "../utils/BoundedAction.sol";
 ///  they would with a token-bound account. A seller can withdraw before a
 ///  sale settles, so buyers and marketplaces must not price the balance
 ///  without escrow.
-contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
+contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     bytes32 public constant CHARGE = keccak256("CHARGE");
@@ -110,6 +126,8 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
         punchesPerReward = punchesPerReward_;
         _configureAction(CHARGE, chargesPerDay, 1 days, perTxCap, dailyCap);
         _configureAction(REDEEM, chargesPerDay, 1 days, 0, 0);
+        // The documented value bound is a commitment: tighten only.
+        if (chargesPerDay != 0) _freezeActionBound(CHARGE);
     }
 
     // Issuer
@@ -133,7 +151,14 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
         _setActionOperator(operator, allowed);
     }
 
-    /// @notice Change the spending caps. Frozen caps can only be lowered.
+    /// @notice Appoint an operator for one action only (for example a
+    ///  terminal key that may CHARGE but not REDEEM).
+    function setActionOperatorFor(address operator, bytes32 actionId, bool allowed) external onlyOwner {
+        _setActionOperatorFor(operator, actionId, allowed);
+    }
+
+    /// @notice Lower the spending caps. The CHARGE bound is frozen at
+    ///  deployment, so caps can only be tightened.
     function setChargeCaps(uint32 chargesPerDay, uint128 perTxCap, uint128 dailyCap) external onlyOwner {
         _configureAction(CHARGE, chargesPerDay, 1 days, perTxCap, dailyCap);
     }
@@ -146,7 +171,7 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
 
     /// @notice Add `amount` of stablecoin to card `tokenId`, pulled from the
     ///  caller (who must have approved this contract).
-    function topUp(uint256 tokenId, uint256 amount) external {
+    function topUp(uint256 tokenId, uint256 amount) external nonReentrant {
         _requireOwned(tokenId);
         if (amount == 0) revert CardZeroAmount();
         uint256 before = stablecoin.balanceOf(address(this));
@@ -163,6 +188,7 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
     ///  and punch the card. Operator only, within the CHARGE bound.
     function charge(uint256 tokenId, uint256 amount, address merchant)
         external
+        nonReentrant
         onlyBoundedAction(CHARGE, tokenId, amount)
     {
         if (amount == 0) revert CardZeroAmount();
@@ -185,7 +211,7 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
 
     /// @notice Redeem one earned reward at a registered merchant. No value
     ///  moves. Operator only, within the REDEEM bound.
-    function redeemReward(uint256 tokenId, address merchant) external onlyBoundedAction(REDEEM, tokenId, 0) {
+    function redeemReward(uint256 tokenId, address merchant) external nonReentrant onlyBoundedAction(REDEEM, tokenId, 0) {
         if (!isMerchant[merchant]) revert CardUnknownMerchant(merchant);
         Card storage c = _cards[tokenId];
         if (c.rewards == 0) revert CardNoReward(tokenId);
@@ -197,8 +223,10 @@ contract StoredValueCard is ERC721WalletPass, BoundedAction, Ownable {
     // Owner only (signed path)
 
     /// @notice Withdraw `amount` from card `tokenId` to `to`. Only the token
-    ///  owner, never an operator or approved account.
-    function withdraw(uint256 tokenId, uint256 amount, address to) external {
+    ///  owner may call it; operators never can. An ERC-721 approved account
+    ///  cannot call it directly but can transfer the card to itself first, so
+    ///  an approval exposes the balance.
+    function withdraw(uint256 tokenId, uint256 amount, address to) external nonReentrant {
         if (ownerOf(tokenId) != msg.sender) revert CardNotOwner(tokenId, msg.sender);
         if (amount == 0) revert CardZeroAmount();
         Card storage c = _cards[tokenId];

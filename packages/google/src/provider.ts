@@ -26,6 +26,8 @@ export interface GoogleObjectRecord {
   owner: string;
   /// Hash of the last object body Google accepted, to skip no-op PATCHes.
   hash?: string;
+  /// True once the object was expired as superseded (voided content).
+  superseded?: boolean;
 }
 
 export interface GoogleObjectStore {
@@ -77,15 +79,19 @@ export interface GoogleFormatProviderOptions {
 
 export interface GoogleFormatProvider extends PassFormatProvider {
   readonly format: typeof FORMAT_GOOGLE;
-  /// Expire the serial's current object and forget it, so the next
-  ///  acquisition issues a new object id. The owner-requested reset.
+  /// The owner-requested reset, for integrators without the issuer. Every
+  ///  saved copy of the serial's current object, a leaked one included, is
+  ///  expired and loses its links, and the record is forgotten so the next
+  ///  acquisition issues a new object id. (The issuer does this itself: it
+  ///  mints a new serial and supersedes the old one, which arrives here as
+  ///  voided content and expires the old object the same way.)
   rotate(serial: string): Promise<void>;
   readonly store: GoogleObjectStore;
 }
 
 const DEFAULT_SUPERSEDED: GoogleMessage = {
   header: "This pass was replaced",
-  body: "The token moved to a new owner, or its pass links were reset. This copy no longer updates and its links no longer work.",
+  body: "A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live links. If you hold the token, add the current pass from the issuer.",
 };
 
 function hashOf(value: unknown): string {
@@ -164,9 +170,21 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       language: opts.language,
       unhostedImages: opts.unhostedImages,
     });
+    // PATCH merges: a field left out keeps its old value on Google's side.
+    // So the modules that can carry links or live values are always sent,
+    // empty when the content has none, or a superseded object would keep
+    // the links it had.
+    object.resource.linksModuleData ??= { uris: [] };
+    object.resource.textModulesData ??= [];
+    // Voided content is a supersede (the issuer voids the old serial when it
+    // mints a new one, on transfer or on the owner's rotation). EXPIRED moves
+    // every saved copy of this shared object, a leaked one included, out of
+    // the active list, and its links are gone with the content's.
+    const superseding = Boolean(ctx.content.voided);
+    if (superseding) object.resource.state = "EXPIRED";
     const suffix = object.resource.id.slice(client.issuerId.length + 1);
     const hash = hashOf(object.resource);
-    const next: GoogleObjectRecord = { objectSuffix: suffix, vertical: object.vertical, owner, hash: record?.hash };
+    const next: GoogleObjectRecord = { objectSuffix: suffix, vertical: object.vertical, owner, hash: record?.hash, superseded: record?.superseded };
     // Record the object id before any network call, so a failed upsert does
     // not mint a different id on the retry.
     if (!record) await store.put(serial, next);
@@ -175,7 +193,19 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       await ensureClass(ctx);
       await client.upsert(`${object.vertical}Object`, object.resource);
       next.hash = hash;
+      const newlySuperseded = superseding && !record?.superseded;
+      next.superseded = superseding;
       await store.put(serial, next);
+      if (newlySuperseded) {
+        const msg = opts.supersededMessage === undefined ? DEFAULT_SUPERSEDED : opts.supersededMessage;
+        if (msg) {
+          try {
+            await client.addMessage(`${object.vertical}Object`, object.resource.id, msg);
+          } catch (err) {
+            report(err, `superseded message ${object.resource.id}`);
+          }
+        }
+      }
       return { object, record: next, ok: true };
     } catch (err) {
       report(err, `upsert object ${object.resource.id}`);

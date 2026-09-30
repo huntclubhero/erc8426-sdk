@@ -31,3 +31,30 @@ export function passDate(date: Date): string {
 export function responseBody(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return bytes.buffer instanceof ArrayBuffer ? (bytes as Uint8Array<ArrayBuffer>) : new Uint8Array(bytes);
 }
+
+/// Read a JSON body of at most `maxBytes`, counting as it streams so neither
+///  a missing nor a false Content-Length gets past the cap. Returns
+///  "too_large" past the cap and null for an unparsable body.
+export async function readJsonCapped(req: Request, maxBytes: number): Promise<unknown | null | "too_large"> {
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) return "too_large";
+  if (!req.body) return null;
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return "too_large";
+    }
+    chunks.push(value);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}

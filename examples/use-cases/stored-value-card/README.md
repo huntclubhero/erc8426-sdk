@@ -18,7 +18,7 @@ Balance, punches, free coffees, and the tap limits. The QR code is the charge ca
 | Redeem a free coffee | **Capability link** | It spends only rewards the card has earned, and moves no value. |
 | Top up | **Anyone's transaction** | It can only add value. |
 | Withdraw | **Owner transaction** only | It sends any amount to any address, which is an unbounded transfer and must never be pass-reachable. The relayer's `withdraw` reverts. |
-| Switch off tap-to-pay | **Owner transaction** (`setOperatorRevoked`) | An on-chain remedy for a leaked QR. |
+| Switch off tap-to-pay | **Owner transaction** (`setAllOperatorsRevoked`) | An on-chain remedy for a leaked QR. It covers every relayer, including keys the issuer rotates in later. |
 | Rotate the QR | **Signed** (`rotatePassLinks`) | The leaked QR stops resolving (404). |
 
 ## Spec conditions
@@ -28,6 +28,8 @@ Balance, punches, free coffees, and the tap limits. The QR code is the charge ca
 - Charges cannot transfer, burn or approve the card, and cannot move money anywhere except a registered merchant.
 - **Documented bound:** at most $25 per charge and at most $100 and 20 charges per card per fixed 24 hour window (so at most twice that inside any 24 hour span), paid only to registered merchants. This is enforced by `BoundedAction` inside the card contract.
 - The fresh `ownerOf` read runs on every scan.
+- The daily cap bounds the rate of loss. The total exposure is the card balance, which the holder controls. The CHARGE bound is frozen at deployment, so the issuer can lower the caps but never raise them.
+- An ERC-721 approval on the card exposes its balance: an approved account can transfer the card to itself and then withdraw.
 
 ## ERC-6551 mapping
 

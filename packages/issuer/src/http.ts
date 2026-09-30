@@ -1,4 +1,4 @@
-import { isAddress, type Address, type Hex } from "viem";
+import { isAddress, isAddressEqual, type Address, type Hex } from "viem";
 import {
   ACQUIRE_ACTION,
   PROOF_HEADER,
@@ -32,8 +32,15 @@ import type { IssuerInternals } from "./issuer.js";
 ///  Every response is `Cache-Control: no-store`: clients MUST NOT durably
 ///  cache acquisition URLs, and a challenge is single-use.
 
-const MAX_BODY_BYTES = 64 * 1024;
+/// Largest request body read before authentication, in bytes.
+export const MAX_BODY_BYTES = 64 * 1024;
+/// Largest proof header accepted, in characters. A SIWE challenge is well
+///  under 2 KiB; base64url adds a third.
+const MAX_PROOF_HEADER_CHARS = 8 * 1024;
 const UINT256_LIMIT = 1n << 256n;
+/// uint256 max has 78 decimal digits; anything longer is not a token id and
+///  is refused before BigInt parses it.
+const MAX_TOKEN_ID_CHARS = 78;
 
 type Json = Record<string, unknown>;
 
@@ -49,6 +56,7 @@ function wantsHtml(request: Request): boolean {
 }
 
 function parseTokenId(segment: string): string | null {
+  if (segment.length > MAX_TOKEN_ID_CHARS) return null;
   try {
     const id = normalizeTokenId(segment);
     return BigInt(id) < UINT256_LIMIT ? id : null;
@@ -57,11 +65,42 @@ function parseTokenId(segment: string): string | null {
   }
 }
 
-async function readBody(request: Request): Promise<Json | null> {
+/// Read the body with a running byte count and stop past MAX_BODY_BYTES, so
+///  an anonymous request cannot make the issuer buffer an unbounded body
+///  (a chunked body carries no Content-Length to refuse up front).
+async function readText(request: Request): Promise<string | null> {
   const declared = Number(request.headers.get("Content-Length") ?? "0");
   if (declared > MAX_BODY_BYTES) return null;
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    joined.set(c, offset);
+    offset += c.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(joined);
+  } catch {
+    return null;
+  }
+}
+
+async function readBody(request: Request): Promise<Json | null> {
+  const text = await readText(request);
+  if (text === null) return null;
   if (text.trim() === "") return {};
   if ((request.headers.get("Content-Type") ?? "").includes("application/x-www-form-urlencoded")) {
     return Object.fromEntries(new URLSearchParams(text));
@@ -78,7 +117,12 @@ type ProofRead = { kind: "absent" } | { kind: "malformed" } | { kind: "present";
 
 /// A proof from the two headers (the Gated acquisition transport), or, for
 ///  POST routes, from a JSON body `{ message, signature }`.
+function proofHeadersTooLarge(headers: Headers): boolean {
+  return (headers.get(PROOF_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS || (headers.get(SIGNATURE_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS;
+}
+
 function readProof(request: Request, body: Json | null): ProofRead {
+  if (proofHeadersTooLarge(request.headers)) return { kind: "malformed" };
   const fromHeaders = readProofHeaders(request.headers);
   if (fromHeaders.kind !== "absent") return fromHeaders.kind === "present" ? fromHeaders : { kind: "malformed" };
   if (!body || (body.message === undefined && body.signature === undefined)) return { kind: "absent" };
@@ -191,6 +235,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
     // Gated configuration.
     const challenge = x.challengeUri(tokenId);
+    if (proofHeadersTooLarge(request.headers)) return error("malformed_proof", { message: "proof header too large" });
     const proof = readProofHeaders(request.headers);
     // No proof: 401, the challenge URI, and no acquisition URLs.
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge });
@@ -199,9 +244,11 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
     if (!result.ok) return refuse(result.error, challenge);
-    // A first claim rotates before the manifest is built.
+    // A first claim rotates before the manifest is built. Another entitled
+    // account under an additive policy shares the holder of record's pass,
+    // so the pass is always rendered for the holder of record.
     const record = await x.recordIssuance(tokenId, result.account);
-    return json(200, await x.buildManifest(record, result.account));
+    return json(200, await x.buildManifest(record, record.lastIssuedTo ?? result.account));
   }
 
   // GET {base}/:tokenId/challenge?address=&action=
@@ -243,12 +290,28 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
     if (proof.kind === "malformed") return error("malformed_proof");
-    // A rotate proof, and only a rotate proof; its fresh read means only the
-    // entitled holder can retire the links.
+    // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
     if (!result.ok) return refuse(result.error, challengeUri);
-    const record = await x.rotateOnRequest(tokenId, result.account);
-    return json(200, { ok: true, rotated: true, ...(await x.buildManifest(record, result.account)) });
+    // Rotation retires the holder's links, so the prover must be the holder
+    // of record or entitled to acquire right now. An account entitled to
+    // rotate but excluded from acquire (an owner during an exclusive rental)
+    // cannot use it to disturb the renter's pass.
+    const holder = await x.holderOf(tokenId);
+    if (!holder || !isAddressEqual(holder, result.account)) {
+      let entitled;
+      try {
+        entitled = await x.entitled(tokenId, result.account, ACQUIRE_ACTION);
+      } catch {
+        return error("read_failed");
+      }
+      if (!entitled.entitled) return error("not_owner");
+    }
+    // The response never carries the manifest: a proof for any other action
+    // MUST NOT resolve it. The holder re-adds the new pass with an acquire
+    // proof, and the holder of record is unchanged.
+    await x.rotateOnRequest(tokenId);
+    return json(200, { ok: true, rotated: true });
   }
 
   // Resolve an action link: capability configuration only, current links
@@ -302,8 +365,8 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
     const holder = record.lastIssuedTo;
     // A link minted since a transfer and not yet issued to anyone authorizes
-    // no one.
-    if (!holder) return error("not_owner");
+    // no one. It is not a verified non-entitled account, so not a 403.
+    if (!holder) return error("link_invalid");
     let entitled;
     try {
       entitled = await x.entitled(binding.tokenId, holder, binding.name);
@@ -415,6 +478,8 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     } catch (e) {
       if (e instanceof URIError) {
         response = error("invalid_request", { message: "malformed path" });
+      } else if (e instanceof IssuerError) {
+        response = error(e.code, { message: e.message });
       } else {
         x.onError(e, { operation: `${request.method} ${url.pathname}` });
         response = error("internal_error");

@@ -79,20 +79,20 @@ export const POST = GET;
 export const DELETE = GET;
 ```
 
-When the issuer resolves a manifest it calls `apple.acquisitionUrl({ token, owner, content })` and puts the result under `formats.apple`. When content changes (a `PassUpdate` event, a balance move) it calls `apple.notifyUpdate(...)`, which stores the new content, bumps `Last-Modified`, and pushes every registered device. For an owner's request to reset their links, call `apple.rotate(serial)`.
+When the issuer resolves a manifest it calls `apple.acquisitionUrl({ token, owner, content })` and puts the result under `formats.apple`. When content changes (a `PassUpdate` event, a balance move) it calls `apple.notifyUpdate(...)`, which stores the new content, bumps `Last-Modified`, and pushes every registered device. For an owner's request to reset their links without the issuer, call `apple.rotate(serial, freshContent)`: every existing copy, a leaked one included, refreshes into the superseded card and can no longer register devices, and the owner's new download URL carries the fresh content. (With the issuer, rotation mints a new serial and voids the old one; voided content retires the old serial's token the same way.)
 
 ## Security properties
 
 - **Per-pass authentication tokens.** Every serial gets its own random 256-bit token, compared in constant time. A leaked token exposes one pass, not the collection.
 - **Capability download URLs.** The acquisition URL is `<origin><basePath>/passes/<serial>/<capability>.pkpass`, where the capability is an HMAC of the pass's current token under `linkSecret`. It is not derivable from the serial, token id or any public data, it needs no table of its own, and a read-only dump of the store alone does not yield working URLs. Unknown serials and wrong capabilities both answer 404.
 - **Rotation on transfer.** When a different owner acquires the pass, its token rotates: the previous holder's download URL stops resolving, and their installed pass, on its next refresh, receives a superseded rendering (voided, no links, no barcode, no live values). A retired token may refresh and unregister its own device but can never register a new one, and the refresh embeds the retired token, never the new owner's.
-- **Bounded device logs.** `/v1/log` is unauthenticated by Apple's design; entries are capped in count and length and stripped of control characters before `onLog` sees them.
+- **Bounded pre-auth input.** `/v1/log` is unauthenticated by Apple's design: its body is capped at 16 KiB while streaming (413 past it), and entries are capped in count and length and stripped of control characters before `onLog` sees them. Registration bodies are capped at 1 KiB.
 
 A pass is a projection of the token, not the token. Nothing in this package treats holding a pass, or its download URL, as proof of ownership; state-changing actions reached from pass links need the spec's authorization checks, including the fresh entitlement read.
 
 ## Building blocks
 
-- `buildPkpass(content, options)` signs a bundle; `toPassJson` is the pure mapping. Styles map to `generic`, `eventTicket`, `storeCard`, `coupon`. Links become back fields with `attributedValue` anchors. Field keys must be unique across the whole pass; a duplicate throws, because Apple would drop it silently. Images must be PNG; URL sources are fetched at build time with a timeout and size cap. An icon is required.
+- `buildPkpass(content, options)` signs a bundle; `toPassJson` is the pure mapping. Styles map to `generic`, `eventTicket`, `storeCard`, `coupon`. Links become back fields with `attributedValue` anchors. Field keys must be unique across the whole pass; a duplicate throws, because Apple would drop it silently. Images must be PNG; URL sources are fetched at build time with a timeout and size cap, over https only, to public addresses only (every resolved address and every redirect hop is checked, so a URL from token metadata cannot reach your internal network or cloud metadata). `imageFetch.allowPrivateNetwork` relaxes this for local development. An icon is required.
 - `applePassKitWebService({ store, passTypeIdentifier, buildPass, authenticate?, basePath?, onLog? })` implements register, unregister, updated serials, latest pass (with `If-Modified-Since` and 304) and log.
 - `createApnsClient(...)` keeps one HTTP/2 session open and multiplexes, retires it on error, GOAWAY, a stalled stream or a quiet spell, retries tokens that never got a stream once, and removes tokens APNs answers 410 for.
 - `MemoryApplePassStore` implements `ApplePassStore` (pass records plus device registrations) for tests and demos. A production store needs the same eight methods over a database.

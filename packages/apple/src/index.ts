@@ -1,6 +1,6 @@
 export { buildPkpass, toPassJson, passImages, hexToRgb } from "./pkpass.js";
 export type { AppleCertificates, PassJsonOptions, BuildPkpassOptions } from "./pkpass.js";
-export { fetchImage, resolveImage, isPng } from "./images.js";
+export { fetchImage, resolveImage, isPng, isPrivateAddress } from "./images.js";
 export type { ImageFetchOptions } from "./images.js";
 export { MemoryApplePassStore, newPassRecord, rotatedRecord, MAX_RETIRED_TOKENS } from "./store.js";
 export type {
@@ -10,7 +10,7 @@ export type {
   DeviceRegistration,
   DeviceRegistrationStore,
 } from "./store.js";
-export { applePassKitWebService, defaultAuthenticate } from "./webservice.js";
+export { applePassKitWebService, defaultAuthenticate, MAX_LOG_BODY_BYTES, MAX_REGISTRATION_BODY_BYTES } from "./webservice.js";
 export type { PassKitWebServiceOptions, BuildPassArgs, PassAuthResult } from "./webservice.js";
 export { createApnsClient } from "./apns.js";
 export type { ApnsClient, ApnsClientOptions, ApnsTokenAuth, ApnsCertificateAuth, PushOutcome } from "./apns.js";

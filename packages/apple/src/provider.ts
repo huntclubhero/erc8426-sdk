@@ -67,12 +67,17 @@ export interface AppleFormatProvider extends PassFormatProvider, PassFileProvide
   handleDownload(request: Request): Promise<Response>;
   /// Only the PassKit web service (`<basePath>/v1/...`).
   webService(request: Request): Promise<Response>;
-  /// Rotate a pass's token on the owner's request: every download URL and
-  ///  every installed copy is superseded, and a fresh acquisition URL is
-  ///  returned. Under an unchanged owner this is the only remedy for a
-  ///  leaked link, so the spec makes it mandatory in the capability
-  ///  configuration.
-  rotate(serial: string): Promise<string>;
+  /// Rotate a pass's token on the owner's request, for integrators without
+  ///  the issuer. Every installed copy, a leaked one included, refreshes into
+  ///  the superseded rendering and can no longer register devices, and every
+  ///  download URL dies. Pass the re-rendered content (with your freshly
+  ///  rotated links) as `content`, or the owner's fresh pass would carry the
+  ///  leaked links again. Returns the new download URL when `linkSecret` is
+  ///  set. Under an unchanged owner this is the only remedy for a leaked
+  ///  link, so the spec makes it mandatory in the capability configuration.
+  ///  (The issuer does this itself: it mints a new serial and supersedes the
+  ///  old one, which arrives here as voided content.)
+  rotate(serial: string, content?: PassContent): Promise<string | undefined>;
   /// The acquisition URL for a stored record.
   downloadUrl(record: ApplePassRecord): string;
   /// The base URL written into passes as `webServiceURL`, when https.
@@ -80,11 +85,13 @@ export interface AppleFormatProvider extends PassFormatProvider, PassFileProvide
   readonly store: ApplePassStore;
 }
 
-/// Default rendering for a superseded pass. Keeps the identity of the card
-///  (title, art, colors, header) and drops everything live: values, links,
-///  barcode, relevance. Values are dropped rather than frozen because the
-///  record now holds the NEW holder's content, which the previous holder
-///  should not keep receiving.
+/// Default rendering for a superseded pass, served to any device holding a
+///  retired token. Keeps the identity of the card (title, art, colors,
+///  header) and drops everything live: values, links, barcode, relevance.
+///  Values are dropped rather than frozen because the record may now hold a
+///  NEW holder's content, which a superseded copy must not keep receiving.
+///  The wording claims only what is true in every case: this copy is
+///  replaced and carries no live details or links.
 export function supersededContent(content: PassContent): PassContent {
   return {
     serial: content.serial,
@@ -101,7 +108,7 @@ export function supersededContent(content: PassContent): PassContent {
         key: "supersededNote",
         label: "This pass was replaced",
         value:
-          "The token moved to a new owner, or its pass links were reset. This copy no longer updates and its links no longer work. The current owner can add a fresh pass from the issuer.",
+          "A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live details or links. If you hold the token, add the current pass from the issuer.",
       },
     ],
     voided: true,
@@ -170,6 +177,11 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
   /// Bring the stored record in line with the context. A different owner is
   ///  a transfer: the token rotates, so the previous holder's download URL
   ///  dies and their installed pass refreshes into the superseded rendering.
+  ///  Content turning voided is a supersede (the issuer voids the old serial
+  ///  when it mints a new one, on transfer or on the owner's rotation): the
+  ///  token is retired the same way, so every copy of the old serial, a
+  ///  leaked one included, can refresh into the voided card but can no
+  ///  longer register a device or fetch anything live.
   async function sync(ctx: PassContext, forceTouch: boolean): Promise<{ record: ApplePassRecord; rotated: boolean }> {
     const serial = ctx.content.serial;
     const owner = ctx.owner.toLowerCase();
@@ -182,6 +194,10 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
       rotated = true;
     } else if (!record.owner) {
       record = { ...record, owner };
+    }
+    if (!rotated && ctx.content.voided && record.content && !record.content.voided) {
+      record = rotatedRecord(record);
+      rotated = true;
     }
     if (forceTouch || rotated || fingerprint(record.content) !== fingerprint(ctx.content)) {
       record = { ...record, content: ctx.content, updatedAt: new Date() };
@@ -258,13 +274,13 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
       await push(ctx.content.serial);
     },
 
-    async rotate(serial: string): Promise<string> {
+    async rotate(serial: string, content?: PassContent): Promise<string | undefined> {
       const record = await store.getPass(serial);
       if (!record) throw new Error(`unknown serial ${serial}`);
-      const next = rotatedRecord(record);
+      const next = { ...rotatedRecord(record), ...(content ? { content } : {}) };
       await store.putPass(next);
       await push(serial);
-      return downloadUrl(next);
+      return secret ? downloadUrl(next) : undefined;
     },
   };
 }

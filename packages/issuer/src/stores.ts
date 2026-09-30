@@ -79,18 +79,48 @@ export interface IssuerStores {
   links: LinkStore;
 }
 
+export interface MemoryStoreOptions {
+  now?: () => number;
+  /// Most unconsumed nonces held at once. Past it the oldest are dropped
+  ///  (their challenges then fail as nonce_invalid). Default 100000.
+  maxNonces?: number;
+}
+
+/// Sweep expired entries at most this often, so issuing stays O(1) amortized.
+const SWEEP_INTERVAL_MS = 1000;
+
 /// In-memory stores for a single process: development, tests, and
 ///  deployments that run exactly one instance. With more than one instance
 ///  the nonce store MUST be shared, or a nonce spent on one instance is
 ///  still live on another; use `kvStores`.
-export function memoryStores(options: { now?: () => number } = {}): IssuerStores {
+///
+///  Anyone can ask the challenge endpoint for a nonce, so issued but never
+///  presented nonces are swept once their retention passes, and the store is
+///  capped at `maxNonces`. The cap bounds memory, not abuse: rate limit the
+///  challenge endpoint (per IP or per address) in front of the issuer, since
+///  a flood past the cap evicts honest users' pending challenges.
+export function memoryStores(options: MemoryStoreOptions = {}): IssuerStores {
   const now = options.now ?? Date.now;
+  const maxNonces = options.maxNonces ?? 100_000;
   const nonces = new Map<string, { record: NonceRecord; evictAt: number }>();
+  let lastSweep = now();
+  const sweep = () => {
+    const t = now();
+    if (t - lastSweep < SWEEP_INTERVAL_MS && nonces.size < maxNonces) return;
+    lastSweep = t;
+    for (const [k, v] of nonces) if (t >= v.evictAt) nonces.delete(k);
+    // Still full: drop the oldest (Map iteration is insertion order).
+    for (const k of nonces.keys()) {
+      if (nonces.size < maxNonces) break;
+      nonces.delete(k);
+    }
+  };
   const passes = new Map<string, PassRecord>();
   const links = new Map<string, LinkBinding>();
   return {
     nonces: {
       async issue(nonce, record, ttlSeconds) {
+        sweep();
         nonces.set(nonce, { record: { ...record }, evictAt: now() + ttlSeconds * 1000 });
       },
       async consume(nonce) {
@@ -202,6 +232,15 @@ export function kvStores(kv: KeyValueStore, options: { prefix?: string } = {}): 
 export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & { size(): number } {
   const now = options.now ?? Date.now;
   const map = new Map<string, { value: string; expiresAt: number | null }>();
+  // Expired keys are dropped on access and by a periodic sweep on write, as
+  // Redis expires keys nobody reads again.
+  let lastSweep = now();
+  const sweep = () => {
+    const t = now();
+    if (t - lastSweep < SWEEP_INTERVAL_MS) return;
+    lastSweep = t;
+    for (const [k, e] of map) if (e.expiresAt !== null && t >= e.expiresAt) map.delete(k);
+  };
   const live = (key: string) => {
     const e = map.get(key);
     if (!e) return null;
@@ -216,6 +255,7 @@ export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & 
       return live(key)?.value ?? null;
     },
     async set(key, value, opts = {}) {
+      sweep();
       if (opts.onlyIfAbsent && live(key)) return false;
       map.set(key, { value, expiresAt: opts.ttlSeconds ? now() + opts.ttlSeconds * 1000 : null });
       return true;

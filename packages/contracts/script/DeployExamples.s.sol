@@ -28,7 +28,8 @@ import {MockERC721} from "../src/mocks/MockERC721.sol";
 ///
 ///  Environment (all optional):
 ///  - OPERATOR: the issuer operator (relayer or session key) appointed on
-///    PetPass and StoredValueCard, and granted DOOR_ROLE on EventTicketPass.
+///    PetPass, StoredValueCard and StakingPass, and granted DOOR_ROLE on
+///    EventTicketPass.
 ///    Defaults to anvil's second dev account.
 ///  - PASS_BASE_URL: origin the pass base URIs are built on. Defaults to
 ///    http://localhost:3000.
@@ -94,6 +95,7 @@ contract DeployExamples is Script {
         );
         d.stakingPass.setPassBaseURI(_base(origin, address(d.stakingPass)));
         d.rewardToken.mint(address(d.stakingPass), 1_000_000e18);
+        d.stakingPass.setActionOperator(operator, true);
 
         d.eventTicketPass = new EventTicketPass(_base(origin), deployer, deployer, 500);
         d.eventTicketPass.setPassBaseURI(_base(origin, address(d.eventTicketPass)));

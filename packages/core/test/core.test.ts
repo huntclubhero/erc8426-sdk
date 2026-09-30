@@ -121,6 +121,12 @@ describe("manifest", () => {
   it("requires the google format to be a Save to Google Wallet link", () => {
     expect(parseManifest({ formats: { google: "https://evil.example/save" } }).ok).toBe(false);
   });
+  it("refuses acquisition URLs a client could not safely navigate to", () => {
+    for (const url of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "http://evil.example/p.pkpass"]) {
+      expect(parseManifest({ formats: { apple: url } }).ok).toBe(false);
+    }
+    expect(parseManifest({ formats: { apple: "http://localhost:3000/p.pkpass" } }).ok).toBe(true);
+  });
   it("requires integer seconds and flags milliseconds", () => {
     expect(parseManifest({ ...good, updatedAt: 1.5 }).ok).toBe(false);
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });

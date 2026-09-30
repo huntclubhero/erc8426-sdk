@@ -14,6 +14,7 @@ contract DeployExamplesTest is Test {
 
         assertTrue(d.petPass.isActionOperator(operator));
         assertTrue(d.storedValueCard.isActionOperator(operator));
+        assertTrue(d.stakingPass.isActionOperator(operator));
         assertTrue(d.storedValueCard.isMerchant(operator));
         assertTrue(d.eventTicketPass.hasRole(d.eventTicketPass.DOOR_ROLE(), operator));
         assertEq(d.rewardToken.balanceOf(address(d.stakingPass)), 1_000_000e18);

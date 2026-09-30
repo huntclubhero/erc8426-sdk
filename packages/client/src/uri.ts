@@ -38,6 +38,45 @@ export function resolveUri(uri: string, options: GatewayOptions = {}): string {
   throw new Error(`unsupported URI scheme: ${value.split(":")[0] ?? value}`);
 }
 
+export interface UrlPolicy {
+  /// Allow plain http to any host. Off by default: a contract or an issuer
+  ///  response must not be able to point the client at http, where anything
+  ///  on the path can read or rewrite it, or (server side) at an internal
+  ///  service. Turn on only for server-side development against a non-local
+  ///  http host.
+  allowInsecureHttp?: boolean;
+}
+
+/// True for localhost, 127.0.0.0/8 and ::1, the only hosts plain http is
+///  accepted for by default.
+export function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127(\.[0-9]{1,3}){3}$/.test(h);
+}
+
+/// Whether a URL may be fetched or navigated to: https always, http only on
+///  a loopback host unless the policy allows it. Every other scheme
+///  (javascript:, file:, data: and the rest) is refused.
+export function isAllowedUrl(url: string, policy: UrlPolicy = {}): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:") return policy.allowInsecureHttp === true || isLoopbackHost(u.hostname);
+  return false;
+}
+
+/// The check a client runs before handing an acquisition URL to
+///  window.location: https, or http on a loopback host for local testing.
+///  Never widened by a policy, because a navigation target from a manifest
+///  is attacker-influenced in the public configuration.
+export function isSafeNavigationUrl(url: string): boolean {
+  return isAllowedUrl(url);
+}
+
 export interface DataUri {
   mediaType: string;
   text: string;

@@ -66,8 +66,13 @@ export function parseManifest(value: unknown): ManifestParseResult {
         issues.push({ level: "error", path, message: "acquisition URL is not an absolute URL" });
         continue;
       }
-      if (parsed.protocol !== "https:" && !isLocalhost(parsed)) {
-        issues.push({ level: "warning", path, message: "acquisition URL is not https" });
+      // An acquisition URL is navigated to by clients, so any other scheme
+      // (javascript:, data:, file:) would run in the client's origin. Only
+      // https is accepted, plus http on localhost for development.
+      const devHttp = parsed.protocol === "http:" && isLocalhost(parsed);
+      if (parsed.protocol !== "https:" && !devHttp) {
+        issues.push({ level: "error", path, message: "acquisition URL must be https (http only on localhost)" });
+        continue;
       }
       if (key === FORMAT_GOOGLE && !url.startsWith(GOOGLE_SAVE_URL_PREFIX)) {
         issues.push({ level: "error", path, message: `the google format MUST be a Save to Google Wallet link (${GOOGLE_SAVE_URL_PREFIX}...)` });

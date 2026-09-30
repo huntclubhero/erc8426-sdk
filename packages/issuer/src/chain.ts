@@ -68,12 +68,45 @@ export const delegateRegistryAbi = [
   },
 ] as const;
 
+function revertOf(error: unknown): ContractFunctionRevertedError | null {
+  if (error instanceof ContractFunctionRevertedError) return error;
+  if (!(error instanceof BaseError)) return null;
+  return (error.walk((e) => e instanceof ContractFunctionRevertedError) as ContractFunctionRevertedError | null) ?? null;
+}
+
 /// True when the error is a contract revert (the chain answered), as opposed
 ///  to a transport or node failure (no answer).
 export function isRevert(error: unknown): boolean {
-  if (error instanceof ContractFunctionRevertedError) return true;
-  return error instanceof BaseError && error.walk((e) => e instanceof ContractFunctionRevertedError) !== null;
+  return revertOf(error) !== null;
 }
+
+/// The ERC-721 nonexistent-token errors: OpenZeppelin 5 `ERC721NonexistentToken(uint256)`
+///  (selector 0x7e273289), and the revert strings of OpenZeppelin 4 and
+///  older ("ERC721: invalid token ID", "owner query for nonexistent token").
+const NONEXISTENT_SELECTOR = "0x7e273289";
+const NONEXISTENT_REASON = /nonexistent token|invalid token id|token does not exist/i;
+
+/// True only for a revert that says the token does not exist. Any other
+///  revert (a paused contract, a proxy mid-upgrade, a custom guard) says
+///  nothing about ownership, so it is a failed read, never a burn.
+export function isNonexistentTokenRevert(error: unknown): boolean {
+  const r = revertOf(error);
+  if (!r) return false;
+  return (
+    r.data?.errorName === "ERC721NonexistentToken" ||
+    r.signature === NONEXISTENT_SELECTOR ||
+    (r.raw !== undefined && r.raw.toLowerCase().startsWith(NONEXISTENT_SELECTOR)) ||
+    (typeof r.reason === "string" && NONEXISTENT_REASON.test(r.reason))
+  );
+}
+
+// ownerOf, userOf and userExpires plus the error that marks nonexistence, so
+// viem decodes it by name.
+const readAbi = [
+  ...erc721Abi,
+  ...erc4907Abi,
+  { type: "error", name: "ERC721NonexistentToken", inputs: [{ name: "tokenId", type: "uint256" }] },
+] as const;
 
 function nonZero(address: unknown): Address | null {
   if (typeof address !== "string") throw new Error(`unexpected read result: ${String(address)}`);
@@ -89,17 +122,18 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       try {
         const owner = await client.readContract({
           address: token.contract,
-          abi: erc721Abi,
+          abi: readAbi,
           functionName: "ownerOf",
           args: [BigInt(token.tokenId)],
           blockTag,
         });
         return nonZero(owner);
       } catch (error) {
-        // ERC-721 ownerOf reverts for a token that does not exist (OpenZeppelin
-        // v5 with ERC721NonexistentToken): an answer, not a failed read.
-        // Anything else is rethrown so the issuer answers 503, not 403.
-        if (isRevert(error)) return null;
+        // ERC-721 ownerOf reverts for a token that does not exist: an answer
+        // (no owner), which the issuer may act on destructively (a burn). Any
+        // other revert or failure is rethrown so the issuer answers 503, not
+        // 403, and never voids a pass on it.
+        if (isNonexistentTokenRevert(error)) return null;
         throw error;
       }
     },
@@ -108,14 +142,15 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       const args = [BigInt(token.tokenId)] as const;
       try {
         const [user, expires] = await Promise.all([
-          client.readContract({ address: token.contract, abi: erc4907Abi, functionName: "userOf", args, blockTag }),
-          client.readContract({ address: token.contract, abi: erc4907Abi, functionName: "userExpires", args, blockTag }),
+          client.readContract({ address: token.contract, abi: readAbi, functionName: "userOf", args, blockTag }),
+          client.readContract({ address: token.contract, abi: readAbi, functionName: "userExpires", args, blockTag }),
         ]);
         return { user: nonZero(user), expires: BigInt(expires as bigint) };
       } catch (error) {
-        // A revert means no rental state for this token (nonexistent, or the
-        // contract answers for minted tokens only): no user.
-        if (isRevert(error)) return { user: null, expires: 0n };
+        // A nonexistent token has no user. Any other revert is a failed read:
+        // reading it as "no rental" would hand an exclusive rental back to
+        // the owner whenever the contract reverts (paused, upgrading).
+        if (isNonexistentTokenRevert(error)) return { user: null, expires: 0n };
         throw error;
       }
     },

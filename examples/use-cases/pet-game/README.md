@@ -16,7 +16,7 @@ Mood, hunger, thirst and boredom (0 to 100%), the number of cares, and the "need
 | - | - | - |
 | Feed, Water, Play | **Capability link** (one tap, no signature) | Care cannot transfer, burn or approve the pet, and it cannot change who owns it. The relayer's authority is capped **on chain** by `BoundedAction`: 4 of each care per pet per day, moving no value. |
 | Rotate the links | **Signed** (`rotatePassLinks`, owner signs a `rotate` challenge) | This is the owner's remedy for a leaked link, and a MUST in the capability configuration. |
-| Revoke the relayer for this pet | **Owner transaction** (`setOperatorRevoked`) | An on-chain remedy that does not depend on the issuer. |
+| Switch every relayer off for this pet | **Owner transaction** (`setAllOperatorsRevoked`) | An on-chain remedy that does not depend on the issuer. It also covers relayer keys the issuer rotates in later, and only the owner can switch it back on. |
 | Transfer, approve, burn | **Owner transaction** only | These are never reachable from the pass. The relayer's `transferFrom` reverts. |
 
 ## Spec conditions (The capability configuration)
@@ -31,4 +31,4 @@ Mood, hunger, thirst and boredom (0 to 100%), the number of cares, and the "need
 
 ## The disclosed residual
 
-A forwarded link works for whoever holds it while the owner is unchanged. The demo shows this on purpose: a friend waters the pet through a forwarded link. The worst such a link can do is care for the pet a few times a day. The owner's remedies are rotating the links and revoking the relayer, and both are shown.
+A forwarded link works for whoever holds it while the owner is unchanged. The demo shows this on purpose: a friend waters the pet through a forwarded link. The worst such a link can do is care for the pet a few times a day. The owner's remedies are rotating the links and switching the relayers off on chain, and both are shown.

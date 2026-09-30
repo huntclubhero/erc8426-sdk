@@ -404,6 +404,41 @@ describe("googleFormatProvider", () => {
     expect(next[0]!.id).not.toBe(first[0]!.id);
   });
 
+  it("a superseded serial (voided, as the issuer sends on owner rotation) expires the shared object and clears its links, once", async () => {
+    const { g, p } = setup();
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    expect(JSON.stringify(g.resources.get(`genericObject/${id}`))).toContain("https://issuer.example/a?x=1");
+
+    // The issuer minted a new serial and voids this one: same owner, no links.
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [] })));
+    const obj = g.resources.get(`genericObject/${id}`)!;
+    expect(obj.state).toBe("EXPIRED");
+    expect(obj.linksModuleData).toEqual({ uris: [] });
+    expect(JSON.stringify(obj)).not.toContain("https://issuer.example/a?x=1");
+    expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${id}/addMessage`]);
+    expect(g.messages[0]!.body.message.body).toMatch(/^A newer pass replaced this one/);
+
+    // Idempotent: a repeat notify sends no second message.
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [] })));
+    expect(g.messages).toHaveLength(1);
+
+    // The new serial the issuer minted gets its own object.
+    const fresh = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A, content({ serial: "n3w" }))));
+    expect((fresh.payload.genericObjects as Array<{ id: string }>)[0]!.id).not.toBe(id);
+  });
+
+  it("clears removed links and modules on PATCH, since PATCH merges", async () => {
+    const { g, p } = setup();
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ links: [], header: [], primary: [], secondary: [], back: [] })));
+    const obj = g.resources.get(`genericObject/${id}`)!;
+    expect(obj.linksModuleData).toEqual({ uris: [] });
+    expect(obj.textModulesData).toEqual([]);
+    expect(obj.state).toBe("ACTIVE");
+  });
+
   it("falls back to a fat link when the REST upsert fails, and reports it", async () => {
     const { g, p, errors } = setup();
     // Class creation succeeds; the object insert fails.

@@ -90,10 +90,10 @@ export async function main(): Promise<void> {
     step("A leaked QR code (a screenshot) is the disclosed residual");
     note("anyone holding the QR can charge it, but only at registered merchants and only within the caps above");
     note("remedy: the holder switches tap-to-pay off on chain, and rotates the pass so the QR changes");
-    await s.chain.send(holder, contract, card.abi, "setOperatorRevoked", [1n, relayer.address, true]);
+    await s.chain.send(holder, contract, card.abi, "setAllOperatorsRevoked", [1n, true]);
     await mustRefuse("charge after the holder revoked the relayer", () => terminal($(1)));
     await s.client.rotatePassLinks(token, { signer: holder.account });
-    await s.chain.send(holder, contract, card.abi, "setOperatorRevoked", [1n, relayer.address, false]);
+    await s.chain.send(holder, contract, card.abi, "setAllOperatorsRevoked", [1n, false]);
     await mustRefuse("the leaked QR after rotation", () => terminal($(1)));
     const fresh = await installPass(s.client, token, holder.account);
     await tapLink(fresh.content.barcode!.message, { amount: $(2).toString(), merchant: cafe.address });

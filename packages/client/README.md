@@ -10,7 +10,8 @@ npm install @erc8426/client @erc8426/core viem
 
 - **Discovery.** `supportsWalletPass` runs the full ERC-165 detection procedure for `0xef5f1e71` and answers `false` (never throws) for contracts without ERC-165.
 - **Both configurations.** A manifest served without a proof is the public configuration. A `401 proof_required` is the gated configuration: the client fetches the acquire challenge, has your signer sign it, and retries with the `X-Wallet-Pass-Proof` and `X-Wallet-Pass-Signature` headers.
-- **Protection for the signer.** Before a challenge reaches the signer, the client checks it is scoped to what the user asked for: the SIWE domain is the host that served the challenge, the address is the signer, the chain id and CAIP-19 token are the requested token, the action is the requested action, and the expiration is in the future and not too far away. Anything else is refused with `source: "client"` and nothing is signed.
+- **Protection for the signer.** Before a challenge reaches the signer, the client checks it is scoped to what the user asked for. The challenge must be served from the same origin as the endpoint the proof will be sent to, and its SIWE domain must be exactly that endpoint's host (including a non-default port), so a signature meant for one verifier is never handed to another. The address must be the signer, the chain id the token's chain, and the resources exactly two in order: the CAIP-19 token, then the action URN (an extra resource such as a ReCap is refused). The expiration must be in the future and not too far away. The statement line is free text and is not relied on. Anything else is refused with `source: "client"` and nothing is signed.
+- **Safe URLs.** Everything the client fetches came from a contract or an issuer, so it fetches only https (or http on a loopback host), and it never returns an acquisition URL for navigation unless it is https (or http on localhost). `javascript:`, `data:` and non-local `http:` are refused.
 - **No caching.** The spec says clients MUST NOT durably cache acquisition URLs and SHOULD fetch the manifest at the moment of the add-to-wallet action. Every call re-reads `passURI` and refetches the manifest.
 - **Typed errors.** `403` is always `not_owner` (the spec reserves it for a verified proof from an account that is not entitled). `503` is `read_failed` with `retryable: true` and `retryAfterSeconds` from `Retry-After`. Other refusals keep the issuer's `error` code when it is a core code; an issuer code outside the core set (an integrator's cooldown, `invalid_params`) becomes `action_refused` for a 4xx or `server_error` for a 5xx, with the issuer's string in `serverCode`. `network` means only a fetch that failed or timed out.
 - **Typed chain reads.** A `passURI` or `tokenURI` revert (a token that does not exist or was burned) is `not_found` with `source: "chain"`; an address with no contract is `unsupported`; an RPC that could not answer is `network` with `retryable: true`. No raw viem error escapes.
@@ -130,6 +131,8 @@ The first manifest request is a plain GET, so it needs no preflight. The gated r
 | `ipfsGateway`, `arweaveGateway` | gateways for `ipfs://` and `ar://`, default `https://ipfs.io` and `https://arweave.net` |
 | `maxChallengeTtlSeconds` | longest challenge lifetime the client will sign, default 3600 |
 | `trustedChallengeDomains` | extra SIWE domains to accept, for development only |
+| `allowCrossOriginChallenge` | follow a challenge URL on another origin than the proof's endpoint, for development only |
+| `allowInsecureHttp` | fetch plain http from non-loopback hosts, for server-side development only |
 
 Returns:
 
@@ -142,14 +145,14 @@ Returns:
 | `getAcquisitionUrl(token, platform, { signer? })` | `Promise<string>` |
 | `addToWallet(token, { signer?, platform?, userAgent? })` | `Promise<{ url, platform, configuration, manifest }>` |
 | `readMetadataMirror(token)` | `Promise<{ authoritative: false, tokenUri, result }>` |
-| `requestChallenge(token, action, account, { endpoint? })` | `Promise<{ message, parsed, challengeUrl }>` |
+| `requestChallenge(token, action, account, { endpoint?, presentTo? })` | `Promise<{ message, parsed, challengeUrl }>` |
 | `signedAction({ token, action, signer, endpoint?, challengeEndpoint?, params? })` | `Promise<{ status, body }>` |
 | `rotatePassLinks(token, { signer, endpoint?, challengeEndpoint? })` | `Promise<{ status, body }>` |
 | `issuerDisplay(token)` | `Promise<{ chainId, contract, contractShort, tokenId, passUri, origin }>` |
 | `watchPassUpdates(contract \| undefined, onUpdate, opts?)` | unwatch function |
 | `getPassUpdates({ contract?, fromBlock?, toBlock? })` | `Promise<PassUpdateNotice[]>` |
 
-Standalone helpers: `detectPlatform(ua)`, `choosePlatform(available, detected)`, `resolveUri(uri, gateways)`, `decodeDataUri(uri)`, `uriOrigin(uri)`, `originMatches(passUri, expectedOrigins)`, `passBase(url)`, `shortAddress(address)`, `fromWalletClient(walletClient, account?)`, `checkChallengeScope(message, expected)`, `domainsForUrl(url)`, `passUpdateCovers(update, tokenId)`, `normalizePassUpdateLog(log)`, `errorFromResponse(status, headers, body)`, `errorFromChainRead(error, what)`, `parseRetryAfter(value)`, and the `WalletPassClientError` class (a `WalletPassError` with `source` (`server`, `chain` or `client`), `retryable`, `retryAfterSeconds`, `challenge`, `serverCode`, `body`; an issuer code outside the core set becomes `action_refused` (4xx) or `server_error` (5xx) and is kept verbatim in `serverCode`; `network` means only a failed or timed out fetch).
+Standalone helpers: `detectPlatform(ua)`, `choosePlatform(available, detected)`, `resolveUri(uri, gateways)`, `decodeDataUri(uri)`, `uriOrigin(uri)`, `originMatches(passUri, expectedOrigins)`, `passBase(url)`, `shortAddress(address)`, `fromWalletClient(walletClient, account?)`, `checkChallengeScope(message, expected)`, `domainsForUrl(url)`, `passUpdateCovers(update, tokenId)`, `normalizePassUpdateLog(log)`, `errorFromResponse(status, headers, body)`, `errorFromChainRead(error, what)`, `parseRetryAfter(value)`, `isAllowedUrl(url, { allowInsecureHttp? })`, `isSafeNavigationUrl(url)`, `isLoopbackHost(hostname)`, and the `WalletPassClientError` class (a `WalletPassError` with `source` (`server`, `chain` or `client`), `retryable`, `retryAfterSeconds`, `challenge`, `serverCode`, `body`; an issuer code outside the core set becomes `action_refused` (4xx) or `server_error` (5xx) and is kept verbatim in `serverCode`; `network` means only a failed or timed out fetch).
 
 ## License
 

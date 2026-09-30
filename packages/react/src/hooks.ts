@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Address } from "viem";
 import {
+  WalletPassClientError,
   detectPlatform,
+  isSafeNavigationUrl,
   passUpdateCovers,
   type AddToWalletResult,
   type FormatKey,
@@ -16,8 +18,13 @@ export type AsyncStatus = "idle" | "loading" | "success" | "error";
 
 /// Navigate the page to an acquisition URL. A .pkpass response hands off to
 ///  Wallet and a Save to Google Wallet link opens the save flow, so a plain
-///  top-level navigation is the right primitive for both.
+///  top-level navigation is the right primitive for both. Anything but https
+///  (or http on localhost) is refused: a javascript: URL here would run in
+///  the page's origin.
 export function defaultNavigate(url: string): void {
+  if (!isSafeNavigationUrl(url)) {
+    throw new WalletPassClientError("invalid_manifest", "refusing to navigate to an acquisition URL that is not https", { source: "client" });
+  }
   if (typeof window !== "undefined") window.location.assign(url);
 }
 
@@ -118,6 +125,10 @@ export function useWalletPass(options: UseWalletPassOptions): UseWalletPassResul
           ...(o.platform ? { platform: o.platform } : {}),
         },
       );
+      // Checked here too, so a custom navigate never receives an unsafe URL.
+      if (!isSafeNavigationUrl(result.url)) {
+        throw new WalletPassClientError("invalid_manifest", "refusing to navigate to an acquisition URL that is not https", { source: "client" });
+      }
       (o.navigate ?? defaultNavigate)(result.url);
       setStatus("added");
       o.onAdded?.(result);

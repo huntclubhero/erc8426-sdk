@@ -26,7 +26,8 @@ import {BoundedAction} from "../utils/BoundedAction.sol";
 ///
 ///  Needs the owner's own signed transaction:
 ///  - transfer, approve, burn (standard ERC-721, never pass-reachable);
-///  - `setOperatorRevoked`, the owner's on-chain remedy.
+///  - `setAllOperatorsRevoked` / `setOperatorRevoked`, the owner's on-chain
+///    remedy (the first also covers relayers the issuer appoints later).
 ///  The owner (or an approved account) may also call the care functions
 ///  directly; that signed path is not rate limited, because it carries the
 ///  owner's own authority rather than a bearer link's.
@@ -88,6 +89,11 @@ contract PetPass is ERC721WalletPass, BoundedAction, Ownable {
 
     function setActionOperator(address operator, bool allowed) external onlyOwner {
         _setActionOperator(operator, allowed);
+    }
+
+    /// @notice Appoint an operator for one care action only.
+    function setActionOperatorFor(address operator, bytes32 actionId, bool allowed) external onlyOwner {
+        _setActionOperatorFor(operator, actionId, allowed);
     }
 
     function configureAction(bytes32 actionId, uint32 maxPerWindow, uint32 windowSeconds) external onlyOwner {

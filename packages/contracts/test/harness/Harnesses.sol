@@ -80,6 +80,10 @@ contract BoundedHarness is ERC721WalletPass, BoundedAction {
         _setActionOperator(operator, allowed);
     }
 
+    function setActionOperatorFor(address operator, bytes32 id, bool allowed) external {
+        _setActionOperatorFor(operator, id, allowed);
+    }
+
     function configureAction(bytes32 id, uint32 maxPerWindow, uint32 windowSeconds, uint128 perCall, uint128 perWindow)
         external
     {

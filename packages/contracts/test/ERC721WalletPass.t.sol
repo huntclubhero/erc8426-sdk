@@ -68,10 +68,13 @@ contract ERC721WalletPassTest is Test {
         pass.passURI(1);
     }
 
-    function test_PassURIEmptyBaseReturnsEmpty() public {
+    function test_PassURIRevertsWhileNoBase() public {
         WalletPassHarness empty = new WalletPassHarness("");
         empty.mint(alice, 1);
-        assertEq(empty.passURI(1), "");
+        vm.expectRevert(ERC721WalletPass.ERC721WalletPassNoPassBaseURI.selector);
+        empty.passURI(1);
+        empty.setPassBaseURI("https://p.example/");
+        assertEq(empty.passURI(1), "https://p.example/1");
     }
 
     function test_SetPassBaseURIEmitsAndApplies() public {
