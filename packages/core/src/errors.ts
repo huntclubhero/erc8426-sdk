@@ -121,9 +121,21 @@ export function isProofRequiredBody(value: unknown): value is ProofRequiredBody 
   );
 }
 
+/// Every code a WalletPassError can carry: the wire codes, plus client-side
+///  kinds. `action_refused` is a 4xx outside the core set (an integrator's
+///  own refusal such as a cooldown), `server_error` a 5xx outside it, and
+///  `network` only a failed or timed out fetch.
+export type WalletPassErrorKind =
+  | WalletPassErrorCode
+  | "network"
+  | "invalid_manifest"
+  | "unsupported"
+  | "action_refused"
+  | "server_error";
+
 /// Thrown by client helpers for a refusal the caller should handle.
 export class WalletPassError extends Error {
-  readonly code: WalletPassErrorCode | "network" | "invalid_manifest" | "unsupported";
+  readonly code: WalletPassErrorKind;
   readonly status: number | undefined;
   constructor(code: WalletPassError["code"], message: string, status?: number) {
     super(message);

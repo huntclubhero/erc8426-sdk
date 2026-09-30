@@ -82,7 +82,7 @@ describe("onPassUpdate", () => {
     await issuePassTo(h, owner);
     const before = (await h.issuer.stores.passes.get(TOKEN_ID))!.updatedAt;
     h.clock.advance(60_000);
-    expect(await h.issuer.onPassUpdate(TOKEN_ID)).toEqual({ updated: 1 });
+    expect(await h.issuer.onPassUpdate(TOKEN_ID)).toMatchObject({ updated: 1, burned: [], rotated: [] });
     const after = (await h.issuer.stores.passes.get(TOKEN_ID))!.updatedAt;
     expect(after).toBe(before + 60);
     expect(h.notified.map((n) => n.format).sort()).toEqual(["apple", "google"]);
@@ -94,14 +94,14 @@ describe("onPassUpdate", () => {
   it("treats a BatchPassUpdate range as inclusive of both ends", async () => {
     const h = buildHarness();
     for (const id of ["9", "10", "11", "12"]) await issuePassTo(h, newSigner(), id);
-    expect(await h.issuer.onPassUpdate(10n, 11n)).toEqual({ updated: 2 });
-    expect(await h.issuer.onPassUpdate("9", "12")).toEqual({ updated: 4 });
+    expect(await h.issuer.onPassUpdate(10n, 11n)).toMatchObject({ updated: 2 });
+    expect(await h.issuer.onPassUpdate("9", "12")).toMatchObject({ updated: 4 });
   });
 
   it("serves a range wider than maxBatchRange from the store index", async () => {
     const h = buildHarness({ maxBatchRange: 10 });
     await issuePassTo(h, newSigner(), "5");
-    expect(await h.issuer.onPassUpdate(0n, (1n << 255n))).toEqual({ updated: 1 });
+    expect(await h.issuer.onPassUpdate(0n, (1n << 255n))).toMatchObject({ updated: 1, burned: [], rotated: [] });
   });
 
   it("refuses an inverted range", async () => {

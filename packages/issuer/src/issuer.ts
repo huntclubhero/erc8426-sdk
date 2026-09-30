@@ -1,4 +1,4 @@
-import { getAddress, isAddress, isAddressEqual, type Address } from "viem";
+import { getAddress, isAddress, isAddressEqual, zeroAddress, type Address } from "viem";
 import {
   ACQUIRE_ACTION,
   ROTATE_ACTION,
@@ -64,6 +64,11 @@ export interface CreateIssuerOptions extends IssuerConfig {
   /// Describe the pass for a token and holder. Called when a manifest is
   ///  built, a pass file is served, and an update is pushed.
   render(ctx: RenderContext): PassContent | Promise<PassContent>;
+  /// What a burned token's installed pass is pushed as. `render` is never
+  ///  called for a token that no longer exists (it would read a dead token),
+  ///  so this gets only what the issuer knows. The issuer sets `voided` and
+  ///  drops links regardless. Default: a card titled "No longer exists".
+  renderBurned?(ctx: { token: TokenRef; serial: string; owner: Address }): PassContent | Promise<PassContent>;
   /// A viem PublicClient. Supplies the fresh-read chain reader and the
   ///  ERC-1271 / ERC-6492 capable signature verifier unless those are given.
   publicClient?: ReadContractClient & VerifyMessageClient;
@@ -95,6 +100,12 @@ export interface IssuedChallenge {
 export interface PassUpdateSummary {
   /// Tokens whose record was found and whose `updatedAt` was bumped.
   updated: number;
+  /// Tokens the fresh read found burned: their passes were voided and their
+  ///  links retired, and render was not called.
+  burned: string[];
+  /// Tokens the fresh read found held by someone the pass was not issued
+  ///  to: an unobserved transfer, rotated here as onTransfer would.
+  rotated: string[];
 }
 
 export interface Issuer {
@@ -122,11 +133,18 @@ export interface Issuer {
   ///  issued to (default: the current holder of record).
   rotate(tokenId: string | number | bigint, options?: { account?: string }): Promise<void>;
   /// A transfer was observed (watcher, indexer webhook). Rotates the token's
-  ///  links and marks the previous holder's pass superseded. Idempotent
-  ///  enough for at-least-once delivery. Returns whether it rotated.
+  ///  links and marks the previous holder's pass superseded. A transfer to
+  ///  the zero address is a burn: the holder's passes are voided (without
+  ///  calling render) and every link is retired. Idempotent enough for
+  ///  at-least-once delivery. Returns whether it rotated.
   onTransfer(tokenId: string | number | bigint, from: string, to: string): Promise<boolean>;
   /// PassUpdate (one id) or BatchPassUpdate (inclusive range): bump
-  ///  `updatedAt` and push fresh content through every provider.
+  ///  `updatedAt`, take a fresh ownerOf read for every issued pass, and push
+  ///  fresh content through every provider. A token read as burned (a burn
+  ///  emits PassUpdate) is voided instead of rendered; one held by someone
+  ///  the pass was not issued to is rotated as an observed transfer. A read
+  ///  that could not be taken throws IssuerError read_failed after the rest
+  ///  of the range is processed.
   onPassUpdate(fromTokenId: string | number | bigint, toTokenId?: string | number | bigint): Promise<PassUpdateSummary>;
   /// The token's current capability action links, keyed by action. Empty
   ///  when the token has no record yet or the capability configuration is off.
@@ -311,6 +329,48 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return next;
   }
 
+  // A burned token: void the holder's installed passes without rendering
+  // (render would read a token that no longer exists) and retire every link
+  // and download. Nothing is minted in their place; a re-mint starts over.
+  async function burnRecord(record: PassRecord): Promise<void> {
+    const next: PassRecord = {
+      ...record,
+      generation: record.generation + 1,
+      serial: newSerial(),
+      lastIssuedTo: null,
+      links: {},
+      downloads: {},
+      rotatedAt: nowSeconds(),
+    };
+    await stores.passes.put(next);
+    await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
+    const holder = record.lastIssuedTo;
+    if (!holder) return;
+    const targets = providers.filter((p) => typeof p.notifyUpdate === "function");
+    if (targets.length === 0) return;
+    const t = token(record.tokenId);
+    let content: PassContent;
+    try {
+      content = options.renderBurned
+        ? await options.renderBurned({ token: t, serial: record.serial, owner: holder })
+        : {
+            serial: record.serial,
+            organizationName: config.domain,
+            description: `Token ${record.tokenId} no longer exists`,
+            title: "No longer exists",
+            primary: [{ key: "status", label: "STATUS", value: "Burned" }],
+          };
+    } catch (error) {
+      onError(error, { operation: "burn:render", tokenId: record.tokenId });
+      return;
+    }
+    const ctx: PassContext = { token: t, owner: holder, content: { ...content, serial: record.serial, voided: true, links: [] } };
+    const results = await Promise.allSettled(targets.map((p) => p.notifyUpdate!(ctx)));
+    results.forEach((r, i) => {
+      if (r.status === "rejected") onError(r.reason, { operation: `burn:${targets[i]!.format}`, tokenId: record.tokenId });
+    });
+  }
+
   const internals: IssuerInternals = {
     config,
     stores,
@@ -431,17 +491,47 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           `BatchPassUpdate range of ${to - from + 1n} ids exceeds maxBatchRange (${config.maxBatchRange}) and the pass store has no tokenIds() index`,
         );
       }
-      let updated = 0;
+      const summary: PassUpdateSummary = { updated: 0, burned: [], rotated: [] };
+      const failed: string[] = [];
       for (const id of ids) {
         const record = await stores.passes.get(id);
         if (!record) continue;
         // updatedAt SHOULD change whenever PassUpdate is emitted for the token.
         record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
         await stores.passes.put(record);
-        updated++;
-        if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, false, "update");
+        summary.updated++;
+        const holder = record.lastIssuedTo;
+        if (!holder) continue;
+        // Fresh read before rendering: a burn emits PassUpdate too, and a
+        // transfer no watcher has seen yet must not push the new owner's
+        // state to the previous holder's pass.
+        let owner: Address | null;
+        let stillEntitled: boolean;
+        try {
+          owner = await chain.ownerOf(token(id));
+          stillEntitled = owner !== null && (await internals.entitled(id, holder, ACQUIRE_ACTION)).entitled;
+        } catch (error) {
+          onError(error, { operation: "update:read", tokenId: id });
+          failed.push(id);
+          continue;
+        }
+        if (owner === null) {
+          await burnRecord(record);
+          summary.burned.push(id);
+        } else if (!stillEntitled) {
+          await rotateRecord(record, "transfer", null);
+          summary.rotated.push(id);
+        } else {
+          await notify(record, holder, false, "update");
+        }
       }
-      return { updated };
+      if (failed.length > 0) {
+        throw new IssuerError(
+          "read_failed",
+          `the fresh ownerOf read could not be taken for token(s) ${failed.join(", ")}; nothing was rendered for them`,
+        );
+      }
+      return summary;
     },
   };
 
@@ -470,6 +560,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const record = await stores.passes.get(id);
       // Nothing was ever issued for this token: no URL to retire.
       if (!record) return false;
+      // A transfer to the zero address is a burn.
+      if (isAddress(to, { strict: false }) && isAddressEqual(to as Address, zeroAddress)) {
+        await burnRecord(record);
+        return true;
+      }
       // Already issued to the recipient (the buyer's first claim beat the
       // indexer, or a self transfer): its links are the new owner's already.
       if (record.lastIssuedTo && isAddress(to, { strict: false }) && isAddressEqual(record.lastIssuedTo, to as Address)) return false;

@@ -35,6 +35,15 @@ export function describeError(error: Error): string {
         return "The issuer returned an invalid pass manifest.";
       case "network":
         return "The pass server could not be reached.";
+      case "server_error":
+      case "internal_error":
+        return "The pass server had a problem. Try again shortly.";
+      case "action_refused":
+        return "The issuer refused this request.";
+      case "not_found":
+        return "This token does not exist.";
+      case "unsupported":
+        return "This contract does not offer wallet passes.";
     }
   }
   if ((error as { name?: string }).name === "UserRejectedRequestError") return "Signature request was declined.";

@@ -323,10 +323,65 @@ describe("errors", () => {
   it("treats 403 as not_owner whatever the body says and parses Retry-After", () => {
     expect(errorFromResponse(403, new Headers(), { error: "invalid_message" }).code).toBe("not_owner");
     expect(errorFromResponse(401, new Headers(), { error: "nonce_invalid", challenge: "https://x/c" })).toMatchObject({ code: "nonce_invalid", challenge: "https://x/c" });
-    expect(errorFromResponse(418, new Headers(), "teapot").code).toBe("network");
+    expect(errorFromResponse(418, new Headers(), "teapot").code).toBe("action_refused");
     expect(parseRetryAfter("7")).toBe(7);
     expect(parseRetryAfter(new Date(Date.now() + 10_000).toUTCString())).toBeGreaterThanOrEqual(9);
     expect(parseRetryAfter(null)).toBeUndefined();
+  });
+});
+
+describe("honest codes for issuer answers outside the core set", () => {
+  it("an integrator's 4xx refusal is action_refused, never network, and keeps serverCode", () => {
+    const e = errorFromResponse(429, new Headers({ "retry-after": "60" }), { error: "cooldown", message: "fed an hour ago" });
+    expect(e).toMatchObject({ code: "action_refused", serverCode: "cooldown", status: 429, retryable: true, retryAfterSeconds: 60, source: "server" });
+    expect(errorFromResponse(409, new Headers(), { error: "invalid_params" })).toMatchObject({ code: "action_refused", serverCode: "invalid_params", retryable: false });
+  });
+
+  it("a 5xx outside the core set is server_error; core codes pass through", () => {
+    expect(errorFromResponse(502, new Headers(), "bad gateway")).toMatchObject({ code: "server_error", retryable: true });
+    expect(errorFromResponse(500, new Headers(), { error: "action_failed" }).code).toBe("action_failed");
+    expect(errorFromResponse(503, new Headers(), {}).code).toBe("read_failed");
+  });
+
+  it("keeps network for a fetch that failed", async () => {
+    const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: () => "https://down.example/p" } } });
+    const client = createWalletPassClient({ publicClient: chain.client, fetch: (async () => { throw new TypeError("fetch failed"); }) as never });
+    await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "network", source: "server", retryable: true });
+  });
+});
+
+describe("chain reads", () => {
+  it("a passURI revert (nonexistent or burned token) is a typed not_found from the chain", async () => {
+    const chain = fakeChain({ contracts: { [CONTRACT]: { interfaces: [WALLET_PASS_INTERFACE_ID] } } });
+    const client = createWalletPassClient({ publicClient: chain.client });
+    const e = await client.getManifest({ contract: CONTRACT, tokenId: 99 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(WalletPassClientError);
+    expect(e).toMatchObject({ code: "not_found", source: "chain", retryable: false });
+    await expect(client.getPassURI({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
+    await expect(client.issuerDisplay({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
+    await expect(client.readMetadataMirror({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("an address with no contract is unsupported", async () => {
+    const chain = fakeChain({ contracts: {} });
+    const client = createWalletPassClient({ publicClient: chain.client });
+    await expect(client.getManifest({ contract: PLAIN, tokenId: 1 })).rejects.toMatchObject({ code: "unsupported", source: "chain" });
+  });
+
+  it("an RPC that cannot answer is a retryable network error, not a verdict on the token", async () => {
+    const chain = fakeChain({
+      contracts: {
+        [CONTRACT]: {
+          passURI: () => {
+            throw new Error("upstream timeout");
+          },
+        },
+      },
+    });
+    const client = createWalletPassClient({ publicClient: chain.client });
+    const e = await client.getManifest({ contract: CONTRACT, tokenId: 1 }).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(WalletPassClientError);
+    expect(e).toMatchObject({ code: "network", source: "chain", retryable: true });
   });
 });
 

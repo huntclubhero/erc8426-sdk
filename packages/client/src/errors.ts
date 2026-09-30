@@ -1,9 +1,11 @@
+import { BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError } from "viem";
 import { WalletPassError, isWalletPassErrorCode } from "@erc8426/core";
 
-/// Where a refusal came from. `server` is an issuer response; `client` is this
-///  SDK declining to proceed, most importantly refusing to have the user sign
-///  a challenge that is not scoped to what they asked for.
-export type ErrorSource = "server" | "client";
+/// Where a refusal came from. `server` is an issuer response; `chain` is a
+///  contract read (a revert, or an RPC that could not answer); `client` is
+///  this SDK declining to proceed, most importantly refusing to have the user
+///  sign a challenge that is not scoped to what they asked for.
+export type ErrorSource = "server" | "chain" | "client";
 
 /// The client's error. Still a WalletPassError (so `instanceof` checks and
 ///  `code` switches written against core keep working), plus what a UI needs
@@ -79,7 +81,13 @@ export function errorFromResponse(status: number, headers: Headers, body: unknow
   else if (isWalletPassErrorCode(bodyCode)) code = bodyCode;
   else if (status === 503) code = "read_failed";
   else if (status === 404) code = "not_found";
-  else code = "network";
+  // A code outside the core set (an integrator's ActionError such as a 429
+  // cooldown or a 409) is still an answer from the issuer, never "network":
+  // that code is kept for a fetch that failed or timed out. The issuer's own
+  // string survives verbatim in serverCode.
+  else if (status >= 500) code = "server_error";
+  else if (status >= 400) code = "action_refused";
+  else code = "server_error";
 
   const message =
     status === 403
@@ -96,4 +104,23 @@ export function errorFromResponse(status: number, headers: Headers, body: unknow
     ...(bodyCode !== undefined ? { serverCode: bodyCode } : {}),
     body,
   });
+}
+
+/// Map a failed contract read to a typed error. A revert is the chain's
+///  answer: `passURI`, `tokenURI` and `ownerOf` revert for a token that does
+///  not exist or was burned, so it becomes `not_found`. Empty return data
+///  means no contract (or one without the function) at the address:
+///  `unsupported`. Anything else is an RPC that could not answer, which is
+///  retryable `network`, never a verdict on the token.
+export function errorFromChainRead(error: unknown, what: string): WalletPassClientError {
+  const detail = error instanceof Error ? error.message.split("\n")[0] : String(error);
+  const find = (cls: abstract new (...args: never[]) => Error) =>
+    error instanceof cls || (error instanceof BaseError && error.walk((e) => e instanceof cls) !== null);
+  if (find(ContractFunctionZeroDataError)) {
+    return new WalletPassClientError("unsupported", `${what}: the address has no contract answering it`, { source: "chain" });
+  }
+  if (find(ContractFunctionRevertedError)) {
+    return new WalletPassClientError("not_found", `${what} reverted: the token does not exist or was burned`, { source: "chain" });
+  }
+  return new WalletPassClientError("network", `${what} could not be read: ${detail}`, { source: "chain", retryable: true });
 }

@@ -5,7 +5,7 @@ import { solidPng } from "./png";
 
 /// Apple Wallet, added only when every APPLE_* credential is present. The
 /// issuer serves the signed .pkpass from passFile at its own rotating link;
-/// only the PassKit web service is mounted separately (app/wallet-pass route).
+/// only the PassKit web service is mounted separately (app/apple route).
 /// Apple calls that service only over public https, so on localhost passes
 /// install but do not auto-update.
 let provider: AppleFormatProvider | undefined;
@@ -32,7 +32,8 @@ export function appleProvider(config: ServerConfig): AppleFormatProvider {
     teamIdentifier: apple.teamIdentifier,
     certificates,
     origin: config.baseUrl,
-    basePath: "/wallet-pass/apple",
+    // Outside the issuer's /wallet-pass tree, mounted by app/apple/[...path].
+    basePath: "/apple",
     store,
     ...(apns ? { apns } : {}),
     images: {

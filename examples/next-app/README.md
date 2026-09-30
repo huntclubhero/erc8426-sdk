@@ -99,7 +99,7 @@ RPC_URL=https://sepolia.base.org OPERATOR_PRIVATE_KEY=0x... NEXT_PUBLIC_BASE_URL
 
 It prints `CHAIN_ID`, `CONTRACT_ADDRESS` and `DEPLOY_BLOCK`. Put those, the same key, and `RPC_URL` in the environment. Users connect a browser wallet; the dev wallet is off. Set `MINT_API=off` if you do not want anyone to mint through the operator.
 
-**Real wallet mode.** Add the Apple and/or Google variables from `.env.example`. Each provider is added only when all of its variables are present, and the Add to Wallet buttons appear for the configured platforms. Apple needs a Pass Type ID certificate and the WWDR G4 intermediate (see `packages/apple/README.md`); Google needs an issuer id and a service account (see `packages/google/README.md`). Apple only calls the PassKit web service (`/wallet-pass/apple/v1/...`, mounted automatically) over public https, and Google only fetches images from public https, so live updates need a deployed origin.
+**Real wallet mode.** Add the Apple and/or Google variables from `.env.example`. Each provider is added only when all of its variables are present, and the Add to Wallet buttons appear for the configured platforms. Apple needs a Pass Type ID certificate and the WWDR G4 intermediate (see `packages/apple/README.md`); Google needs an issuer id and a service account (see `packages/google/README.md`). Apple only calls the PassKit web service (`/apple/v1/...`, mounted by `app/apple/[...path]/route.ts` outside the issuer's `/wallet-pass` tree) over public https, and Google only fetches images from public https, so live updates need a deployed origin.
 
 ## Deploying to Vercel
 

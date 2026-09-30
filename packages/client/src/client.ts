@@ -20,7 +20,7 @@ import {
   type TokenRef,
 } from "@erc8426/core";
 
-import { WalletPassClientError, errorFromResponse } from "./errors.js";
+import { WalletPassClientError, errorFromChainRead, errorFromResponse } from "./errors.js";
 import { choosePlatform, detectPlatform, type FormatKey, type WalletPlatform } from "./platform.js";
 import { checkChallengeScope, domainsForUrl, DEFAULT_MAX_CHALLENGE_TTL_SECONDS } from "./scope.js";
 import type { WalletPassSigner } from "./signer.js";
@@ -203,7 +203,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     if (publicClient.chain?.id !== undefined) return Promise.resolve(publicClient.chain.id);
     chainIdPromise ??= getChainId(publicClient).catch((e: unknown) => {
       chainIdPromise = undefined;
-      throw e;
+      throw errorFromChainRead(e, "eth_chainId");
     });
     return chainIdPromise;
   };
@@ -255,13 +255,26 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     }
   }
 
+  /// Every token read goes through here so a nonexistent or burned token is
+  ///  a typed `not_found` and an RPC failure a retryable `network` error,
+  ///  never a raw viem error.
+  async function readToken<T>(what: string, read: () => Promise<T>): Promise<T> {
+    try {
+      return await read();
+    } catch (e) {
+      throw errorFromChainRead(e, what);
+    }
+  }
+
   async function getPassURI(token: TokenInput): Promise<string> {
-    return readContract(publicClient, {
-      address: getAddress(token.contract),
-      abi: walletPassAbi,
-      functionName: "passURI",
-      args: [BigInt(token.tokenId)],
-    });
+    return readToken("passURI", () =>
+      readContract(publicClient, {
+        address: getAddress(token.contract),
+        abi: walletPassAbi,
+        functionName: "passURI",
+        args: [BigInt(token.tokenId)],
+      }),
+    );
   }
 
   function resolvePassURI(uri: string): string {
@@ -399,12 +412,14 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
   }
 
   async function readMetadataMirror(token: TokenInput): Promise<MetadataMirrorResult> {
-    const tokenUri = await readContract(publicClient, {
-      address: getAddress(token.contract),
-      abi: erc721Abi,
-      functionName: "tokenURI",
-      args: [BigInt(token.tokenId)],
-    });
+    const tokenUri = await readToken("tokenURI", () =>
+      readContract(publicClient, {
+        address: getAddress(token.contract),
+        abi: erc721Abi,
+        functionName: "tokenURI",
+        args: [BigInt(token.tokenId)],
+      }),
+    );
     const url = resolvePassURI(tokenUri);
     let metadata: unknown;
     if (/^data:/i.test(url)) {

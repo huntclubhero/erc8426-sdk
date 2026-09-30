@@ -91,8 +91,9 @@ export function describeError(e: unknown): string {
   if (e instanceof WalletPassClientError) {
     const body = e.body as { message?: string } | undefined;
     const detail = body?.message ? `: ${body.message}` : "";
-    // Issuer codes outside the core set arrive as code "network" with the
-    // issuer's own code kept in serverCode; show the more specific one.
+    // Issuer codes outside the core set arrive as action_refused or
+    // server_error with the issuer's own code kept in serverCode; show the
+    // more specific one.
     return `${e.status ?? e.source} ${e.serverCode ?? e.code}${detail}`;
   }
   const reverted = revertName(e);

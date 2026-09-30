@@ -36,8 +36,10 @@ export interface WatchOptions {
 const report = (e: unknown) => console.error("[erc8426/issuer] watcher", e);
 
 /// Subscribe to ERC-721 Transfer logs of the issuer's contract and call
-///  `issuer.onTransfer(tokenId, from, to)` for each, in log order. Returns
-///  the unsubscribe function.
+///  `issuer.onTransfer(tokenId, from, to)` for each, in log order. A
+///  Transfer to the zero address is a burn, which onTransfer handles by
+///  voiding the holder's passes and retiring every link. Returns the
+///  unsubscribe function.
 export function watchTransfers(options: WatchOptions): () => void {
   const onError = options.onError ?? report;
   return options.client.watchContractEvent({

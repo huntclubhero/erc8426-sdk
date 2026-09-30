@@ -153,6 +153,8 @@ await issuer.onPassUpdate(fromTokenId, toTokenId); // inclusive range
 
 A lagging watcher degrades hygiene, never authorization: the fresh read refuses the previous owner's links until rotation catches up.
 
+Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so either hook may see it first. `onTransfer(id, from, zeroAddress)` treats it as a burn, and `onPassUpdate` takes a fresh `ownerOf` read before rendering and treats a token with no owner the same way. Either way the holder's installed passes are pushed as voided and every link and download is retired, and `render` is never called for the dead token (it would read a token that no longer exists). Pass `renderBurned` to choose what the voided card says. `onPassUpdate` also rotates when the read finds the token held by someone the pass was not issued to (a transfer no watcher has seen), so it never pushes a new owner's state to the previous holder's pass. A read that cannot be taken is reported through `onError` and `onPassUpdate` throws `IssuerError` `read_failed` after processing the rest of the range; nothing is rendered for that token.
+
 ## Stores
 
 The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. `kvStores(kv)` builds all three stores on this interface:
