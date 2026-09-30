@@ -110,7 +110,7 @@ Every use case below ships as a Solidity contract in [`packages/contracts/src/ex
 | --- | --- | --- | --- |
 | **Pet game** | A living pet on the card; care for it from the pass | feed, water, play (cooldown bounded on chain) | anything that moves the pet |
 | **Stablecoin spending card** | A self-custody stored-value card: tap to pay, punches, rewards | merchant charge within per-transaction and daily caps | withdraw |
-| **NFT staking** | A receipt pass showing accrued rewards | claim (always pays the current owner) | unstake |
+| **NFT staking** | A receipt pass showing accrued rewards | claim (pays only the current owner; relayer rate limited on chain) | unstake |
 | **Event ticket** | Check in at the door, becomes a keepsake after the show | none (door staff check in) | transfer, resale |
 | **Membership** | Tiered access with expiry and renewal | none | renew, upgrade |
 | **Digital identity** | A soulbound credential card a verifier can check | none | rotate links, present to a verifier |
@@ -146,6 +146,8 @@ The standard's authorization rests on two checks, and this SDK enforces both:
 | A capability link leaks | Bounded, documented effect; rotation on owner request | `BoundedAction` on chain, `issuer` capability links |
 
 Read [docs/security.md](docs/security.md) before going to production.
+
+**Review status.** Before release, the contracts and the TypeScript packages each went through an independent adversarial review that had to prove every finding with a failing test. Every finding was fixed, and the proofs now run as regression tests (`packages/contracts/test/AuditRegressions.t.sol`, `tests/audit`). This is an internal review, not a third-party audit; treat the example contracts accordingly.
 
 ## Documentation
 
