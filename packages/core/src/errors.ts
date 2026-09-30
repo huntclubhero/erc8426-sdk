@@ -22,7 +22,11 @@ export type WalletPassErrorCode =
   | "invalid_token"
   | "unknown_action"
   | "link_invalid"
-  | "not_found";
+  | "not_found"
+  | "invalid_request" // a body or path outside the protocol shape
+  | "method_not_allowed"
+  | "action_failed" // the integrator's action threw
+  | "internal_error";
 
 /// Every code at runtime, for validating an `error` member off the wire.
 export const WALLET_PASS_ERROR_CODES: readonly WalletPassErrorCode[] = [
@@ -42,6 +46,10 @@ export const WALLET_PASS_ERROR_CODES: readonly WalletPassErrorCode[] = [
   "unknown_action",
   "link_invalid",
   "not_found",
+  "invalid_request",
+  "method_not_allowed",
+  "action_failed",
+  "internal_error",
 ] as const;
 
 export function isWalletPassErrorCode(value: unknown): value is WalletPassErrorCode {
@@ -61,7 +69,13 @@ export function statusForError(error: WalletPassErrorCode): number {
     case "invalid_address":
     case "invalid_token":
     case "unknown_action":
+    case "invalid_request":
       return 400;
+    case "method_not_allowed":
+      return 405;
+    case "action_failed":
+    case "internal_error":
+      return 500;
     case "proof_required":
     case "nonce_invalid":
     case "challenge_expired":
