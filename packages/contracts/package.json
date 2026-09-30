@@ -1,0 +1,12 @@
+{
+  "name": "@erc8426/contracts",
+  "version": "0.1.0",
+  "description": "Solidity interface, base implementation and use-case examples for ERC-8426 wallet passes",
+  "license": "MIT",
+  "files": ["src", "README.md"],
+  "repository": { "type": "git", "url": "git+https://github.com/huntclubhero/erc8426-sdk.git", "directory": "packages/contracts" },
+  "keywords": ["erc-8426", "wallet-pass", "solidity", "erc-721"],
+  "publishConfig": { "access": "public" },
+  "scripts": { "build": "forge build", "test": "forge test" },
+  "dependencies": { "@openzeppelin/contracts": "5.1.0" }
+}

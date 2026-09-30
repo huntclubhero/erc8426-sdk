@@ -90,6 +90,12 @@ importers:
         specifier: ^2.21.0
         version: 2.57.1(typescript@5.9.3)
 
+  packages/contracts:
+    dependencies:
+      '@openzeppelin/contracts':
+        specifier: 5.1.0
+        version: 5.1.0
+
   packages/core:
     dependencies:
       viem:
@@ -382,6 +388,9 @@ packages:
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
+
+  '@openzeppelin/contracts@5.1.0':
+    resolution: {integrity: sha512-p1ULhl7BXzjjbha5aqst+QMLY+4/LCWADXOCsmLHRM77AqiPjnd9vvUN9sosUfhL9JGKpZ0TjEGxgvnizmWGSA==}
 
   '@oxc-project/types@0.152.0':
     resolution: {integrity: sha512-oM/5rLBm2tPkg0iBgkH/FOeR3PCDpY19GTgAZjMFM8h9WI9VW7cLgzp6nwtarYKmovavIQZ+Fe/RKX/8C8O/Rw==}
@@ -1516,6 +1525,8 @@ snapshots:
       '@noble/hashes': 1.8.0
 
   '@noble/hashes@1.8.0': {}
+
+  '@openzeppelin/contracts@5.1.0': {}
 
   '@oxc-project/types@0.152.0': {}
 
