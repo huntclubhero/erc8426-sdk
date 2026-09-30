@@ -26,6 +26,7 @@ const CONTRACTS = [
   ["EventTicketPass.sol", "EventTicketPass"],
   ["MembershipPass.sol", "MembershipPass"],
   ["IdentityCredential.sol", "IdentityCredential"],
+  ["RentalPass.sol", "RentalPass"],
   ["MockERC20.sol", "MockERC20"],
   ["MockERC721.sol", "MockERC721"],
 ];

@@ -3,6 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "demo:pet-game": "tsx pet-game/demo.ts",
+    "demo:stored-value-card": "tsx stored-value-card/demo.ts",
+    "demo:staking": "tsx staking/demo.ts",
+    "demo:event-ticket": "tsx event-ticket/demo.ts",
+    "demo:membership": "tsx membership/demo.ts",
+    "demo:identity-credential": "tsx identity-credential/demo.ts",
+    "demo:rental": "tsx rental/demo.ts",
+    "demo:partner-app": "tsx partner-app/demo.ts",
+    "demo:all": "tsx run-all.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
   "dependencies": {
     "@erc8426/client": "workspace:*",
     "@erc8426/conformance": "workspace:*",
@@ -11,5 +23,9 @@
     "@erc8426/issuer": "workspace:*",
     "viem": "^2.37.0"
   },
-  "devDependencies": { "tsx": "^4.19.2", "@types/node": "^22.10.0", "typescript": "^5.7.2" }
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
 }

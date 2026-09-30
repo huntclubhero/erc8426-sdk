@@ -1,6 +1,6 @@
 # @erc8426/contracts
 
-Solidity for [ERC-8426](https://github.com/ethereum/ERCs/pull/2036), the Wallet Pass Extension for NFTs: the interface, an OpenZeppelin base contract, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and six worked use cases with full Foundry tests.
+Solidity for [ERC-8426](https://github.com/ethereum/ERCs/pull/2036), the Wallet Pass Extension for NFTs: the interface, an OpenZeppelin base contract, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and seven worked use cases with full Foundry tests.
 
 ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wallet, Google Wallet). On chain it adds only discovery (`passURI`) and a freshness signal (`PassUpdate`, `BatchPassUpdate`); pass generation, signing, delivery and the authorization of pass actions live off chain (see the other packages in this SDK).
 
@@ -10,7 +10,7 @@ ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wall
 | `src/ERC721WalletPass.sol` | Abstract OZ `ERC721` extension: `passURI`, settable base, `_passUpdate`, `_batchPassUpdate`, pass update on transfer, optional ERC-4906 mirror. |
 | `src/extensions/ERC721WalletPassRentable.sol` | ERC-4907 rentals with a documented entitlement precedence (`passHolderOf`). |
 | `src/utils/BoundedAction.sol` | The on-chain half of the spec's capability configuration: operator actions limited by action id, rate and value, inspectable, revocable per token by its owner. |
-| `src/examples/*.sol` | `PetPass`, `StoredValueCard`, `StakingPass`, `EventTicketPass`, `MembershipPass`, `IdentityCredential`. |
+| `src/examples/*.sol` | `PetPass`, `StoredValueCard`, `StakingPass`, `EventTicketPass`, `MembershipPass`, `IdentityCredential`, `RentalPass`. |
 | `src/mocks/*.sol` | `MockERC20` (6 decimal stablecoin stand-in) and `MockERC721`, open minting, for tests and local demos only. |
 | `src/interfaces/` | `IERC4907`, `IERC5192`. |
 | `abi/*.json` | ABI arrays for TypeScript (`import petPassAbi from "@erc8426/contracts/abi/PetPass.json"`). |
@@ -131,6 +131,7 @@ Each example's header comment explains, per the spec's capability conditions, wh
 | `EventTicketPass` | Tickets that become keepsakes after the show; ERC-2981 royalties | none (door staff sign `checkIn`; `endShow` is permissionless after the end time and only signals) | `checkIn` (DOOR_ROLE, once per ticket), issuer minting | The scanned pass only selects the ticket; the door account's signature authorizes it. Show end emits one `BatchPassUpdate` over the show's reserved id range. |
 | `MembershipPass` | Tiered, expiring membership | none (a renew page is signed by the payer) | `renew` (payer), `issuerRenew`, `setTier` (issuer) | Renewal is paid by whoever calls it and only extends; nothing moves the token. |
 | `IdentityCredential` | Soulbound credential (ERC-5192), revocable, expiring | none | `issue`, `revoke`, `extend` (attester); `renounce`, `requestPassRotation` (holder) | A soulbound token never transfers, so transfer-driven link rotation never fires: rotation on the owner's request is the only remedy, and `requestPassRotation` signals it on chain. |
+| `RentalPass` | Rentable access pass (ERC-4907); the renter holds the pass during a rental | whatever the issuer exposes, entitled by `passHolderOf` (renter exclusive of owner while a rental is active) | `setUser` (owner or approved), transfer, approve | `setUser` changes who is entitled, so it is never pass-reachable; the renter cannot extend their own rental; a transfer clears the rental. Expiry is passive. |
 
 Passive changes (death by lapse, reward accrual, membership or rental expiry, a show ending) happen without a transaction and so without an event. Render them as relative dates or rates on the pass.
 
