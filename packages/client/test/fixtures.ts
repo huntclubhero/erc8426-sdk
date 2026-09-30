@@ -208,7 +208,9 @@ export interface FakeIssuerOptions {
   ownerOf: (tokenId: string) => Address | null;
   faults?: IssuerFaults;
   /// Optional hook for signed actions.
-  onAction?: (action: string, tokenId: string, account: Address) => unknown;
+  onAction?: (action: string, tokenId: string, account: Address, params: unknown) => unknown;
+  /// Answer actions with a custom error code outside the core set.
+  customActionError?: string;
   /// Answer the fresh read as failed (503).
   readFails?: boolean;
 }
@@ -335,13 +337,25 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
     if ((m = /^\/pass\/([0-9]+)\/actions\/([A-Za-z0-9._-]+)$/.exec(path)) && req.method === "POST") {
       const tokenId = m[1]!;
       const action = m[2]!;
-      const body = (await req.json().catch(() => null)) as { message?: string; signature?: Hex } | null;
+      if (opts.customActionError) return json(422, { error: opts.customActionError });
+      const body = (await req.json().catch(() => null)) as { message?: string; signature?: Hex; params?: unknown } | null;
       if (!body || typeof body.message !== "string" || typeof body.signature !== "string") {
         return json(400, { error: "invalid_message" });
       }
       const result = await verify(body.message, body.signature, tokenId, action);
       if (!result.ok) return json(result.status, { error: result.error }, result.status === 503 ? { "retry-after": "5" } : {});
-      return json(200, { ok: true, result: opts.onAction?.(action, tokenId, result.account) ?? null });
+      return json(200, { ok: true, result: opts.onAction?.(action, tokenId, result.account, body.params) ?? null });
+    }
+
+    if ((m = /^\/pass\/([0-9]+)\/rotate$/.exec(path)) && req.method === "POST") {
+      const tokenId = m[1]!;
+      const challenge = `${base}/pass/${tokenId}/challenge?action=rotate`;
+      const proof = readProofHeaders(req.headers);
+      if (proof.kind !== "present") return json(401, { error: "proof_required", challenge });
+      const result = await verify(proof.proof.message, proof.proof.signature, tokenId, "rotate");
+      if (!result.ok) return json(result.status, { error: result.error });
+      rotation += 1;
+      return json(200, { ok: true, rotated: true, ...manifestFor(tokenId) }, { "cache-control": "no-store" });
     }
 
     return json(404, { error: "not_found" });

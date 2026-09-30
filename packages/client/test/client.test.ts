@@ -271,10 +271,10 @@ describe("challenge scope", () => {
 describe("signed actions", () => {
   it("requests a scoped challenge and POSTs the proof to {passBase}/actions/{action}", async () => {
     const seen: string[] = [];
-    const { client, owner, issuer } = setup("gated", { onAction: (a, id) => (seen.push(`${a}:${id}`), { fed: true }) });
-    const r = await client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "feed", signer: owner, body: { amount: 1 } });
+    const { client, owner, issuer } = setup("gated", { onAction: (a, id, _acct, params) => (seen.push(`${a}:${id}:${JSON.stringify(params)}`), { fed: true }) });
+    const r = await client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "feed", signer: owner, params: { amount: 1 } });
     expect(r).toEqual({ status: 200, body: { ok: true, result: { fed: true } } });
-    expect(seen).toEqual(["feed:5"]);
+    expect(seen).toEqual(['feed:5:{"amount":1}']);
     const post = issuer.requests.find((q) => q.method === "POST")!;
     expect(post.url).toBe("https://issuer.test/pass/5/actions/feed");
     const challengeReq = issuer.requests.find((q) => q.url.includes("/challenge"))!;
@@ -286,6 +286,24 @@ describe("signed actions", () => {
     const c = await client.requestChallenge({ contract: CONTRACT, tokenId: 5 }, "feed", owner.address);
     expect(c.parsed.action).toBe("feed");
     expect(c.parsed.token?.tokenId).toBe("5");
+  });
+
+  it("rotates links with a rotate proof, and adds params to a challenge URL that already has a query", async () => {
+    const { client, owner, issuer } = setup("gated");
+    const before = await client.getManifest({ contract: CONTRACT, tokenId: 5 }, { signer: owner });
+    const r = await client.rotatePassLinks({ contract: CONTRACT, tokenId: 5 }, { signer: owner, challengeEndpoint: "https://issuer.test/pass/5/challenge?action=rotate" });
+    expect(r.body).toMatchObject({ ok: true, rotated: true });
+    expect((r.body as { formats: { apple: string } }).formats.apple).not.toBe(before.manifest.formats.apple);
+    const challengeReq = new URL(issuer.requests.filter((q) => q.url.includes("/challenge")).at(-1)!.url);
+    expect(challengeReq.searchParams.getAll("action")).toEqual(["rotate"]);
+    expect(challengeReq.searchParams.get("address")).toBe(owner.address);
+    expect(issuer.requests.at(-1)!.url).toBe("https://issuer.test/pass/5/rotate");
+    await expect(client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "rotate", signer: owner })).rejects.toMatchObject({ code: "unknown_action" });
+  });
+
+  it("keeps an issuer's custom error code in serverCode", async () => {
+    const { client, owner } = setup("gated", { customActionError: "out_of_food" });
+    await expect(client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "feed", signer: owner })).rejects.toMatchObject({ status: 422, serverCode: "out_of_food" });
   });
 
   it("refuses the acquire action and invalid names", async () => {

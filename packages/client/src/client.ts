@@ -2,6 +2,7 @@ import { getAddress, type Address, type Client, type Hex } from "viem";
 import { getChainId, getContractEvents, readContract, watchContractEvent } from "viem/actions";
 import {
   ACQUIRE_ACTION,
+  ROTATE_ACTION,
   WALLET_PASS_INTERFACE_ID,
   erc165Abi,
   erc721Abi,
@@ -106,8 +107,18 @@ export interface SignedActionOptions {
   endpoint?: string;
   /// Challenge endpoint override, see `requestChallenge`.
   challengeEndpoint?: string;
-  /// Extra JSON members sent with the proof (action parameters).
-  body?: Record<string, unknown>;
+  /// Action parameters, sent as the `params` member beside the proof.
+  params?: Record<string, unknown>;
+  signal?: AbortSignal;
+}
+
+export interface RotatePassLinksOptions {
+  /// Must be the current owner: the issuer takes a fresh ownership read.
+  signer: WalletPassSigner;
+  /// Full URL to POST the rotation to. Defaults to `{passBase}/rotate`.
+  endpoint?: string;
+  /// Challenge endpoint override, see `requestChallenge`.
+  challengeEndpoint?: string;
   signal?: AbortSignal;
 }
 
@@ -265,8 +276,11 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     signal?: AbortSignal,
   ): Promise<ChallengeResult> {
     const url = new URL(challengeUrl);
+    // searchParams.set, not concatenation: an issuer's 401 can name a
+    // challenge URL that already carries a query, such as ?action=rotate.
+    // The action is always explicit so a URL naming another one is overridden.
     url.searchParams.set("address", getAddress(account));
-    if (action !== ACQUIRE_ACTION) url.searchParams.set("action", action);
+    url.searchParams.set("action", action);
     const { res, body } = await request(url.toString(), {
       method: "GET",
       headers: { accept: "application/json" },
@@ -443,6 +457,9 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       // An acquire proof resolves the manifest and nothing else.
       throw new WalletPassClientError("unknown_action", "use getManifest for the acquire action", { source: "client" });
     }
+    if (action === ROTATE_ACTION) {
+      throw new WalletPassClientError("unknown_action", "use rotatePassLinks for the rotate action", { source: "client" });
+    }
     if (!isValidActionName(action)) {
       throw new WalletPassClientError("unknown_action", `invalid action name: ${action}`, { source: "client" });
     }
@@ -463,14 +480,43 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       // declare the target in the body; a verifier still checks them against
       // what it holds, never against these values.
       body: JSON.stringify({
-        ...opts.body,
         message: challenge.message,
         signature,
+        ...(opts.params !== undefined ? { params: opts.params } : {}),
         chainId: ref.chainId,
         contract: ref.contract,
         tokenId: ref.tokenId,
         action,
       }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+    if (!res.ok) throw errorFromResponse(res.status, res.headers, body);
+    return { status: res.status, body };
+  }
+
+  /// Ask the issuer to rotate every acquisition URL and capability link for a
+  ///  token. This is the owner's remedy for a leaked link under an unchanged
+  ///  owner, which issuers MUST offer in the capability configuration. The
+  ///  proof is for the rotate action, so it cannot acquire or act.
+  async function rotatePassLinks(token: TokenInput, opts: RotatePassLinksOptions): Promise<SignedActionResult> {
+    const ref = await toRef(token);
+    let endpoint = opts.endpoint;
+    let challengeUrl = opts.challengeEndpoint;
+    if (!endpoint || !challengeUrl) {
+      const found = await discoverChallengeEndpoint(token, opts.signal);
+      endpoint ??= `${found.base}/rotate`;
+      challengeUrl ??= found.challengeUrl;
+    }
+    const challenge = await fetchChallenge(challengeUrl, ROTATE_ACTION, ref, opts.signer.address, opts.signal);
+    const signature = await opts.signer.signMessage({ message: challenge.message });
+    const { res, body } = await request(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        ...proofHeaders({ message: challenge.message, signature }),
+      },
+      body: JSON.stringify({ message: challenge.message, signature }),
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
     if (!res.ok) throw errorFromResponse(res.status, res.headers, body);
@@ -535,6 +581,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     readMetadataMirror,
     requestChallenge,
     signedAction,
+    rotatePassLinks,
     issuerDisplay,
     getPassUpdates,
     watchPassUpdates,

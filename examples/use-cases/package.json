@@ -1,0 +1,15 @@
+{
+  "name": "@erc8426-examples/use-cases",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "@erc8426/client": "workspace:*",
+    "@erc8426/conformance": "workspace:*",
+    "@erc8426/contracts": "workspace:*",
+    "@erc8426/core": "workspace:*",
+    "@erc8426/issuer": "workspace:*",
+    "viem": "^2.37.0"
+  },
+  "devDependencies": { "tsx": "^4.19.2", "@types/node": "^22.10.0", "typescript": "^5.7.2" }
+}

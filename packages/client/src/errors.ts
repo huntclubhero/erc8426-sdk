@@ -17,6 +17,10 @@ export class WalletPassClientError extends WalletPassError {
   readonly retryAfterSeconds: number | undefined;
   /// The challenge endpoint an issuer named in a 401, when present.
   readonly challenge: string | undefined;
+  /// The issuer's own `error` string, verbatim. Issuers may add codes beyond
+  ///  the core set (for example `invalid_request` or an integrator's custom
+  ///  code); those map to a generic `code` and survive here.
+  readonly serverCode: string | undefined;
   /// The parsed JSON error body, for diagnostics.
   readonly body: unknown;
 
@@ -29,6 +33,7 @@ export class WalletPassClientError extends WalletPassError {
       retryable?: boolean;
       retryAfterSeconds?: number;
       challenge?: string;
+      serverCode?: string;
       body?: unknown;
     } = {},
   ) {
@@ -38,6 +43,7 @@ export class WalletPassClientError extends WalletPassError {
     this.retryable = init.retryable ?? false;
     this.retryAfterSeconds = init.retryAfterSeconds;
     this.challenge = init.challenge;
+    this.serverCode = init.serverCode;
     this.body = init.body;
   }
 }
@@ -87,6 +93,7 @@ export function errorFromResponse(status: number, headers: Headers, body: unknow
     retryable,
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
     ...(challenge !== undefined ? { challenge } : {}),
+    ...(bodyCode !== undefined ? { serverCode: bodyCode } : {}),
     body,
   });
 }

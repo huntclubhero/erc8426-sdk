@@ -90,14 +90,14 @@ The `wallet_pass` metadata mirror is available through `readMetadataMirror(token
 
 ## Signed actions
 
-For pass-reachable actions on the signed path (the user signs each action), `signedAction` requests a challenge for the action, checks its scope, signs it, and POSTs `{ message, signature, chainId, contract, tokenId, action, ...body }`:
+For pass-reachable actions on the signed path (the user signs each action), `signedAction` requests a challenge for the action, checks its scope, signs it, and POSTs `{ message, signature, params, chainId, contract, tokenId, action }`:
 
 ```ts
 const result = await passes.signedAction({
   token,
   action: "feed",
   signer: fromWalletClient(walletClient),
-  body: { amount: 1 },
+  params: { amount: 1 },
 });
 ```
 
@@ -105,6 +105,12 @@ Route conventions (the spec standardizes the proof, not the routes, so both are 
 
 - Challenge: the URL named in the manifest's `401` body, with `?address=0x...&action=feed` added. If the manifest is public (no 401), `{passBase}/challenge`. Override with `challengeEndpoint`.
 - Action: `{passBase}/actions/{action}`, where `passBase` is the resolved `passURI` without query or trailing slash. Override with `endpoint`.
+
+These match the `@erc8426/issuer` routes. Query parameters are always added with `URLSearchParams`, so a challenge URL that already carries a query (for example `.../challenge?action=rotate`) keeps working.
+
+### Rotating links
+
+`rotatePassLinks(token, { signer })` asks the issuer to rotate every acquisition URL and capability link for the token, the owner's remedy for a leaked link (issuers MUST offer it in the capability configuration). It signs a `rotate` challenge, which cannot acquire or act, and POSTs it to `{passBase}/rotate`.
 
 `requestChallenge(token, action, account)` is the lower-level step on its own, returning the scope-checked message and its parsed fields.
 
@@ -136,12 +142,13 @@ Returns:
 | `addToWallet(token, { signer?, platform?, userAgent? })` | `Promise<{ url, platform, configuration, manifest }>` |
 | `readMetadataMirror(token)` | `Promise<{ authoritative: false, tokenUri, result }>` |
 | `requestChallenge(token, action, account, { endpoint? })` | `Promise<{ message, parsed, challengeUrl }>` |
-| `signedAction({ token, action, signer, endpoint?, challengeEndpoint?, body? })` | `Promise<{ status, body }>` |
+| `signedAction({ token, action, signer, endpoint?, challengeEndpoint?, params? })` | `Promise<{ status, body }>` |
+| `rotatePassLinks(token, { signer, endpoint?, challengeEndpoint? })` | `Promise<{ status, body }>` |
 | `issuerDisplay(token)` | `Promise<{ chainId, contract, contractShort, tokenId, passUri, origin }>` |
 | `watchPassUpdates(contract \| undefined, onUpdate, opts?)` | unwatch function |
 | `getPassUpdates({ contract?, fromBlock?, toBlock? })` | `Promise<PassUpdateNotice[]>` |
 
-Standalone helpers: `detectPlatform(ua)`, `choosePlatform(available, detected)`, `resolveUri(uri, gateways)`, `decodeDataUri(uri)`, `uriOrigin(uri)`, `originMatches(passUri, expectedOrigins)`, `passBase(url)`, `shortAddress(address)`, `fromWalletClient(walletClient, account?)`, `checkChallengeScope(message, expected)`, `domainsForUrl(url)`, `passUpdateCovers(update, tokenId)`, `normalizePassUpdateLog(log)`, `errorFromResponse(status, headers, body)`, `parseRetryAfter(value)`, and the `WalletPassClientError` class (a `WalletPassError` with `source`, `retryable`, `retryAfterSeconds`, `challenge`, `body`).
+Standalone helpers: `detectPlatform(ua)`, `choosePlatform(available, detected)`, `resolveUri(uri, gateways)`, `decodeDataUri(uri)`, `uriOrigin(uri)`, `originMatches(passUri, expectedOrigins)`, `passBase(url)`, `shortAddress(address)`, `fromWalletClient(walletClient, account?)`, `checkChallengeScope(message, expected)`, `domainsForUrl(url)`, `passUpdateCovers(update, tokenId)`, `normalizePassUpdateLog(log)`, `errorFromResponse(status, headers, body)`, `parseRetryAfter(value)`, and the `WalletPassClientError` class (a `WalletPassError` with `source`, `retryable`, `retryAfterSeconds`, `challenge`, `serverCode`, `body`; an issuer code outside the core set becomes the generic `network` code and is kept verbatim in `serverCode`).
 
 ## License
 
