@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+packages/contracts/out/
+packages/contracts/cache/
+packages/contracts/lib/
+coverage/
+.next/
+*.p12
+*.pem

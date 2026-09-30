@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@erc8426/core": ["packages/core/src/index.ts"],
+      "@erc8426/client": ["packages/client/src/index.ts"],
+      "@erc8426/issuer": ["packages/issuer/src/index.ts"],
+      "@erc8426/issuer/*": ["packages/issuer/src/*"],
+      "@erc8426/apple": ["packages/apple/src/index.ts"],
+      "@erc8426/google": ["packages/google/src/index.ts"],
+      "@erc8426/react": ["packages/react/src/index.ts"],
+      "@erc8426/conformance": ["packages/conformance/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src", "packages/*/test"]
+}
