@@ -3,10 +3,40 @@
   "version": "0.1.0",
   "description": "Solidity interface, base implementation and use-case examples for ERC-8426 wallet passes",
   "license": "MIT",
-  "files": ["src", "README.md"],
-  "repository": { "type": "git", "url": "git+https://github.com/huntclubhero/erc8426-sdk.git", "directory": "packages/contracts" },
-  "keywords": ["erc-8426", "wallet-pass", "solidity", "erc-721"],
-  "publishConfig": { "access": "public" },
-  "scripts": { "build": "forge build", "test": "forge test" },
-  "dependencies": { "@openzeppelin/contracts": "5.1.0" }
+  "files": [
+    "src",
+    "abi",
+    "artifacts",
+    "remappings.txt",
+    "README.md"
+  ],
+  "exports": {
+    "./abi/*": "./abi/*",
+    "./artifacts/*": "./artifacts/*",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huntclubhero/erc8426-sdk.git",
+    "directory": "packages/contracts"
+  },
+  "keywords": [
+    "erc-8426",
+    "wallet-pass",
+    "solidity",
+    "erc-721"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "forge build && node scripts/export-abis.mjs",
+    "abi": "node scripts/export-abis.mjs",
+    "test": "forge test",
+    "deploy:local": "forge script script/DeployExamples.s.sol:DeployExamples --rpc-url http://127.0.0.1:8545 --broadcast --unlocked --sender 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.1.0"
+  }
 }
