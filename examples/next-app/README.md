@@ -116,7 +116,7 @@ Everything serverless hosting needs is built in and switches on from the environ
 Setup:
 
 1. Deploy the contract with `pnpm deploy` (see Testnet above) using `NEXT_PUBLIC_BASE_URL=https://<your-project>.vercel.app`.
-2. Outside this monorepo, replace the `workspace:*` versions in `package.json` with the published version and set the framework to Next.js (`vercel.json`: `{ "framework": "nextjs" }`). Inside it, set the project root to `examples/next-app` and build the workspace packages first.
+2. Outside this monorepo, replace the `workspace:^` versions in `package.json` with the published version and set the framework to Next.js (`vercel.json`: `{ "framework": "nextjs" }`). Inside it, set the project root to `examples/next-app` and build the workspace packages first.
 3. Set `RPC_URL`, `CHAIN_ID`, `CONTRACT_ADDRESS`, `DEPLOY_BLOCK`, `NEXT_PUBLIC_BASE_URL` and `OPERATOR_PRIVATE_KEY` (sensitive), plus the Apple and Google variables. Never set `DEV_WALLET`.
 4. `NEXT_PUBLIC_BASE_URL` must be the production URL: the SIWE domain is its host, and clients refuse to sign for any other, so preview deployments on other hosts will not verify.
 5. Check the deployment end to end: `BASE=https://<host> NEXT_PUBLIC_BASE_URL=https://<host> RPC_URL=... CHAIN_ID=... CONTRACT_ADDRESS=... pnpm smoke`.

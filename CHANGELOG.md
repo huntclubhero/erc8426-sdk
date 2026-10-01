@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (client, react, conformance)
+
+Found by installing every 0.1.1 package from npm into an empty project.
+
+- `@erc8426/client`, `@erc8426/react`, `@erc8426/conformance`: depend on `@erc8426/core` (and `@erc8426/client`) by caret range. Their 0.1.0 releases pinned `@erc8426/core` to exactly 0.1.0, so installing them next to core 0.1.1 put two copies of core in the tree, and `instanceof WalletPassError` (imported from core) failed for errors the client threw. Every internal dependency now publishes as a caret range, guarded by `tests/audit/package-ranges.audit.test.ts`. No code changes.
+
 ## 0.1.1 (issuer, core, apple, google)
 
 Superseded passes say why. ERC-8426 now asks that a pass presented as superseded state why and, where its holder may still be the owner, how to get the replacement (ethereum/ERCs PR #2036, de989060, raised on the Magicians thread).
