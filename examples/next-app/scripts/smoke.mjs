@@ -6,7 +6,7 @@
 //
 // Every key here is generated at runtime and thrown away.
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPublicClient, createWalletClient, defineChain, http } from "viem";
@@ -15,12 +15,19 @@ import { encodeBase64Url } from "@erc8426/core";
 import { createWalletPassClient } from "@erc8426/client";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const env = Object.fromEntries(
-  readFileSync(join(here, "..", ".env.local"), "utf8")
-    .split(/\r?\n/)
-    .filter((l) => l && !l.startsWith("#") && l.includes("="))
-    .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
-);
+// .env.local (written by `pnpm chain`) for local mode; the process
+// environment overrides it, so the same script checks a deployed instance:
+//   BASE=https://... RPC_URL=... CHAIN_ID=... CONTRACT_ADDRESS=... pnpm smoke
+const envPath = join(here, "..", ".env.local");
+const env = existsSync(envPath)
+  ? Object.fromEntries(
+      readFileSync(envPath, "utf8")
+        .split(/\r?\n/)
+        .filter((l) => l && !l.startsWith("#") && l.includes("="))
+        .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+    )
+  : {};
+for (const k of ["RPC_URL", "CHAIN_ID", "CONTRACT_ADDRESS", "NEXT_PUBLIC_BASE_URL"]) if (process.env[k]) env[k] = process.env[k];
 const BASE = process.env.BASE ?? env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
 const chain = defineChain({
   id: Number(env.CHAIN_ID),
@@ -105,8 +112,14 @@ step(watered.status === 200, "signed action water via client.signedAction", wate
 const stranger = await passes.getManifest(token, { signer: bob }).catch((e) => e);
 step(stranger.status === 403 && stranger.code === "not_owner", "non-owner proof is 403 not_owner");
 
-// 9. Transfer to bob. The dev faucet funds alice for gas (anvil only).
-await post(`${BASE}/api/dev/fund`, { address: alice.address });
+// 9. Transfer to bob. Alice needs gas: the dev faucet on anvil, the capped
+// testnet drip anywhere else.
+if (Number(env.CHAIN_ID) === 31337) {
+  await post(`${BASE}/api/dev/fund`, { address: alice.address });
+} else {
+  const drip = await post(`${BASE}/api/drip`, { address: alice.address });
+  step(drip.res.ok && (drip.body?.dripped || drip.body?.reason === "already funded"), "testnet drip funds the burner", JSON.stringify(drip.body).slice(0, 120));
+}
 const aliceWallet = createWalletClient({ account: alice, chain, transport: http(env.RPC_URL) });
 const hash = await aliceWallet.writeContract({
   address: env.CONTRACT_ADDRESS,
@@ -153,15 +166,16 @@ step(statuses.slice(0, 4).every((s) => s === 200) && statuses[4] === 429, "capab
 const rpc = await post(`${BASE}/api/rpc`, { jsonrpc: "2.0", id: 1, method: "anvil_setBalance", params: [bob.address, "0x1"] });
 step(rpc.body?.error?.code === -32601, "RPC proxy refuses non-allowlisted methods");
 
-// 14. The conformance suite, as the new owner, when it is built.
+// 14. The conformance suite, as the new owner. A missing package is a
+// failure, not a skip: a check that cannot run must not read as a pass.
 try {
-  const { runConformance, formatReport } = await import("../../../packages/conformance/dist/index.js");
+  const { runConformance, formatReport } = await import("@erc8426/conformance");
   const report = await runConformance({ publicClient, contract: env.CONTRACT_ADDRESS, tokenId, nonexistentTokenId: 999999, ownerPrivateKey: bobKey });
   const failed = report.checks.filter((c) => c.status === "fail");
   step(report.ok, "conformance suite: every MUST passes", `${report.summary.pass} pass, ${report.summary.fail} fail, ${report.summary.warn} warn, ${report.summary.skip} skip`);
   if (failed.length) console.log(formatReport(report));
 } catch (e) {
-  console.log(`SKIP  conformance suite (${e.message.split("\n")[0]})`);
+  step(false, "conformance suite ran", e.message.split("\n")[0]);
 }
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) failed.`);

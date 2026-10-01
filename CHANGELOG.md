@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.1 (issuer, core)
+
+Found by running the example app on Vercel from the published 0.1.0 packages.
+
+- `@erc8426/issuer`: `kvStores` now accepts a key-value client that parses JSON on read. The `@upstash/redis` shim in the 0.1.0 README used the client's default automatic deserialization, which handed `kvStores` objects instead of strings, so every gated request failed. The README shim now turns that off, and `kvStores` works either way (regression test in `stores.test.ts`).
+- `@erc8426/core`: ships its README (0.1.0 listed one in `files` that did not exist).
+- Example app: hosted mode for serverless (shared Upstash stores for the issuer, Apple and Google; a cross-instance operator lock and nonce; log catch-up in place of watchers; rate-limited mint; an opt-in testnet burner wallet and gas drip), and the smoke test now fails, instead of skipping, when the conformance package is missing, and runs against a deployed instance.
+
+## 0.1.0
 
 First release, tracking the ERC-8426 draft as of ethereum/ERCs PR #2036.
 

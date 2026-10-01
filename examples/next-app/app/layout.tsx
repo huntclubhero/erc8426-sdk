@@ -24,7 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         </a>
         {loaded.ok ? (
           <Providers config={publicConfig(loaded.config)}>
-            <Header />
+            <Header network={loaded.config.networkLabel} />
             <main id="main" className="container">
               {children}
             </main>
@@ -45,7 +45,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   );
 }
 
-function Header() {
+function Header({ network }: { network: string }) {
   return (
     <header className="header">
       <div className="container header-inner">
@@ -53,6 +53,9 @@ function Header() {
           <span className="brand-mark" aria-hidden="true" />
           Pet Pass
         </Link>
+        <span className="tag tag-warn" title="Test network, unaudited example code. Nothing here has value.">
+          {network}
+        </span>
         <nav aria-label="Main">
           <ul className="nav">
             <li>

@@ -64,7 +64,8 @@ export function PassDetail({ tokenId }: { tokenId: string }) {
   const loadPet = useCallback(async () => {
     const res = await fetch(`/api/pets/${tokenId}`);
     if (res.status === 404) return setPet(null);
-    const body = await res.json();
+    const body = (await res.json().catch(() => ({}))) as { pet?: PetState };
+    if (!res.ok) return;
     setPet(body.pet ?? null);
   }, [tokenId]);
 

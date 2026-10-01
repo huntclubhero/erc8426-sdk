@@ -1,6 +1,6 @@
 {
   "name": "@erc8426/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared types, constants, CAIP-19, manifest and challenge codecs for ERC-8426 wallet passes",
   "license": "MIT",
   "type": "module",

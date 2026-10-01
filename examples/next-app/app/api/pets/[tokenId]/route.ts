@@ -1,4 +1,4 @@
-import { getRuntime, json, readPet } from "@/lib/server";
+import { getRuntime, json, readPet, syncAfter } from "@/lib/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +10,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ tok
   if (!/^[0-9]{1,78}$/.test(tokenId)) return json({ error: "invalid_token" }, { status: 400 });
   const rt = await getRuntime().catch((e: Error) => e);
   if (rt instanceof Error) return json({ error: "internal_error", message: rt.message }, { status: 500 });
+  syncAfter(rt);
   const pet = await readPet(rt.publicClient, rt.config.contract, BigInt(tokenId));
   if (!pet) return json({ error: "not_found" }, { status: 404 });
   return json({ pet, passUri: rt.issuer.passUri(tokenId) });

@@ -1,4 +1,4 @@
-import { appleFormatProvider, createApnsClient, MemoryApplePassStore, type AppleFormatProvider } from "@erc8426/apple";
+import { appleFormatProvider, createApnsClient, MemoryApplePassStore, type AppleFormatProvider, type ApplePassStore } from "@erc8426/apple";
 
 import type { ServerConfig } from "./config";
 import { solidPng } from "./png";
@@ -10,10 +10,12 @@ import { solidPng } from "./png";
 /// install but do not auto-update.
 let provider: AppleFormatProvider | undefined;
 
-export function appleProvider(config: ServerConfig): AppleFormatProvider {
+/// `store` is shared (Redis) on serverless hosts, where device registrations
+/// must outlive the instance that received them.
+export function appleProvider(config: ServerConfig, shared?: ApplePassStore): AppleFormatProvider {
   const apple = config.apple!;
   if (provider) return provider;
-  const store = new MemoryApplePassStore();
+  const store = shared ?? new MemoryApplePassStore();
   const certificates = {
     signerCert: apple.signerCert,
     signerKey: apple.signerKey,
@@ -36,6 +38,16 @@ export function appleProvider(config: ServerConfig): AppleFormatProvider {
     basePath: "/apple",
     store,
     ...(apns ? { apns } : {}),
+    // One line per push, so the host's logs show whether APNs accepted it.
+    // Push tokens are truncated: they identify a device.
+    onPush: (serial, outcomes) =>
+      console.log(
+        `[apns] serial ${serial}: ${
+          outcomes instanceof Error
+            ? `error ${outcomes.message}`
+            : outcomes.map((o) => `${o.token.slice(0, 8)} ${o.ok ? "ok" : "refused"} ${o.status ?? ""} ${o.reason ?? ""}`.trim()).join("; ") || "no registered devices"
+        }`,
+      ),
     images: {
       icon: { data: solidPng(29, 29, "#1f4e79"), data2x: solidPng(58, 58, "#1f4e79"), data3x: solidPng(87, 87, "#1f4e79") },
       logo: { data: solidPng(160, 50, "#1f4e79"), data2x: solidPng(320, 100, "#1f4e79") },
