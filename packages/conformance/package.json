@@ -1,6 +1,6 @@
 {
   "name": "@erc8426/conformance",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Conformance suite for ERC-8426: check any contract and pass server against every MUST",
   "license": "MIT",
   "type": "module",
@@ -38,8 +38,8 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@erc8426/core": "workspace:*",
-    "@erc8426/client": "workspace:*"
+    "@erc8426/core": "workspace:^",
+    "@erc8426/client": "workspace:^"
   },
   "peerDependencies": {
     "viem": "^2.21.0"

@@ -16,11 +16,11 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@erc8426/client": "workspace:*",
-    "@erc8426/conformance": "workspace:*",
-    "@erc8426/contracts": "workspace:*",
-    "@erc8426/core": "workspace:*",
-    "@erc8426/issuer": "workspace:*",
+    "@erc8426/client": "workspace:^",
+    "@erc8426/conformance": "workspace:^",
+    "@erc8426/contracts": "workspace:^",
+    "@erc8426/core": "workspace:^",
+    "@erc8426/issuer": "workspace:^",
     "viem": "^2.37.0"
   },
   "devDependencies": {

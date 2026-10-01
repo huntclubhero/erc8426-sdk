@@ -13,6 +13,6 @@
   "keywords": ["erc-8426", "wallet-pass", "apple-wallet", "google-wallet", "nft", "erc-721"],
   "publishConfig": { "access": "public" },
   "scripts": { "build": "tsc -p tsconfig.build.json" },
-  "dependencies": { "@erc8426/core": "workspace:*", "passkit-generator": "^3.3.0", "jose": "^5.9.6" },
+  "dependencies": { "@erc8426/core": "workspace:^", "passkit-generator": "^3.3.0", "jose": "^5.9.6" },
   "peerDependencies": { "viem": "^2.21.0" }
 }
