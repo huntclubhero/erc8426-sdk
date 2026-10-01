@@ -1,4 +1,4 @@
-import { getRuntime, json } from "@/lib/server";
+import { getRuntime, json, syncAfter } from "@/lib/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +14,7 @@ async function handle(request: Request): Promise<Response> {
   } catch (e) {
     return json({ error: "internal_error", message: (e as Error).message }, { status: 500 });
   }
+  syncAfter(runtime);
   return runtime.issuer.handler(request);
 }
 

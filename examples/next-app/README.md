@@ -103,17 +103,32 @@ It prints `CHAIN_ID`, `CONTRACT_ADDRESS` and `DEPLOY_BLOCK`. Put those, the same
 
 ## Deploying to Vercel
 
-- Set the project root to `examples/next-app` and the install command to run from the monorepo root (`pnpm install`, then `pnpm build` so the workspace packages have `dist`).
-- Set `NEXT_PUBLIC_BASE_URL` to the production URL. The SIWE domain is its host, and clients refuse to sign for any other, so preview deployments on other hosts will not verify unless you set it per environment.
-- Set `RPC_URL`, `CHAIN_ID`, `CONTRACT_ADDRESS`, `DEPLOY_BLOCK` and `OPERATOR_PRIVATE_KEY` (as a sensitive variable). Never set `DEV_WALLET`.
-- **State.** The issuer's default stores are in memory, and serverless functions do not share memory, so a nonce issued by one instance is unknown to another. For anything beyond a demo, pass `stores: kvStores(kv)` to `createIssuer` in `lib/server.ts` with Upstash Redis or Vercel KV (the issuer README shows the ten line adapter). The chain watchers also need a long-lived process; on serverless, call `issuer.onTransfer` and `issuer.onPassUpdate` from an indexer webhook instead.
-- Apple's `passkit-generator` is kept out of the bundle (`serverExternalPackages` in `next.config.mjs`).
+A live instance runs at **https://erc8426-demo.vercel.app** on Robinhood Chain testnet (chain 46630), built from this folder with the published `@erc8426/*` packages, with real Apple Wallet and Google Wallet delivery. Testnet only, unaudited example code.
+
+Everything serverless hosting needs is built in and switches on from the environment:
+
+- **Shared state.** Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (or connect an Upstash store in the Vercel Marketplace, which sets `KV_REST_API_URL` and `KV_REST_API_TOKEN`). `lib/kv.ts` then backs the issuer's nonces, pass records and links (`kvStores`), the Apple pass records and device registrations, and the Google object records with one Redis, so any instance can serve any request. Without it the stores are in memory, which is only correct for a single process.
+- **Operator transactions.** With Redis, operator transactions take a cross-instance lock and a nonce recorded in Redis, so concurrent mints and cares on different instances never collide (a load-balanced RPC can report a stale pending nonce).
+- **Chain events.** On Vercel (`VERCEL` is set) the long-lived watchers are off. After a response, the app catches up on `Transfer` and `PassUpdate` logs since a stored cursor, at most once a minute across instances (`/api/sync` does the same on demand). Authorization never depends on it, since every request reads the owner fresh.
+- **Visitors without a wallet.** `BURNER_WALLET=1` offers "Use a demo wallet": a throwaway key in the browser. The operator pays for mints and cares. `DRIP_WEI` sends each burner a little testnet gas once, so it can try a transfer (capped per IP and per day).
+- **Limits.** `/api/mint` is capped per IP and per day (`MINT_LIMIT_PER_IP`, default 5; `MINT_LIMIT_PER_DAY`, default 500). `MINT_API=off` closes it.
+
+Setup:
+
+1. Deploy the contract with `pnpm deploy` (see Testnet above) using `NEXT_PUBLIC_BASE_URL=https://<your-project>.vercel.app`.
+2. Outside this monorepo, replace the `workspace:*` versions in `package.json` with the published version and set the framework to Next.js (`vercel.json`: `{ "framework": "nextjs" }`). Inside it, set the project root to `examples/next-app` and build the workspace packages first.
+3. Set `RPC_URL`, `CHAIN_ID`, `CONTRACT_ADDRESS`, `DEPLOY_BLOCK`, `NEXT_PUBLIC_BASE_URL` and `OPERATOR_PRIVATE_KEY` (sensitive), plus the Apple and Google variables. Never set `DEV_WALLET`.
+4. `NEXT_PUBLIC_BASE_URL` must be the production URL: the SIWE domain is its host, and clients refuse to sign for any other, so preview deployments on other hosts will not verify.
+5. Check the deployment end to end: `BASE=https://<host> NEXT_PUBLIC_BASE_URL=https://<host> RPC_URL=... CHAIN_ID=... CONTRACT_ADDRESS=... pnpm smoke`.
+
+Apple's `passkit-generator` is kept out of the bundle (`serverExternalPackages` in `next.config.mjs`).
 
 ## Security notes
 
 - The operator key never leaves the server. The browser reads the chain through `/api/rpc`, an allowlisted proxy that forwards reads and already signed transactions only.
 - The dev wallet key is stored in `localStorage` by design: it is a throwaway for a local chain. Never do this with a real key.
-- `/api/mint` is open. It is a demo convenience, not a pattern.
+- `/api/mint` and `/api/drip` spend the operator's gas for anyone who asks. They are rate limited, and they are demo conveniences, not a pattern.
+- The demo wallet (`BURNER_WALLET=1`) keeps its key in `localStorage`. It is for a test network only.
 - This is teaching code built on tested packages, not an audited product.
 
 ## License

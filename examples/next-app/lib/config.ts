@@ -15,7 +15,22 @@ export interface ServerConfig {
   deployBlock: bigint;
   /// The in-browser burner wallet and its faucet. Only ever on for anvil.
   devWallet: boolean;
+  /// The in-browser burner wallet on a public testnet (BURNER_WALLET=1), so
+  ///  visitors without a browser wallet (most phones) can try the flow. The
+  ///  anvil faucet stays off; a capped testnet drip pays for transfers.
+  burnerWallet: boolean;
+  /// Wei the operator drips once to a burner so it can pay for a transfer.
+  ///  0 turns the drip off.
+  dripWei: bigint;
   mintEnabled: boolean;
+  /// Mints per IP per day and in total per day, enforced when a shared store
+  ///  is configured.
+  mintLimitPerIp: number;
+  mintLimitPerDay: number;
+  /// Long-lived chain watchers. Off on serverless hosts, where /api/sync
+  ///  catches up from the logs instead.
+  watchers: boolean;
+  networkLabel: string;
   apple: AppleEnv | null;
   google: GoogleEnv | null;
 }
@@ -43,8 +58,12 @@ export interface PublicConfig {
   contract: Address;
   baseUrl: string;
   devWallet: boolean;
+  burnerWallet: boolean;
+  drip: boolean;
   mintEnabled: boolean;
   platforms: string[];
+  /// Shown in the header so nobody mistakes the demo for a product.
+  networkLabel: string;
 }
 
 export type ConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
@@ -98,6 +117,11 @@ function googleEnv(env: NodeJS.ProcessEnv): GoogleEnv | null {
   }
 }
 
+function positiveInt(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : fallback;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
   const missing = ["RPC_URL", "CHAIN_ID", "CONTRACT_ADDRESS", "OPERATOR_PRIVATE_KEY"].filter((k) => !env[k]);
   if (missing.length > 0) {
@@ -129,7 +153,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       // Belt and braces: the flag AND an anvil chain id, so a testnet deploy
       // with a copied .env never exposes a faucet.
       devWallet: env.DEV_WALLET === "1" && chainId === ANVIL_CHAIN_ID,
+      burnerWallet: env.BURNER_WALLET === "1" || (env.DEV_WALLET === "1" && chainId === ANVIL_CHAIN_ID),
+      dripWei: chainId === ANVIL_CHAIN_ID ? 0n : BigInt(/^\d+$/.test(env.DRIP_WEI ?? "") ? env.DRIP_WEI! : "0"),
       mintEnabled: env.MINT_API !== "off",
+      mintLimitPerIp: positiveInt(env.MINT_LIMIT_PER_IP, 5),
+      mintLimitPerDay: positiveInt(env.MINT_LIMIT_PER_DAY, 500),
+      watchers: env.CHAIN_WATCHERS ? env.CHAIN_WATCHERS !== "off" : !env.VERCEL,
+      networkLabel: env.NETWORK_LABEL || (chainId === ANVIL_CHAIN_ID ? "Local chain" : `Testnet ${chainId}`),
       apple: appleEnv(env),
       google: googleEnv(env),
     },
@@ -143,7 +173,10 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     contract: config.contract,
     baseUrl: config.baseUrl,
     devWallet: config.devWallet,
+    burnerWallet: config.burnerWallet,
+    drip: config.dripWei > 0n,
     mintEnabled: config.mintEnabled,
+    networkLabel: config.networkLabel,
     platforms: [...(config.apple ? ["apple"] : []), ...(config.google ? ["google"] : [])],
   };
 }

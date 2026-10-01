@@ -23,7 +23,8 @@ export function MintPanel() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ to: address }),
       });
-      const body = await res.json();
+      // A host error page is not JSON; report the status, not a parse error.
+      const body = (await res.json().catch(() => ({}))) as { tokenId?: string; message?: string; error?: string };
       if (!res.ok || !body.tokenId) throw new Error(body.message ?? body.error ?? `HTTP ${res.status}`);
       setState({ status: "done", tokenId: body.tokenId });
     } catch (e) {

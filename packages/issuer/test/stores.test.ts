@@ -105,6 +105,34 @@ describe("kvStores", () => {
     expect(await s.links.get("t")).toBeNull();
   });
 
+  it("works on a client that parses JSON on read (@upstash/redis default)", async () => {
+    // Upstash's client JSON.parses every value it reads unless
+    // automaticDeserialization is off, so a shim built on it returns objects.
+    // 0.1.0 then ran JSON.parse on an object and every gated request failed.
+    const inner = memoryKv();
+    const parsing: KeyValueStore = {
+      get: async (k) => {
+        const v = await inner.get(k);
+        return v === null ? null : JSON.parse(v);
+      },
+      set: (k, v, o) => inner.set(k, v, o),
+      getDel: async (k) => {
+        const v = await inner.getDel(k);
+        return v === null ? null : JSON.parse(v);
+      },
+      del: (k) => inner.del(k),
+    };
+    const s = kvStores(parsing);
+    const r = record();
+    await s.nonces.issue("n", r, 60);
+    expect(await s.nonces.consume("n")).toEqual(r);
+    expect(await s.nonces.consume("n")).toBeNull();
+    const h = buildHarness({ stores: kvStores(parsing) });
+    const owner = newSigner();
+    const links = await issuePassTo(h, owner);
+    expect((await h.post(links.feed!)).status).toBe(200);
+  });
+
   it("drives a full issuer: claim, capability link, rotation", async () => {
     const h = buildHarness({ stores: kvStores(asyncKv()) });
     const owner = newSigner();

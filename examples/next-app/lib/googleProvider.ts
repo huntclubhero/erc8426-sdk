@@ -1,4 +1,4 @@
-import { googleFormatProvider, googleWalletClient, saveOrigins, type GoogleFormatProvider } from "@erc8426/google";
+import { googleFormatProvider, googleWalletClient, saveOrigins, type GoogleFormatProvider, type GoogleObjectStore } from "@erc8426/google";
 
 import type { ServerConfig } from "./config";
 
@@ -6,9 +6,10 @@ import type { ServerConfig } from "./config";
 /// present. Save links are minted on every manifest resolution and expire in
 /// an hour, which the spec allows ("acquisition URLs MAY be short-lived").
 /// Google cannot fetch images from localhost, so unhosted images are omitted.
-export function googleProvider(config: ServerConfig): GoogleFormatProvider {
+export function googleProvider(config: ServerConfig, store?: GoogleObjectStore): GoogleFormatProvider {
   const google = config.google!;
   return googleFormatProvider({
+    ...(store ? { store } : {}),
     client: googleWalletClient({ serviceAccount: google.serviceAccount, issuerId: google.issuerId }),
     classSuffix: google.classSuffix,
     origins: saveOrigins([config.baseUrl]),

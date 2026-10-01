@@ -59,7 +59,10 @@ export default function Home() {
       <section aria-labelledby="mode" className="section card">
         <h2 id="mode">What this instance delivers</h2>
         {platforms.length > 0 ? (
-          <p>Real wallet mode: {platforms.join(" and ")} delivery is configured, alongside the in-app preview.</p>
+          <p>
+            Real wallet mode: {platforms.join(" and ")} delivery is configured, alongside the in-app preview. This is a test network: the pets have no value, the operator pays the gas, and the code is an unaudited example.
+            {loaded.ok && loaded.config.burnerWallet && !loaded.config.devWallet ? " No wallet? Use a demo wallet: a throwaway key kept in this browser." : ""}
+          </p>
         ) : (
           <p>
             Local mode: no Apple or Google credentials are configured, so passes are shown as a live in-app preview drawn from the exact content a wallet would get. Everything else (the gated manifest, signed actions, capability links, rotation, the 403 for a previous owner) is the real protocol. See the README to add credentials.

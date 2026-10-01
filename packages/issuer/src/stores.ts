@@ -190,7 +190,13 @@ export function kvStores(kv: KeyValueStore, options: { prefix?: string } = {}): 
   const nonceKey = (n: string) => `${prefix}nonce:${n}`;
   const passKey = (t: string) => `${prefix}pass:${t}`;
   const linkKey = (l: string) => `${prefix}link:${l}`;
-  const parse = <T>(value: string | null): T | null => (value === null ? null : (JSON.parse(value) as T));
+  // A client that parses JSON on read (@upstash/redis does by default, as
+  // does Vercel KV) hands back the object rather than the string we wrote.
+  // Accept both, so a shim written either way works.
+  const parse = <T>(value: unknown): T | null => {
+    if (value === null || value === undefined) return null;
+    return (typeof value === "string" ? JSON.parse(value) : value) as T;
+  };
   return {
     nonces: {
       async issue(nonce, record, ttlSeconds) {

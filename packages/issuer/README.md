@@ -201,7 +201,9 @@ createIssuer({ ...config, stores: kvStores(kv) });
 ```ts
 import { Redis } from "@upstash/redis";
 
-const redis = Redis.fromEnv();
+// automaticDeserialization off: kvStores writes JSON strings and parses them
+// itself. (kvStores also accepts parsed values since 0.1.1, so either works.)
+const redis = Redis.fromEnv({ automaticDeserialization: false });
 const kv: KeyValueStore = {
   get: (k) => redis.get<string>(k),
   async set(k, v, o = {}) {

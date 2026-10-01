@@ -19,12 +19,14 @@
     "@erc8426/google": "workspace:*",
     "@erc8426/issuer": "workspace:*",
     "@erc8426/react": "workspace:*",
+    "@upstash/redis": "^1.39.0",
     "next": "^15.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "viem": "^2.37.0"
   },
   "devDependencies": {
+    "@erc8426/conformance": "workspace:*",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -32,8 +32,9 @@ export function useWallet(): WalletContextValue {
 }
 
 /// The dev wallet key lives in localStorage on purpose: it is a throwaway
-/// burner for a local anvil chain, funded by a faucet that refuses any other
-/// chain. Never do this with a key that matters.
+/// burner. On anvil a faucet funds it; on a public testnet (BURNER_WALLET=1)
+/// it holds nothing of value, the operator pays for mints and cares, and a
+/// capped drip pays for a transfer. Never do this with a key that matters.
 const DEV_KEY = "erc8426-example:dev-wallet-key";
 
 function injected(): EIP1193Provider | undefined {
@@ -49,7 +50,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const connectDev = useCallback(async () => {
-    if (!config.devWallet) return;
+    if (!config.burnerWallet) return;
     setBusy(true);
     setError(null);
     try {
@@ -59,12 +60,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         window.localStorage.setItem(DEV_KEY, key);
       }
       const account = privateKeyToAccount(key);
-      const res = await fetch("/api/dev/fund", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ address: account.address }),
-      });
-      if (!res.ok) throw new Error("The dev faucet refused. Is this a local anvil chain?");
+      if (config.devWallet) {
+        const res = await fetch("/api/dev/fund", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ address: account.address }),
+        });
+        if (!res.ok) throw new Error("The dev faucet refused. Is this a local anvil chain?");
+      } else if (config.drip) {
+        // Testnet gas for a transfer. Best effort: everything else works
+        // without it, since the operator pays for mints and cares.
+        void fetch("/api/drip", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ address: account.address }),
+        }).catch(() => undefined);
+      }
       setWalletClient(createWalletClient({ account, chain, transport: http("/api/rpc") }));
       setKind("dev");
       window.localStorage.setItem("erc8426-example:wallet", "dev");
@@ -73,7 +84,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     } finally {
       setBusy(false);
     }
-  }, [chain, config.devWallet]);
+  }, [chain, config.burnerWallet, config.devWallet, config.drip]);
 
   const connectInjected = useCallback(async () => {
     const eth = injected();
@@ -115,9 +126,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setHasInjected(Boolean(injected()));
     const last = window.localStorage.getItem("erc8426-example:wallet");
-    if (last === "dev" && config.devWallet) void connectDev();
+    if (last === "dev" && config.burnerWallet) void connectDev();
     // An injected wallet is not reconnected silently; the user clicks again.
-  }, [config.devWallet, connectDev]);
+  }, [config.burnerWallet, connectDev]);
 
   const signer = useMemo(() => (walletClient ? fromWalletClient(walletClient) : null), [walletClient]);
   return (
@@ -147,7 +158,7 @@ export function ConnectButton() {
     return (
       <div className="wallet">
         <span className="wallet-address" title={w.address}>
-          {w.kind === "dev" ? <span className="tag tag-warn">Dev wallet</span> : null} {shortHex(w.address)}
+          {w.kind === "dev" ? <span className="tag tag-warn">{config.devWallet ? "Dev wallet" : "Demo wallet"}</span> : null} {shortHex(w.address)}
         </span>
         <button type="button" className="btn btn-quiet" onClick={w.disconnect}>
           Disconnect
@@ -160,9 +171,9 @@ export function ConnectButton() {
       <button type="button" className="btn" onClick={() => void w.connectInjected()} disabled={w.busy || !w.hasInjected} title={w.hasInjected ? undefined : "No browser wallet detected"}>
         Connect wallet
       </button>
-      {config.devWallet ? (
-        <button type="button" className="btn btn-quiet" onClick={() => void w.connectDev()} disabled={w.busy}>
-          Use dev wallet
+      {config.burnerWallet ? (
+        <button type="button" className={w.hasInjected ? "btn btn-quiet" : "btn"} onClick={() => void w.connectDev()} disabled={w.busy}>
+          {config.devWallet ? "Use dev wallet" : "Use a demo wallet"}
         </button>
       ) : null}
       {w.error ? (
@@ -183,6 +194,10 @@ export function NeedWallet({ what }: { what: string }) {
       {config.devWallet ? (
         <p className="muted">
           No browser wallet? <strong>Use dev wallet</strong> creates a throwaway key in this browser and funds it on the local chain. It is for local development only and is disabled on any other chain.
+        </p>
+      ) : config.burnerWallet ? (
+        <p className="muted">
+          No browser wallet? <strong>Use a demo wallet</strong> creates a throwaway testnet key in this browser. It holds nothing of value: this app pays for the hatch and the care. Clearing your browser data loses it, and the pet with it.
         </p>
       ) : null}
       <ConnectButton />
