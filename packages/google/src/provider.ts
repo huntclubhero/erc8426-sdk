@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { FORMAT_GOOGLE, type PassContext, type PassFormatProvider } from "@erc8426/core";
+import { FORMAT_GOOGLE, type PassContext, type PassFormatProvider, type SupersededReason } from "@erc8426/core";
 
 import type { GoogleMessage, GoogleWalletClient } from "./client.js";
 import { suffixForSerial } from "./ids.js";
@@ -66,8 +66,11 @@ export interface GoogleFormatProviderOptions {
   redemptionChannel?: ClassOptions["redemptionChannel"];
   /// A notification to attach on notifyUpdate, or null for a silent update.
   messageFor?(ctx: PassContext): GoogleMessage | null;
-  /// Shown on a previous owner's object when a transfer supersedes it.
-  supersededMessage?: GoogleMessage | null;
+  /// Shown on an object when it is superseded: a fixed message, null for
+  ///  none, or a function of why ("transfer" or "reset", undefined when
+  ///  unknown). Defaults to `defaultSupersededMessage`, which says why and
+  ///  where the holder gets the current pass, as the spec asks.
+  supersededMessage?: GoogleMessage | null | ((reason: SupersededReason | undefined) => GoogleMessage | null);
   /// When the REST upsert fails, embed the full object in the save link so
   ///  the button still works. Defaults to true. The fallback link is longer
   ///  and does not receive later PATCHes, so onError should alert.
@@ -89,10 +92,26 @@ export interface GoogleFormatProvider extends PassFormatProvider {
   readonly store: GoogleObjectStore;
 }
 
-const DEFAULT_SUPERSEDED: GoogleMessage = {
-  header: "This pass was replaced",
-  body: "A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live links. If you hold the token, add the current pass from the issuer.",
-};
+/// The default message on a superseded object, mirroring the Apple
+///  provider's `supersededContent` wording for the same reason.
+export function defaultSupersededMessage(reason: SupersededReason | undefined): GoogleMessage {
+  if (reason === "transfer") {
+    return {
+      header: "Transferred",
+      body: "The token moved to a new owner, so this pass was replaced and no longer shows live links. The new owner adds the current pass from the issuer.",
+    };
+  }
+  if (reason === "reset") {
+    return {
+      header: "Links reset",
+      body: "The owner reset this pass's links, so it was replaced and no longer shows live links. The token is not affected. If you hold it, add the current pass from the issuer.",
+    };
+  }
+  return {
+    header: "This pass was replaced",
+    body: "A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live links. If you hold the token, add the current pass from the issuer.",
+  };
+}
 
 function hashOf(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -143,12 +162,18 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     return `${suffixForSerial(serial)}.${randomBytes(8).toString("hex")}`;
   }
 
-  async function expire(serial: string, record: GoogleObjectRecord): Promise<void> {
+  function supersededMessageFor(reason: SupersededReason | undefined): GoogleMessage | null {
+    const m = opts.supersededMessage;
+    if (m === undefined) return defaultSupersededMessage(reason);
+    return typeof m === "function" ? m(reason) : m;
+  }
+
+  async function expire(serial: string, record: GoogleObjectRecord, reason: SupersededReason): Promise<void> {
     const id = `${client.issuerId}.${record.objectSuffix}`;
     const type = `${record.vertical}Object` as const;
     try {
       await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
-      const msg = opts.supersededMessage === undefined ? DEFAULT_SUPERSEDED : opts.supersededMessage;
+      const msg = supersededMessageFor(reason);
       if (msg) await client.addMessage(type, id, msg);
     } catch (err) {
       report(err, `expire superseded object ${id} for ${serial}`);
@@ -160,7 +185,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     const owner = ctx.owner.toLowerCase();
     let record = await store.get(serial);
     if (record && record.owner !== owner) {
-      await expire(serial, record);
+      await expire(serial, record, "transfer");
       record = null;
     }
     const object = toGoogleObject(ctx.content, {
@@ -197,7 +222,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       next.superseded = superseding;
       await store.put(serial, next);
       if (newlySuperseded) {
-        const msg = opts.supersededMessage === undefined ? DEFAULT_SUPERSEDED : opts.supersededMessage;
+        const msg = supersededMessageFor(ctx.content.supersededReason);
         if (msg) {
           try {
             await client.addMessage(`${object.vertical}Object`, object.resource.id, msg);
@@ -254,7 +279,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     async rotate(serial: string): Promise<void> {
       const record = await store.get(serial);
       if (!record) return;
-      await expire(serial, record);
+      await expire(serial, record, "reset");
       await store.delete(serial);
     },
   };

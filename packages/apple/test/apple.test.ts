@@ -7,6 +7,7 @@ import {
   MemoryApplePassStore,
   applePassKitWebService,
   appleFormatProvider,
+  supersededContent,
   buildPkpass,
   createApnsClient,
   fetchImage,
@@ -560,7 +561,7 @@ describe("appleFormatProvider", () => {
     };
   }
 
-  function provider(apns = fakeApns()) {
+  function provider(apns = fakeApns(), extra: Partial<Parameters<typeof appleFormatProvider>[0]> = {}) {
     const p = appleFormatProvider({
       passTypeIdentifier: PASS_TYPE,
       teamIdentifier: TEAM,
@@ -568,6 +569,7 @@ describe("appleFormatProvider", () => {
       origin: "https://issuer.example",
       linkSecret: SECRET,
       apns,
+      ...extra,
     });
     return { p, apns };
   }
@@ -616,7 +618,9 @@ describe("appleFormatProvider", () => {
     expect(pass.authenticationToken).toBe(oldToken);
     expect(pass.barcodes).toBeUndefined();
     expect(pass.storeCard.backFields.map((f: { key: string }) => f.key)).toEqual(["supersededNote"]);
-    expect(pass.storeCard.primaryFields[0].value).toBe("No longer current");
+    // The old pass says why: the token changed hands.
+    expect(pass.storeCard.primaryFields[0].value).toBe("Transferred");
+    expect(pass.storeCard.backFields[0].value).toMatch(/^The token moved to a new owner/);
     expect(JSON.stringify(pass)).not.toContain("issuer.example/a?");
   });
 
@@ -710,11 +714,67 @@ describe("appleFormatProvider", () => {
     const leaked = await passJsonOf(await refreshWith(p, leakedToken));
     expect(leaked.voided).toBe(true);
     expect(JSON.stringify(leaked)).not.toContain("fresh-link");
+    // An owner reset says so, and tells a holder who still owns the token
+    // where the current pass comes from.
+    expect(leaked.storeCard.primaryFields[0].value).toBe("Links reset");
+    expect(leaked.storeCard.backFields[0].value).toContain("The token is not affected");
+    expect(leaked.storeCard.backFields[0].value).toContain("add the current pass from Example Org");
     expect((await registerWith(p, leakedToken)).status).toBe(401);
 
     const owners = await passJsonOf(await p.handle(new Request(url!)));
     expect(JSON.stringify(owners)).toContain("fresh-link");
     expect(owners.voided).toBeUndefined();
+  });
+
+  it("a superseded serial carrying the issuer's reason renders that reason", async () => {
+    const { p } = provider();
+    await p.passFile(ctx(OWNER_A));
+    const token = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    await p.notifyUpdate(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    const pass = await passJsonOf(await refreshWith(p, token));
+    expect(pass.voided).toBe(true);
+    expect(pass.storeCard.primaryFields[0].value).toBe("Links reset");
+  });
+
+  it("each retired token keeps the reason it was retired for", async () => {
+    const { p } = provider();
+    await p.acquisitionUrl(ctx(OWNER_A));
+    const sellersToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    await p.acquisitionUrl(ctx(OWNER_B));
+    const buyersOldToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    await p.rotate("s3r1al");
+    expect((await passJsonOf(await refreshWith(p, sellersToken))).storeCard.primaryFields[0].value).toBe("Transferred");
+    expect((await passJsonOf(await refreshWith(p, buyersOldToken))).storeCard.primaryFields[0].value).toBe("Links reset");
+  });
+
+  it("a record written before reasons existed renders the generic wording", async () => {
+    const { p } = provider();
+    await p.acquisitionUrl(ctx(OWNER_A));
+    const record = (await p.store.getPass("s3r1al"))!;
+    const legacyToken = "l".repeat(64);
+    const { retiredReasons: _dropped, ...legacy } = { ...record, retiredAuthenticationTokens: [legacyToken] };
+    await p.store.putPass(legacy);
+    const pass = await passJsonOf(await refreshWith(p, legacyToken));
+    expect(pass.storeCard.primaryFields[0].value).toBe("No longer current");
+    expect(pass.storeCard.backFields[0].value).toMatch(/^A newer pass replaced this one/);
+    // The next rotation lines the old token up with an unknown reason.
+    await p.rotate("s3r1al");
+    expect((await p.store.getPass("s3r1al"))!.retiredReasons).toEqual(["reset", null]);
+  });
+
+  it("a custom supersede hook receives the reason", async () => {
+    const seen: Array<string | undefined> = [];
+    const { p } = provider(undefined, {
+      supersede: (c, reason) => {
+        seen.push(reason);
+        return supersededContent(c, reason);
+      },
+    });
+    await p.acquisitionUrl(ctx(OWNER_A));
+    const token = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    await p.acquisitionUrl(ctx(OWNER_B));
+    await refreshWith(p, token);
+    expect(seen).toEqual(["transfer"]);
   });
 
   it("omits the web service on an http origin", async () => {

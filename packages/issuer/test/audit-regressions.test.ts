@@ -52,7 +52,7 @@ describe("rotate route (audit 1 and 3)", () => {
     const fresh = (await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!;
     const toLeaked = h.notified.filter((n) => n.ctx.content.serial === leakedSerial);
     expect(toLeaked.length).toBeGreaterThan(0);
-    for (const n of toLeaked) expect(n.ctx.content).toMatchObject({ voided: true, links: [] });
+    for (const n of toLeaked) expect(n.ctx.content).toMatchObject({ voided: true, links: [], supersededReason: "reset" });
     expect(JSON.stringify(h.notified)).not.toContain(fresh);
   });
 });

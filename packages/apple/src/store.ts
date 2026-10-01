@@ -1,4 +1,4 @@
-import type { PassContent } from "@erc8426/core";
+import type { PassContent, SupersededReason } from "@erc8426/core";
 
 import { randomToken } from "./util.js";
 
@@ -16,6 +16,10 @@ export interface ApplePassRecord {
   ///  holding one may refresh (and receives the superseded rendering) and may
   ///  unregister, but may never register a new device.
   retiredAuthenticationTokens: string[];
+  /// Why each retired token was retired, index-aligned with
+  ///  `retiredAuthenticationTokens` (null when unknown). Optional so records
+  ///  written before it existed still load; they render the generic wording.
+  retiredReasons?: Array<SupersededReason | null>;
   /// Owner the current token was issued to, lowercased. A different owner on
   ///  the next acquisition is a transfer and rotates the token.
   owner?: string;
@@ -61,11 +65,15 @@ export class MemoryApplePassStore implements ApplePassStore {
 
   async getPass(serial: string): Promise<ApplePassRecord | null> {
     const r = this.passes.get(serial);
-    return r ? { ...r, retiredAuthenticationTokens: [...r.retiredAuthenticationTokens] } : null;
+    return r ? { ...r, retiredAuthenticationTokens: [...r.retiredAuthenticationTokens], ...(r.retiredReasons ? { retiredReasons: [...r.retiredReasons] } : {}) } : null;
   }
 
   async putPass(record: ApplePassRecord): Promise<void> {
-    this.passes.set(record.serial, { ...record, retiredAuthenticationTokens: [...record.retiredAuthenticationTokens] });
+    this.passes.set(record.serial, {
+      ...record,
+      retiredAuthenticationTokens: [...record.retiredAuthenticationTokens],
+      ...(record.retiredReasons ? { retiredReasons: [...record.retiredReasons] } : {}),
+    });
   }
 
   async register(r: DeviceRegistration): Promise<boolean> {
@@ -117,13 +125,26 @@ export function newPassRecord(serial: string, owner?: string): ApplePassRecord {
 export const MAX_RETIRED_TOKENS = 16;
 
 /// Rotate a pass's token: the current one is retired, a fresh one issued.
+///  `reason` is remembered for the retired token so its superseded rendering
+///  can say why; it defaults to "transfer" when a new owner is given.
 ///  Returns the updated record; the caller persists it.
-export function rotatedRecord(record: ApplePassRecord, newOwner?: string): ApplePassRecord {
+export function rotatedRecord(record: ApplePassRecord, newOwner?: string, reason?: SupersededReason): ApplePassRecord {
+  const why = reason ?? (newOwner ? "transfer" : null);
+  // Align an older record's reasons (or none) with its tokens before adding.
+  const reasons = record.retiredAuthenticationTokens.map((_, i) => record.retiredReasons?.[i] ?? null);
   return {
     ...record,
     authenticationToken: randomToken(),
     retiredAuthenticationTokens: [record.authenticationToken, ...record.retiredAuthenticationTokens].slice(0, MAX_RETIRED_TOKENS),
+    retiredReasons: [why, ...reasons].slice(0, MAX_RETIRED_TOKENS),
     owner: newOwner ? newOwner.toLowerCase() : record.owner,
     updatedAt: new Date(),
   };
+}
+
+/// Why a retired token was retired, or undefined when the token is not
+///  retired or the record does not know.
+export function retiredReasonFor(record: ApplePassRecord, token: string): SupersededReason | undefined {
+  const i = record.retiredAuthenticationTokens.indexOf(token);
+  return i < 0 ? undefined : (record.retiredReasons?.[i] ?? undefined);
 }

@@ -46,7 +46,7 @@ Acquisition URLs and action links rotate:
 
 Rotation is not synchronous with the transfer. Between the transfer and rotation, the previous owner's URLs are still cryptographically valid; the fresh read is what refuses them. Rotation closes the residual window; it is not the boundary.
 
-On a transfer the issuer gives the new holder a pass under a new random serial and pushes the previous holder's pass as superseded: rendered with `voided: true` and no links. Apple shows it as a voided card; Google marks the object `INACTIVE`. The previous holder's copy stops presenting itself as current, which is what the spec's issuer requirements ask for.
+On a transfer, or when the owner resets their pass links, the issuer gives the holder a pass under a new random serial and pushes the old serial as superseded: rendered with `voided: true`, no links, and a `supersededReason` of `transfer` or `reset`. Apple shows it as a voided card; Google expires the object. The old copy stops presenting itself as current, which is what the spec's issuer requirements ask for, and it says why: "Transferred" after a change of hands, "Links reset" with a pointer to the current pass after a reset. Neither platform lets an issuer delete an installed pass, so this wording is what tells the holder their token was not lost. Your `render` receives the same `supersededReason` if you want your own wording.
 
 ## PassUpdate flow
 

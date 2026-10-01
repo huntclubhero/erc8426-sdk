@@ -25,5 +25,5 @@ export type {
 export { createSaveUrl, saveOrigins, importServiceAccountKey, SAVE_URL_SOFT_LIMIT } from "./save.js";
 export type { SaveUrlOptions, ServiceAccount, ObjectReference } from "./save.js";
 export { assertIssuerId, assertSuffix, resourceId, suffixForSerial } from "./ids.js";
-export { googleFormatProvider, MemoryGoogleObjectStore } from "./provider.js";
+export { googleFormatProvider, defaultSupersededMessage, MemoryGoogleObjectStore } from "./provider.js";
 export type { GoogleFormatProvider, GoogleFormatProviderOptions, GoogleObjectStore, GoogleObjectRecord } from "./provider.js";

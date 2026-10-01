@@ -1,6 +1,6 @@
 {
   "name": "@erc8426/apple",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Apple Wallet delivery for ERC-8426: pkpass building, the PassKit web service, APNs push",
   "license": "MIT",
   "type": "module",

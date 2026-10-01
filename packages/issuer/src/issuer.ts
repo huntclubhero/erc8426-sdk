@@ -13,6 +13,7 @@ import {
   type PassDeliveryProvider,
   type PassFormatProvider,
   type PassManifest,
+  type SupersededReason,
   type TokenRef,
 } from "@erc8426/core";
 
@@ -46,9 +47,13 @@ export interface RenderContext {
   ///  back of the pass. Empty unless the capability configuration is on.
   links: Record<string, string>;
   /// True when rendering the previous holder's pass to mark it superseded
-  ///  after a transfer. The issuer sets `voided` and drops links on the
-  ///  result regardless; use the flag to change wording.
+  ///  after a transfer or a reset. The issuer sets `voided` and drops links
+  ///  on the result regardless; use the flag to change wording.
   superseded: boolean;
+  /// Why, when `superseded`: "transfer" (the token changed hands) or
+  ///  "reset" (the owner rotated the pass links). The old pass should say
+  ///  which, and on a reset tell the holder to add the current pass.
+  supersededReason?: SupersededReason;
   /// Unix seconds of the last content change.
   updatedAt: number;
 }
@@ -171,7 +176,7 @@ export interface IssuerInternals {
   /// The account passes were last issued to, or null.
   holderOf(tokenId: string): Promise<Address | null>;
   buildManifest(record: PassRecord, owner: Address): Promise<PassManifest>;
-  renderContent(record: PassRecord, owner: Address, superseded: boolean): Promise<PassContent>;
+  renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent>;
   resolveLink(linkToken: string, kind: LinkBinding["kind"]): Promise<{ binding: LinkBinding; record: PassRecord } | null>;
   onPassUpdate: Issuer["onPassUpdate"];
 }
@@ -262,13 +267,14 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return record;
   }
 
-  async function renderContent(record: PassRecord, owner: Address, superseded: boolean): Promise<PassContent> {
+  async function renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent> {
     const content = await options.render({
       token: token(record.tokenId),
       owner,
       serial: record.serial,
       links: superseded ? {} : linkUrls(record),
-      superseded,
+      superseded: Boolean(superseded),
+      ...(superseded ? { supersededReason: superseded } : {}),
       updatedAt: record.updatedAt,
     });
     const out: PassContent = { ...content, serial: record.serial };
@@ -278,13 +284,14 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // expired on both platforms; its links are dead after rotation anyway.
       out.voided = true;
       out.links = [];
+      out.supersededReason = superseded;
     }
     return out;
   }
 
   // Push content to installed passes. A failed push never fails the caller:
   // the state change it follows has already happened.
-  async function notify(record: PassRecord, owner: Address, superseded: boolean, operation: string): Promise<void> {
+  async function notify(record: PassRecord, owner: Address, superseded: SupersededReason | false, operation: string): Promise<void> {
     const targets = providers.filter((p) => typeof p.notifyUpdate === "function");
     if (targets.length === 0) return;
     let content: PassContent;
@@ -327,7 +334,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // even if deleting them below fails.
     await stores.passes.put(next);
     await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
-    if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, true, "supersede");
+    // A new account's claim is a change of hands like an observed transfer;
+    // only the owner's own request keeps the holder, and its pass says so.
+    if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, reason === "owner_request" ? "reset" : "transfer", "supersede");
     return next;
   }
 

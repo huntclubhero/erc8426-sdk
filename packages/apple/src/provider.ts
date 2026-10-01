@@ -6,12 +6,13 @@ import {
   type PassFile,
   type PassFileProvider,
   type PassFormatProvider,
+  type SupersededReason,
 } from "@erc8426/core";
 
 import type { ApnsClient, PushOutcome } from "./apns.js";
 import type { ImageFetchOptions } from "./images.js";
 import { buildPkpass, type AppleCertificates } from "./pkpass.js";
-import { MemoryApplePassStore, newPassRecord, rotatedRecord, type ApplePassRecord, type ApplePassStore } from "./store.js";
+import { MemoryApplePassStore, newPassRecord, retiredReasonFor, rotatedRecord, type ApplePassRecord, type ApplePassStore } from "./store.js";
 import { hmacHex, responseBody, safeEqual } from "./util.js";
 import { applePassKitWebService, type BuildPassArgs } from "./webservice.js";
 
@@ -44,8 +45,9 @@ export interface AppleFormatProviderOptions {
   imageFetch?: ImageFetchOptions;
   sharingProhibited?: boolean;
   /// How a superseded pass renders for a device still holding a retired
-  ///  token. Defaults to `supersededContent`.
-  supersede?(content: PassContent): PassContent;
+  ///  token. `reason` is why that token was retired ("transfer" or "reset"),
+  ///  undefined when unknown. Defaults to `supersededContent`.
+  supersede?(content: PassContent, reason?: SupersededReason): PassContent;
   /// Called with push outcomes; a push failure never fails the caller.
   onPush?(serial: string, outcomes: PushOutcome[] | Error): void;
 }
@@ -90,9 +92,27 @@ export interface AppleFormatProvider extends PassFormatProvider, PassFileProvide
 ///  header) and drops everything live: values, links, barcode, relevance.
 ///  Values are dropped rather than frozen because the record may now hold a
 ///  NEW holder's content, which a superseded copy must not keep receiving.
-///  The wording claims only what is true in every case: this copy is
-///  replaced and carries no live details or links.
-export function supersededContent(content: PassContent): PassContent {
+///  The wording says why when the reason is known (the spec asks a superseded
+///  pass to say why and how to get the replacement) and, without one, claims
+///  only what is true in every case. A disappearing pass reads like a lost
+///  token, so the wording points the holder at the current pass.
+export function supersededContent(content: PassContent, reason: SupersededReason | undefined = content.supersededReason): PassContent {
+  const issuer = content.organizationName;
+  const copy =
+    reason === "transfer"
+      ? {
+          status: "Transferred",
+          note: `The token moved to a new owner, so this pass was replaced and no longer shows live details or links. The new owner adds the current pass from ${issuer}.`,
+        }
+      : reason === "reset"
+        ? {
+            status: "Links reset",
+            note: `The owner reset this pass's links, so it was replaced and no longer shows live details or links. The token is not affected. If you hold it, add the current pass from ${issuer}.`,
+          }
+        : {
+            status: "No longer current",
+            note: `A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live details or links. If you hold the token, add the current pass from ${issuer}.`,
+          };
   return {
     serial: content.serial,
     style: content.style,
@@ -102,16 +122,10 @@ export function supersededContent(content: PassContent): PassContent {
     colors: content.colors,
     images: content.images,
     header: content.header,
-    primary: [{ key: "supersededStatus", label: "STATUS", value: "No longer current" }],
-    back: [
-      {
-        key: "supersededNote",
-        label: "This pass was replaced",
-        value:
-          "A newer pass replaced this one, after the token changed hands or its pass links were reset. This copy no longer shows live details or links. If you hold the token, add the current pass from the issuer.",
-      },
-    ],
+    primary: [{ key: "supersededStatus", label: "STATUS", value: copy.status }],
+    back: [{ key: "supersededNote", label: "This pass was replaced", value: copy.note }],
     voided: true,
+    ...(reason ? { supersededReason: reason } : {}),
   };
 }
 
@@ -152,7 +166,11 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
 
   async function build(record: ApplePassRecord, retired: boolean, authenticationToken: string): Promise<Uint8Array> {
     if (!record.content) throw new Error(`no stored content for serial ${record.serial}`);
-    const content = retired ? supersede(record.content) : record.content;
+    // A retired token renders with the reason IT was retired for; the stored
+    // content's own reason (the issuer's voided serial) is the fallback.
+    const content = retired
+      ? supersede(record.content, retiredReasonFor(record, authenticationToken) ?? record.content.supersededReason)
+      : record.content;
     return buildPkpass(content, {
       passTypeIdentifier: opts.passTypeIdentifier,
       teamIdentifier: opts.teamIdentifier,
@@ -190,13 +208,13 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
     if (!record) {
       record = newPassRecord(serial, owner);
     } else if (record.owner && record.owner !== owner) {
-      record = rotatedRecord(record, owner);
+      record = rotatedRecord(record, owner, "transfer");
       rotated = true;
     } else if (!record.owner) {
       record = { ...record, owner };
     }
     if (!rotated && ctx.content.voided && record.content && !record.content.voided) {
-      record = rotatedRecord(record);
+      record = rotatedRecord(record, undefined, ctx.content.supersededReason);
       rotated = true;
     }
     if (forceTouch || rotated || fingerprint(record.content) !== fingerprint(ctx.content)) {
@@ -277,7 +295,7 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
     async rotate(serial: string, content?: PassContent): Promise<string | undefined> {
       const record = await store.getPass(serial);
       if (!record) throw new Error(`unknown serial ${serial}`);
-      const next = { ...rotatedRecord(record), ...(content ? { content } : {}) };
+      const next = { ...rotatedRecord(record, undefined, "reset"), ...(content ? { content } : {}) };
       await store.putPass(next);
       await push(serial);
       return secret ? downloadUrl(next) : undefined;

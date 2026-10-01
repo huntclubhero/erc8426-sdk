@@ -383,6 +383,7 @@ describe("googleFormatProvider", () => {
     expect(old.state).toBe("EXPIRED");
     expect(old.linksModuleData).toEqual({ uris: [] });
     expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${oldId}/addMessage`]);
+    expect(g.messages[0]!.body.message).toMatchObject({ header: "Transferred" });
     expect(g.resources.get(`genericObject/${newId}`)!.state).toBe("ACTIVE");
   });
 
@@ -400,6 +401,8 @@ describe("googleFormatProvider", () => {
     const first = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
     await p.rotate("s3r1al");
     expect(g.resources.get(`genericObject/${first[0]!.id}`)!.state).toBe("EXPIRED");
+    expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Links reset" });
+    expect(g.messages.at(-1)!.body.message.body).toContain("If you hold it, add the current pass");
     const next = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
     expect(next[0]!.id).not.toBe(first[0]!.id);
   });
@@ -426,6 +429,27 @@ describe("googleFormatProvider", () => {
     // The new serial the issuer minted gets its own object.
     const fresh = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A, content({ serial: "n3w" }))));
     expect((fresh.payload.genericObjects as Array<{ id: string }>)[0]!.id).not.toBe(id);
+  });
+
+  it("a superseded serial carrying the issuer's reason gets that reason's message", async () => {
+    const { g, p } = setup();
+    await p.acquisitionUrl(ctx(OWNER_A));
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Links reset" });
+  });
+
+  it("supersededMessage may be a function of the reason, or null for none", async () => {
+    const reasons: Array<string | undefined> = [];
+    const fn = setup({ supersededMessage: (reason) => (reasons.push(reason), { header: `Custom ${reason}`, body: "x" }) });
+    await fn.p.acquisitionUrl(ctx(OWNER_A));
+    await fn.p.acquisitionUrl(ctx(OWNER_B));
+    expect(reasons).toEqual(["transfer"]);
+    expect(fn.g.messages.at(-1)!.body.message).toMatchObject({ header: "Custom transfer" });
+
+    const none = setup({ supersededMessage: null });
+    await none.p.acquisitionUrl(ctx(OWNER_A));
+    await none.p.rotate("s3r1al");
+    expect(none.g.messages).toHaveLength(0);
   });
 
   it("clears removed links and modules on PATCH, since PATCH merges", async () => {

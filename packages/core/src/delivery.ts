@@ -83,11 +83,22 @@ export interface PassContent {
   ///  which is how an issuer marks a previous owner's pass as superseded.
   expiresAt?: Date;
   voided?: boolean;
+  /// With `voided`: why this pass was superseded. Platform providers use it
+  ///  to say why on the old pass and where the holder gets the current one,
+  ///  which the spec asks of a pass presented as superseded.
+  supersededReason?: SupersededReason;
   relevantDate?: Date;
   locations?: Array<{ latitude: number; longitude: number; relevantText?: string }>;
   /// Event details for the eventTicket style.
   event?: { name: string; venue?: string; startsAt?: Date; endsAt?: Date };
 }
+
+/// Why a pass was superseded. "transfer": the token changed hands (a new
+///  owner's claim included), so whoever holds the old pass is likely the
+///  previous owner. "reset": the pass links were rotated under an unchanged
+///  owner, so the holder is likely still the owner and should add the
+///  current pass.
+export type SupersededReason = "transfer" | "reset";
 
 /// What a format provider knows when it produces an acquisition URL.
 export interface PassContext {

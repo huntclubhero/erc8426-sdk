@@ -182,6 +182,8 @@ describe("gated acquisition", () => {
     expect(superseded[0]!.ctx.owner).toBe(seller.address);
     expect(s.body.formats.google).toContain(superseded[0]!.ctx.content.serial);
     expect(superseded[0]!.ctx.content.links).toEqual([]);
+    // A new account's claim is a change of hands.
+    expect(superseded[0]!.ctx.content.supersededReason).toBe("transfer");
   });
 
   it("serves the apple pass file at a capability URL with the pkpass media type", async () => {
