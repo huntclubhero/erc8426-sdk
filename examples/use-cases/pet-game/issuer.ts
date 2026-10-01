@@ -74,7 +74,7 @@ export function createPetIssuer(o: PetIssuerOptions): Issuer {
       water: care("water", "Water"),
       play: care("play", "Play with"),
     },
-    async render({ token, serial, links, superseded }): Promise<PassContent> {
+    async render({ token, serial, links, superseded, supersededReason }): Promise<PassContent> {
       const id = BigInt(token.tokenId);
       const p = await readPet(o.chain, o.contract, id);
       const mood = !p.alive ? "Gone" : p.hunger + p.thirst + p.boredom < 90n ? "Happy" : "Needs you";
@@ -85,7 +85,7 @@ export function createPetIssuer(o: PetIssuerOptions): Issuer {
         description: `Pet #${id}`,
         title: `Pet #${id}`,
         colors: p.alive ? { background: "#16233A", foreground: "#F6F1E7", label: "#F2B84B" } : { background: "#2B2B2B", foreground: "#9A9A9A" },
-        primary: [{ key: "mood", label: "Mood", value: superseded ? "Rehomed" : mood, changeMessage: "Your pet is %@" }],
+        primary: [{ key: "mood", label: "Mood", value: superseded ? (supersededReason === "reset" ? "Links reset" : "Rehomed") : mood, changeMessage: "Your pet is %@" }],
         secondary: [
           { key: "hunger", label: "Hunger", value: `${p.hunger}%` },
           { key: "thirst", label: "Thirst", value: `${p.thirst}%` },

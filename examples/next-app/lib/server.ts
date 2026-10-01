@@ -202,7 +202,7 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
     },
   });
 
-  const render: Parameters<typeof createIssuer>[0]["render"] = async ({ token, owner, serial, links, superseded, updatedAt }) => {
+  const render: Parameters<typeof createIssuer>[0]["render"] = async ({ token, owner, serial, links, superseded, supersededReason, updatedAt }) => {
     const state = await readPet(publicClient, config.contract, BigInt(token.tokenId));
     const name = petName(token.tokenId);
     const content: PassContent = {
@@ -218,7 +218,7 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
         {
           key: "mood",
           label: superseded ? "STATUS" : "MOOD",
-          value: superseded ? "Transferred" : state ? mood(state) : "Unknown",
+          value: superseded ? (supersededReason === "reset" ? "Links reset" : "Transferred") : state ? mood(state) : "Unknown",
           changeMessage: "Your pet is now %@",
         },
       ],

@@ -1,8 +1,16 @@
 # Changelog
 
-## 0.1.1 (issuer, core)
+## 0.1.1 (issuer, core, apple, google)
 
-Found by running the example app on Vercel from the published 0.1.0 packages.
+Superseded passes say why. ERC-8426 now asks that a pass presented as superseded state why and, where its holder may still be the owner, how to get the replacement (ethereum/ERCs PR #2036, de989060, raised on the Magicians thread).
+
+- `@erc8426/core`: `SupersededReason` (`"transfer" | "reset"`) and `PassContent.supersededReason`.
+- `@erc8426/issuer`: the old serial is pushed with `supersededReason` (`"reset"` for the owner's rotation, `"transfer"` for an observed transfer or a new account's claim), and `render` receives it.
+- `@erc8426/apple`: the default superseded pass reads "Transferred" or "Links reset" and names the issuer to get the current pass from; each retired token remembers its own reason (`retiredReasons`, `retiredReasonFor`), and `supersede(content, reason)` receives it. Records from 0.1.0 load and render the generic wording.
+- `@erc8426/google`: the superseded message follows the reason (`defaultSupersededMessage`); `supersededMessage` also accepts a function of the reason.
+- Example renderers say "Links reset" on a reset instead of "Transferred".
+
+Found by running the example app on Vercel from the published 0.1.0 packages:
 
 - `@erc8426/issuer`: `kvStores` now accepts a key-value client that parses JSON on read. The `@upstash/redis` shim in the 0.1.0 README used the client's default automatic deserialization, which handed `kvStores` objects instead of strings, so every gated request failed. The README shim now turns that off, and `kvStores` works either way (regression test in `stores.test.ts`).
 - `@erc8426/core`: ships its README (0.1.0 listed one in `files` that did not exist).
