@@ -5,7 +5,8 @@ import { assertSuffix, resourceId, suffixForSerial } from "./ids.js";
 /// Mapping from the shared PassContent to Google Wallet class and object
 ///  resources. Each PassStyle maps to the nearest vertical: generic to
 ///  generic, eventTicket to eventTicket, storeCard to loyalty, coupon to
-///  offer.
+///  offer, and Apple's posterGeneric to generic (the poster `artwork` is a
+///  portrait and is NOT used as the wide Google hero; supply `hero` for that).
 
 export type GoogleVertical = "generic" | "eventTicket" | "loyalty" | "offer";
 export type GoogleClassType = `${GoogleVertical}Class`;

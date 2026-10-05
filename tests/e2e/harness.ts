@@ -188,7 +188,7 @@ export function appleProvider(origin: string) {
   return appleFormatProvider({
     passTypeIdentifier: "pass.example.e2e",
     teamIdentifier: "E2ETEAM001",
-    certificates: makeTestCerts(),
+    certificates: makeTestCerts({ passTypeId: "pass.example.e2e", teamId: "E2ETEAM001" }),
     origin,
     images: { icon: { data: TINY_PNG } },
   });

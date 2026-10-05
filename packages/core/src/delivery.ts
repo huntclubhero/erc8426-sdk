@@ -41,7 +41,17 @@ export type BarcodeFormat = "qr" | "pdf417" | "aztec" | "code128";
 /// The layout family. Each maps to the nearest native style on each platform:
 ///  Apple `generic` / `eventTicket` / `storeCard` / `coupon`, and Google
 ///  `genericObject` / `eventTicketObject` / `loyaltyObject` / `offerObject`.
-export type PassStyle = "generic" | "eventTicket" | "storeCard" | "coupon";
+///
+///  `posterGeneric` is Apple's iOS 27 poster face: full-height `artwork`, a
+///  `primaryLogo`, ONE header field, up to FOUR primary fields, one footer
+///  field, back fields, square QR. On Apple the pass carries BOTH the poster
+///  dictionary and a legacy one (`posterFallback`, default `generic`), so iOS 26
+///  and earlier render the legacy layout; Google uses the generic vertical.
+export type PassStyle = "generic" | "eventTicket" | "storeCard" | "coupon" | "posterGeneric";
+
+/// The legacy Apple dictionary shipped next to `posterGeneric` for devices
+///  before iOS 27.
+export type PosterFallbackStyle = Exclude<PassStyle, "posterGeneric">;
 
 export interface PassContent {
   /// Opaque, random pass identifier. MUST NOT be derived from holder personal
@@ -68,11 +78,25 @@ export interface PassContent {
     /// A wide banner: Apple `strip`, Google `heroImage`.
     hero?: ImageSource;
     thumbnail?: ImageSource;
+    /// Apple `posterGeneric` only: the full-height poster image, 358x448 points
+    ///  (provide @2x and @3x). A material strip and the QR cover its bottom edge.
+    artwork?: ImageSource;
+    /// Apple `posterGeneric` only: the mark in the top-leading corner, 30 points
+    ///  tall and 30 to 126 wide.
+    primaryLogo?: ImageSource;
   };
   header?: PassField[];
   primary?: PassField[];
   secondary?: PassField[];
   auxiliary?: PassField[];
+  /// Apple `posterGeneric` only: the one footer field on the poster face.
+  ///  Refused on other styles, which have no footer row.
+  footer?: PassField[];
+  /// Apple `posterGeneric` only: which legacy dictionary rides along for iOS 26
+  ///  and earlier. Default `generic`, Apple's own example. The fallback gets the
+  ///  full field set (secondary and auxiliary included); the poster face gets
+  ///  header, primary, footer and back.
+  posterFallback?: PosterFallbackStyle;
   /// Back of the pass on Apple, text modules on Google.
   back?: PassField[];
   /// Action links and deep links. Apple renders them as back fields with

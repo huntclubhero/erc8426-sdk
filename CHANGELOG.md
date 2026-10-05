@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased: not published until an iOS 27 device has shown a poster built by this code)
+
+Apple's iOS 27 Poster Generic face, and a signing-time check that the certificate matches the pass.
+
+- `@erc8426/core`: `PassStyle` gains `"posterGeneric"`; `PassContent` gains `footer`, `posterFallback` and the `artwork` and `primaryLogo` image slots.
+- `@erc8426/apple`: `posterGeneric` emits two dictionaries on one pass, the poster (one header field, up to four primary, one footer, the back) and a legacy fallback (`posterFallback`, default `generic`) with the full field set, so iOS 26 and earlier render the legacy layout. More fields than the poster face shows throws, as a duplicate key already did; a footer on another style throws. Images ship for both faces. Needs passkit-generator 3.6 or later at signing (the range already resolves 3.6.1); 3.5 strips the `posterGeneric` key silently.
+- `@erc8426/apple`: `buildPkpass` refuses a signer certificate whose subject UID is not the `passTypeIdentifier` or whose OU is not the `teamIdentifier` (`validateSignerCertificate`). Such a pass signs fine and installs nowhere. Test certificates now carry Apple's UID and OU attributes.
+- `@erc8426/google`: `posterGeneric` maps to the generic vertical; the portrait `artwork` is not used as the wide Google hero.
+
 ## 0.1.1 (client, react, conformance)
 
 Found by installing every 0.1.1 package from npm into an empty project.

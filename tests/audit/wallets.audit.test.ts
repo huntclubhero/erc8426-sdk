@@ -13,7 +13,7 @@ describe("AUDIT wallets: owner-requested rotation (the remedy for a leaked link)
     const apple = appleFormatProvider({
       passTypeIdentifier: PASS_TYPE,
       teamIdentifier: "AUDITTEAM1",
-      certificates: makeTestCerts(),
+      certificates: makeTestCerts({ passTypeId: PASS_TYPE, teamId: "AUDITTEAM1" }),
       origin: BASE,
       images: { icon: { data: TINY_PNG } },
     });

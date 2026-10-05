@@ -9,6 +9,8 @@ import {
   appleFormatProvider,
   supersededContent,
   buildPkpass,
+  passImages,
+  validateSignerCertificate,
   createApnsClient,
   fetchImage,
   isPng,
@@ -153,7 +155,89 @@ describe("pass.json mapping", () => {
   });
 });
 
+describe("posterGeneric (iOS 27)", () => {
+  const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+  const poster = (overrides: Partial<PassContent> = {}) =>
+    content({
+      style: "posterGeneric",
+      header: [{ key: "no", label: "NO.", value: 412 }],
+      primary: [
+        { key: "bal", label: "BALANCE", value: "12" },
+        { key: "tier", label: "TIER", value: "Gold" },
+      ],
+      secondary: [{ key: "st", label: "STATUS", value: "Active" }],
+      footer: [{ key: "mood", label: "", value: "All good." }],
+      images: { icon: { data: TINY_PNG }, logo: { data: TINY_PNG }, primaryLogo: { data: TINY_PNG }, artwork: { data: TINY_PNG }, hero: { data: TINY_PNG } },
+      ...overrides,
+    });
+
+  it("emits the poster dictionary AND a generic fallback on the same pass", () => {
+    const json = toPassJson(poster(), opts) as Record<string, any>;
+    expect(Object.keys(json.posterGeneric).sort()).toEqual(["backFields", "footerFields", "headerFields", "primaryFields"]);
+    expect(json.posterGeneric.headerFields.map((f: any) => f.key)).toEqual(["no"]);
+    expect(json.posterGeneric.primaryFields.map((f: any) => f.key)).toEqual(["bal", "tier"]);
+    expect(json.posterGeneric.footerFields).toEqual([{ key: "mood", label: "", value: "All good." }]);
+    // The fallback is the full legacy layout, secondary row included; the poster face has no such row.
+    expect(json.generic.secondaryFields.map((f: any) => f.key)).toEqual(["st"]);
+    expect(json.generic.backFields[0].key).toBe("act");
+    expect(json.posterGeneric.backFields).toEqual(json.generic.backFields);
+    expect(json.storeCard).toBeUndefined();
+  });
+
+  it("uses the requested fallback style", () => {
+    const json = toPassJson(poster({ posterFallback: "storeCard" }), opts) as Record<string, any>;
+    expect(json.storeCard).toBeDefined();
+    expect(json.generic).toBeUndefined();
+  });
+
+  it("refuses more than Apple's poster face shows, instead of letting the device drop fields", () => {
+    expect(() => toPassJson(poster({ header: [{ key: "a", label: "A", value: 1 }, { key: "b", label: "B", value: 2 }] }), opts)).toThrow(/one header field/);
+    expect(() => toPassJson(poster({ primary: ["a", "b", "c", "d", "e"].map((k) => ({ key: k, label: k, value: k })) }), opts)).toThrow(/four primary fields/);
+    expect(() => toPassJson(poster({ footer: [{ key: "f1", label: "", value: "x" }, { key: "f2", label: "", value: "y" }] }), opts)).toThrow(/one footer field/);
+  });
+
+  it("refuses a footer on a style that has no footer row", () => {
+    expect(() => toPassJson(content({ footer: [{ key: "f", label: "", value: "x" }] }), opts)).toThrow(/footer fields exist only on the posterGeneric style/);
+  });
+
+  it("refuses a footer key that collides with another field", () => {
+    expect(() => toPassJson(poster({ footer: [{ key: "bal", label: "", value: "x" }] }), opts)).toThrow(/duplicate pass field key "bal"/);
+  });
+
+  it("ships artwork and primaryLogo plus the fallback style's own images", async () => {
+    const withStoreCard = await passImages(poster({ posterFallback: "storeCard" }));
+    expect(Object.keys(withStoreCard).sort()).toEqual(["artwork.png", "icon.png", "logo.png", "primaryLogo.png", "strip.png"]);
+    const withGeneric = await passImages(poster());
+    expect(Object.keys(withGeneric).sort()).toEqual(["artwork.png", "icon.png", "logo.png", "primaryLogo.png"]);
+  });
+
+  it("signs a poster pass whose emitted bundle carries both dictionaries and the footer", async () => {
+    const bytes = await buildPkpass(poster(), { ...opts, certificates: { wwdr: certs.wwdr, signerCert: certs.signerCert, signerKey: certs.signerKey } });
+    const files = unzip(bytes);
+    const json = JSON.parse(files["pass.json"]!.toString("utf8"));
+    expect(json.posterGeneric.footerFields[0].key).toBe("mood");
+    expect(json.posterGeneric.primaryFields.map((f: any) => f.key)).toEqual(["bal", "tier"]);
+    expect(json.generic.secondaryFields[0].key).toBe("st");
+    expect(files["artwork.png"]).toBeDefined();
+    expect(files["primaryLogo.png"]).toBeDefined();
+  });
+});
+
 describe("buildPkpass", () => {
+  it("refuses a signer certificate issued for another pass type or team", async () => {
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+    const wrongType = makeTestCerts({ passTypeId: "pass.example.other" });
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: wrongType.wwdr, signerCert: wrongType.signerCert, signerKey: wrongType.signerKey } }),
+    ).rejects.toThrow(/pass type "pass.example.other"/);
+    const wrongTeam = makeTestCerts({ teamId: "OTHERTEAM1" });
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: wrongTeam.wwdr, signerCert: wrongTeam.signerCert, signerKey: wrongTeam.signerKey } }),
+    ).rejects.toThrow(/team "OTHERTEAM1"/);
+    // A certificate with no UID at all (a bare development certificate) carries nothing to compare.
+    expect(() => validateSignerCertificate(makeTestCerts({ bare: true }).signerCert, base)).not.toThrow();
+  });
+
   it("produces a signed bundle whose manifest covers every file", async () => {
     const bytes = await buildPkpass(content(), { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM, certificates: certs });
     const files = unzip(bytes);
