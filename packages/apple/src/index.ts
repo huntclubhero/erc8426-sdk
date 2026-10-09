@@ -1,4 +1,4 @@
-export { buildPkpass, toPassJson, passImages, hexToRgb } from "./pkpass.js";
+export { buildPkpass, toPassJson, passImages, hexToRgb, validateSignerCertificate } from "./pkpass.js";
 export type { AppleCertificates, PassJsonOptions, BuildPkpassOptions } from "./pkpass.js";
 export { fetchImage, resolveImage, isPng, isPrivateAddress } from "./images.js";
 export type { ImageFetchOptions } from "./images.js";

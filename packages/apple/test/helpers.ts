@@ -24,7 +24,7 @@ function rsaKeys(): { privateKey: forge.pki.rsa.PrivateKey; publicKey: forge.pki
 }
 
 function makeCert(
-  subjectCn: string,
+  subject: forge.pki.CertificateField[],
   keys: { publicKey: forge.pki.rsa.PublicKey },
   issuer: { cn: string; key: forge.pki.rsa.PrivateKey },
   ca: boolean,
@@ -35,18 +35,31 @@ function makeCert(
   cert.serialNumber = serial;
   cert.validity.notBefore = new Date(Date.now() - 60_000);
   cert.validity.notAfter = new Date(Date.now() + 365 * 24 * 3600_000);
-  cert.setSubject([{ name: "commonName", value: subjectCn }]);
+  cert.setSubject(subject);
   cert.setIssuer([{ name: "commonName", value: issuer.cn }]);
   cert.setExtensions([{ name: "basicConstraints", cA: ca }]);
   cert.sign(issuer.key, forge.md.sha256.create());
   return cert;
 }
 
-export function makeTestCerts(): TestCerts {
+/// The subject Apple puts on a Pass Type ID certificate: the pass type as UID
+///  (OID 0.9.2342.19200300.100.1.1), the team as OU. `bare` makes a certificate
+///  with a common name only, like a self-signed development certificate.
+export function makeTestCerts(o: { passTypeId?: string; teamId?: string; bare?: boolean } = {}): TestCerts {
   const caKeys = rsaKeys();
-  const ca = makeCert("Test WWDR", caKeys, { cn: "Test WWDR", key: caKeys.privateKey }, true, "01");
+  const ca = makeCert([{ name: "commonName", value: "Test WWDR" }], caKeys, { cn: "Test WWDR", key: caKeys.privateKey }, true, "01");
   const signerKeys = rsaKeys();
-  const signer = makeCert("Pass Type ID: pass.example.test", signerKeys, { cn: "Test WWDR", key: caKeys.privateKey }, false, "02");
+  const passTypeId = o.passTypeId ?? "pass.example.test";
+  const subject: forge.pki.CertificateField[] = o.bare
+    ? [{ name: "commonName", value: "bare test signer" }]
+    : [
+        { type: "0.9.2342.19200300.100.1.1", value: passTypeId },
+        { name: "commonName", value: `Pass Type ID: ${passTypeId}` },
+        { name: "organizationalUnitName", value: o.teamId ?? "TEAM123456" },
+        { name: "organizationName", value: "Test Org" },
+        { name: "countryName", value: "US" },
+      ];
+  const signer = makeCert(subject, signerKeys, { cn: "Test WWDR", key: caKeys.privateKey }, false, "02");
   return {
     wwdr: forge.pki.certificateToPem(ca),
     signerCert: forge.pki.certificateToPem(signer),
@@ -58,7 +71,7 @@ export function makeTestCerts(): TestCerts {
 /// Self-signed TLS identity for a local HTTP/2 server.
 export function makeTlsIdentity(cn = "localhost"): { cert: string; key: string } {
   const keys = rsaKeys();
-  const cert = makeCert(cn, keys, { cn, key: keys.privateKey }, false, "03");
+  const cert = makeCert([{ name: "commonName", value: cn }], keys, { cn, key: keys.privateKey }, false, "03");
   cert.setExtensions([{ name: "subjectAltName", altNames: [{ type: 2, value: "localhost" }, { type: 7, ip: "127.0.0.1" }] }]);
   cert.sign(keys.privateKey, forge.md.sha256.create());
   return { cert: forge.pki.certificateToPem(cert), key: forge.pki.privateKeyToPem(keys.privateKey) };

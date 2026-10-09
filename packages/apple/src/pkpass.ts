@@ -1,3 +1,5 @@
+import { X509Certificate } from "node:crypto";
+
 import type { BarcodeFormat, ImageSource, PassContent, PassField, PassLink, PassStyle } from "@erc8426/core";
 import { PKPass } from "passkit-generator";
 
@@ -98,13 +100,30 @@ const STYLE_KEY: Record<PassStyle, string> = {
   eventTicket: "eventTicket",
   storeCard: "storeCard",
   coupon: "coupon",
+  posterGeneric: "posterGeneric",
 };
+
+/// Apple's stated capacity of the iOS 27 poster face: one header field, up to
+///  four primary fields, one visible footer. Overflow is dropped silently on the
+///  device, so it is refused here instead, like a duplicate key.
+const POSTER_MAX_HEADER = 1;
+const POSTER_MAX_PRIMARY = 4;
+const POSTER_MAX_FOOTER = 1;
 
 /// Map PassContent to pass.json. Apple caps field counts per style and
 ///  silently drops overflow (a storeCard shows at most four secondary plus
 ///  auxiliary fields), so keep rows short rather than relying on truncation.
+///
+///  `posterGeneric` emits TWO dictionaries: `posterGeneric` (header, primary,
+///  footer, back) and the legacy `posterFallback` style (default `generic`)
+///  with the full field set, so iOS 26 and earlier render the legacy layout.
+///  Wallet prefers the poster dictionary when it knows it. Needs
+///  passkit-generator 3.6 or later at signing time: 3.5 strips the key.
 export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<string, unknown> {
   const style = content.style ?? "generic";
+  if (content.footer?.length && style !== "posterGeneric") {
+    throw new Error(`footer fields exist only on the posterGeneric style; "${style}" has no footer row and would drop them`);
+  }
   const primary = (content.primary ?? []).map(field);
   const secondary = (content.secondary ?? []).map(field);
   const auxiliary = (content.auxiliary ?? []).map(field);
@@ -188,7 +207,35 @@ export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<
     if (seen.has(f.key)) throw new Error(`duplicate pass field key "${f.key}": keys must be unique across all fields and links`);
     seen.add(f.key);
   }
-  json[STYLE_KEY[style]] = fields;
+  if (style !== "posterGeneric") {
+    json[STYLE_KEY[style]] = fields;
+    return json;
+  }
+
+  const footer = (content.footer ?? []).map(field);
+  for (const f of footer) {
+    if (seen.has(f.key)) throw new Error(`duplicate pass field key "${f.key}": keys must be unique across all fields and links`);
+    seen.add(f.key);
+  }
+  if (fields.headerFields.length > POSTER_MAX_HEADER) {
+    throw new Error(`posterGeneric shows one header field; ${fields.headerFields.length} given (the device would drop the rest)`);
+  }
+  if (primary.length > POSTER_MAX_PRIMARY) {
+    throw new Error(`posterGeneric shows up to four primary fields; ${primary.length} given (the device would drop the rest)`);
+  }
+  if (footer.length > POSTER_MAX_FOOTER) {
+    throw new Error(`posterGeneric shows one footer field; ${footer.length} given (the device would drop the rest)`);
+  }
+  // The same field objects serve both dictionaries; keys may repeat across them
+  // (Apple's own example does). The poster face has no secondary or auxiliary
+  // row, so those fields live only in the fallback.
+  json.posterGeneric = {
+    headerFields: fields.headerFields,
+    primaryFields: primary,
+    ...(footer.length ? { footerFields: footer } : {}),
+    backFields: fields.backFields,
+  };
+  json[STYLE_KEY[content.posterFallback ?? "generic"]] = fields;
   return json;
 }
 
@@ -200,17 +247,30 @@ const SLOTS: Record<PassStyle, Array<[keyof NonNullable<PassContent["images"]>, 
   eventTicket: [["icon", "icon"], ["logo", "logo"], ["hero", "strip"]],
   storeCard: [["icon", "icon"], ["logo", "logo"], ["hero", "strip"]],
   coupon: [["icon", "icon"], ["logo", "logo"], ["hero", "strip"]],
+  // The poster face draws artwork and primaryLogo; the legacy fallback's slots
+  // are added at build time so iOS 26 has its logo, strip or thumbnail too.
+  posterGeneric: [["icon", "icon"], ["logo", "logo"], ["primaryLogo", "primaryLogo"], ["artwork", "artwork"]],
 };
+
+function slotsFor(content: PassContent): Array<[keyof NonNullable<PassContent["images"]>, string]> {
+  const style = content.style ?? "generic";
+  if (style !== "posterGeneric") return SLOTS[style];
+  const seen = new Set<string>();
+  return [...SLOTS.posterGeneric, ...SLOTS[content.posterFallback ?? "generic"]].filter(([, name]) => {
+    if (seen.has(name)) return false;
+    seen.add(name);
+    return true;
+  });
+}
 
 export async function passImages(
   content: PassContent,
   fallback: PassContent["images"] = {},
   fetchOpts: ImageFetchOptions = {},
 ): Promise<Record<string, Uint8Array>> {
-  const style = content.style ?? "generic";
   const out: Record<string, Uint8Array> = {};
   await Promise.all(
-    SLOTS[style].map(async ([slot, name]) => {
+    slotsFor(content).map(async ([slot, name]) => {
       const source: ImageSource | undefined = content.images?.[slot] ?? fallback?.[slot];
       if (source) Object.assign(out, await resolveImage(name, source, fetchOpts));
     }),
@@ -225,15 +285,45 @@ function pem(value: string | Uint8Array): string | Buffer {
   return typeof value === "string" ? value : Buffer.from(value);
 }
 
+/// Refuse a signer certificate that was not issued for this pass. An Apple Pass
+///  Type ID certificate carries the pass type identifier as the subject's UID
+///  (OID 0.9.2342.19200300.100.1.1) and the team identifier as its OU. A pass
+///  signed with a certificate for another type or team is accepted by every
+///  signing library and then installs nowhere, with no error anyone sees.
+///  Apple's own Pass Builder compares exactly these two attributes
+///  (PassCertificate.validateAttributes) but only when asked; passkit-generator
+///  never does. A certificate without a UID (a bare development certificate)
+///  carries nothing to compare and passes through.
+export function validateSignerCertificate(
+  signerCert: string | Uint8Array,
+  opts: Pick<PassJsonOptions, "passTypeIdentifier" | "teamIdentifier">,
+): void {
+  const cert = new X509Certificate(pem(signerCert));
+  const attrs = new Map<string, string>();
+  for (const line of cert.subject.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) attrs.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+  }
+  const uid = attrs.get("UID");
+  const ou = attrs.get("OU");
+  if (uid !== undefined && uid !== opts.passTypeIdentifier) {
+    throw new Error(`signer certificate is for pass type "${uid}", not "${opts.passTypeIdentifier}": a pass it signs would never install`);
+  }
+  if (ou !== undefined && ou !== opts.teamIdentifier) {
+    throw new Error(`signer certificate belongs to team "${ou}", not "${opts.teamIdentifier}": a pass it signs would never install`);
+  }
+}
+
 /// Build and sign a .pkpass. Returns the zip bytes, ready to serve with
 ///  `Content-Type: application/vnd.apple.pkpass`.
 export async function buildPkpass(content: PassContent, options: BuildPkpassOptions): Promise<Uint8Array> {
+  const c = options.certificates;
+  validateSignerCertificate(c.signerCert, options);
   const images = await passImages(content, options.images, options.imageFetch);
   const files: Record<string, Buffer> = {
     "pass.json": Buffer.from(JSON.stringify(toPassJson(content, options))),
   };
   for (const [name, bytes] of Object.entries(images)) files[name] = Buffer.from(bytes);
-  const c = options.certificates;
   const pass = new PKPass(files, {
     wwdr: pem(c.wwdr),
     signerCert: pem(c.signerCert),

@@ -1,18 +1,46 @@
 {
   "name": "@erc8426/client",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Discover, resolve and acquire ERC-8426 wallet passes from any compliant token",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "src", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "sideEffects": false,
-  "repository": { "type": "git", "url": "git+https://github.com/huntclubhero/erc8426-sdk.git", "directory": "packages/client" },
-  "keywords": ["erc-8426", "wallet-pass", "apple-wallet", "google-wallet", "nft", "erc-721"],
-  "publishConfig": { "access": "public" },
-  "scripts": { "build": "tsc -p tsconfig.build.json" },
-  "dependencies": { "@erc8426/core": "workspace:^" },
-  "peerDependencies": { "viem": "^2.21.0" }
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huntclubhero/erc8426-sdk.git",
+    "directory": "packages/client"
+  },
+  "keywords": [
+    "erc-8426",
+    "wallet-pass",
+    "apple-wallet",
+    "google-wallet",
+    "nft",
+    "erc-721"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@erc8426/core": "workspace:^"
+  },
+  "peerDependencies": {
+    "viem": "^2.21.0"
+  }
 }
