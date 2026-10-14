@@ -16,6 +16,7 @@ import {
   isPng,
   isPrivateAddress,
   MAX_LOG_BODY_BYTES,
+  MAX_REGISTRATIONS_PER_PASS,
   hexToRgb,
   newPassRecord,
   rotatedRecord,
@@ -386,6 +387,50 @@ describe("PassKit web service", () => {
     expect((await call("POST", regPath, { token: record.authenticationToken, body: { pushToken: PUSH_TOKEN } })).status).toBe(201);
     expect((await call("POST", regPath, { token: record.authenticationToken, body: { pushToken: PUSH_TOKEN } })).status).toBe(200);
     expect(await store.pushTokensForSerial(PASS_TYPE, "s3r1al")).toEqual([PUSH_TOKEN]);
+  });
+
+  it("refuses a device id that is too long or not path-safe, and stores nothing", async () => {
+    const { call, record, store } = await setup();
+    for (const device of ["d".repeat(65), "dev%20ice", "dev.ice"]) {
+      const res = await call("POST", `/v1/devices/${device}/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: PUSH_TOKEN } });
+      expect(res.status, device).toBe(400);
+    }
+    expect(await store.pushTokensForSerial(PASS_TYPE, "s3r1al")).toEqual([]);
+  });
+
+  it("keeps at most MAX_REGISTRATIONS_PER_PASS devices per pass, evicting the least recently registered", async () => {
+    const { call, record, store } = await setup();
+    const tok = (i: number) => i.toString(16).padStart(64, "0");
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS + 3; i++) {
+      const res = await call("POST", `/v1/devices/dev${i}/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(i) } });
+      expect([200, 201]).toContain(res.status);
+    }
+    const kept = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
+    expect(kept).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
+    expect(kept).not.toContain(tok(0));
+    expect(kept).not.toContain(tok(2));
+    expect(kept).toContain(tok(MAX_REGISTRATIONS_PER_PASS + 2));
+    // A known device re-registering at the cap evicts nobody else and becomes the newest.
+    await call("POST", `/v1/devices/dev3/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(900) } });
+    const after = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
+    expect(after).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
+    expect(after).toContain(tok(900));
+    expect(after).toContain(tok(4));
+    // The next new device evicts the oldest remaining one (dev4), not the refreshed dev3.
+    await call("POST", `/v1/devices/devnew/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(901) } });
+    const last = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
+    expect(last).toContain(tok(900));
+    expect(last).not.toContain(tok(4));
+    expect(last).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
+  });
+
+  it("caps the pass of another serial independently", async () => {
+    const store = new MemoryApplePassStore();
+    const tok = (i: number) => i.toString(16).padStart(64, "0");
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS + 5; i++) await store.register({ deviceLibraryIdentifier: `a${i}`, passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(i) });
+    await store.register({ deviceLibraryIdentifier: "b0", passTypeIdentifier: PASS_TYPE, serial: "two", pushToken: tok(500) });
+    expect(await store.pushTokensForSerial(PASS_TYPE, "one")).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
+    expect(await store.pushTokensForSerial(PASS_TYPE, "two")).toEqual([tok(500)]);
   });
 
   it("answers 404 for another pass type", async () => {

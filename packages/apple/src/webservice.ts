@@ -56,6 +56,8 @@ const MAX_LOG_ENTRIES = 20;
 const MAX_LOG_CHARS = 300;
 /// Apple push tokens are hex; bound the length so the store never holds junk.
 const PUSH_TOKEN_RE = /^[0-9a-fA-F]{32,200}$/;
+// Apple's device library identifier is a hex string; this also admits test ids. Bounded and path-safe.
+const DEVICE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function empty(status: number, headers?: Record<string, string>): Response {
   return new Response(null, { status, headers });
@@ -117,6 +119,7 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
       const device = seg[2]!;
       const passType = seg[4]!;
       if (passType !== opts.passTypeIdentifier) return empty(404);
+      if (!DEVICE_ID_RE.test(device)) return empty(400);
 
       if (seg.length === 5) {
         if (method !== "GET") return empty(405);

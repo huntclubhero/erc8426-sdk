@@ -1,6 +1,6 @@
 {
   "name": "@erc8426/google",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Google Wallet delivery for ERC-8426: Save to Google Wallet links, object upserts and pushes",
   "license": "MIT",
   "type": "module",

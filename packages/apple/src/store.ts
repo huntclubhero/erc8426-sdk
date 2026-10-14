@@ -41,9 +41,18 @@ export interface DeviceRegistration {
   pushToken: string;
 }
 
+/// Most devices one pass keeps registered for push. Every update sends one APNs
+///  request per registered token, so an unbounded set lets anyone holding a pass
+///  make each push arbitrarily expensive. Stores evict the least recently
+///  registered device past this; a device re-registering (rotating its token)
+///  counts as fresh and evicts nobody. pushPassUpdate also caps what it sends.
+export const MAX_REGISTRATIONS_PER_PASS = 10;
+
 export interface DeviceRegistrationStore {
   /// Upsert. Returns true when the (device, pass type, serial) triple was new,
-  ///  which is Apple's 201 versus 200.
+  ///  which is Apple's 201 versus 200. Implementations MUST keep at most
+  ///  MAX_REGISTRATIONS_PER_PASS devices per (pass type, serial), evicting the
+  ///  least recently registered one.
   register(registration: DeviceRegistration): Promise<boolean>;
   unregister(deviceLibraryIdentifier: string, passTypeIdentifier: string, serial: string): Promise<void>;
   serialsForDevice(deviceLibraryIdentifier: string, passTypeIdentifier: string): Promise<string[]>;
@@ -79,7 +88,15 @@ export class MemoryApplePassStore implements ApplePassStore {
   async register(r: DeviceRegistration): Promise<boolean> {
     const k = MemoryApplePassStore.key(r.deviceLibraryIdentifier, r.passTypeIdentifier, r.serial);
     const created = !this.registrations.has(k);
+    // Delete first so Map order is registration order, then evict the oldest of this pass.
+    this.registrations.delete(k);
     this.registrations.set(k, { ...r });
+    const mine = [...this.registrations.entries()].filter(
+      ([, x]) => x.passTypeIdentifier === r.passTypeIdentifier && x.serial === r.serial,
+    );
+    for (const [old] of mine.slice(0, Math.max(0, mine.length - MAX_REGISTRATIONS_PER_PASS))) {
+      this.registrations.delete(old);
+    }
     return created;
   }
 

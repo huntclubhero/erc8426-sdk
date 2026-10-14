@@ -1,6 +1,7 @@
 import { Redis } from "@upstash/redis";
 import type { KeyValueStore } from "@erc8426/issuer";
 import type { ApplePassRecord, ApplePassStore, DeviceRegistration } from "@erc8426/apple";
+import { MAX_REGISTRATIONS_PER_PASS } from "@erc8426/apple";
 import type { GoogleObjectRecord, GoogleObjectStore } from "@erc8426/google";
 
 /// Shared state for serverless hosting (Vercel and similar), where every
@@ -69,6 +70,7 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
   const deviceKey = (d: string, t: string) => `${prefix}apple:device:${d}:${t}`;
   const serialKey = (t: string, s: string) => `${prefix}apple:serial:${t}:${s}`;
   const tokenKey = (pushToken: string) => `${prefix}apple:token:${pushToken}`;
+  const recentKey = (t: string, s: string) => `${prefix}apple:recent:${t}:${s}`;
   return {
     async getPass(serial) {
       return decode<ApplePassRecord>(await redis.get<string>(passKey(serial)));
@@ -87,7 +89,18 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
       }
       tx.sadd(serialKey(r.passTypeIdentifier, r.serial), r.pushToken);
       tx.sadd(tokenKey(r.pushToken), key);
+      // Recency list per pass (newest last): a re-registering device moves to the end.
+      tx.lrem(recentKey(r.passTypeIdentifier, r.serial), 0, r.deviceLibraryIdentifier);
+      tx.rpush(recentKey(r.passTypeIdentifier, r.serial), r.deviceLibraryIdentifier);
       await tx.exec();
+      // Keep at most MAX_REGISTRATIONS_PER_PASS devices per pass: evict the least recently registered.
+      for (;;) {
+        const n = await redis.llen(recentKey(r.passTypeIdentifier, r.serial));
+        if (n <= MAX_REGISTRATIONS_PER_PASS) break;
+        const oldest = await redis.lpop<string>(recentKey(r.passTypeIdentifier, r.serial));
+        if (!oldest) break;
+        await this.unregister(oldest, r.passTypeIdentifier, r.serial);
+      }
       return previous === null;
     },
     async unregister(device, passType, serial) {
@@ -96,6 +109,7 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
       const tx = redis.multi();
       tx.del(key);
       tx.srem(deviceKey(device, passType), serial);
+      tx.lrem(recentKey(passType, serial), 0, device);
       if (previous) {
         tx.srem(serialKey(passType, serial), previous.pushToken);
         tx.srem(tokenKey(previous.pushToken), key);
