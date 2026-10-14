@@ -27,6 +27,11 @@ import type { WalletPassSigner } from "./signer.js";
 import { normalizePassUpdateLog, type PassUpdateNotice } from "./updates.js";
 import { decodeDataUri, isAllowedUrl, isSafeNavigationUrl, passBase, resolveUri, uriOrigin, type GatewayOptions } from "./uri.js";
 
+/// Redirects `request` follows by hand: the same limit as the Apple image
+///  fetcher. 301, 302, 303, 307 and 308 are the statuses fetch itself follows.
+const MAX_REDIRECTS = 3;
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
 /// A token as callers usually hold it. The chain comes from the public client.
 export interface TokenInput {
   contract: Address | string;
@@ -225,23 +230,84 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
 
   const request = async (url: string, init: RequestInit): Promise<{ res: Response; body: unknown }> => {
     // Every URL here came from a contract or an issuer response, so none is
-    // fetched unless it is https (or http on a loopback host).
-    if (!isAllowedUrl(url, urlPolicy)) {
-      throw new WalletPassClientError("unsupported", `refusing to fetch ${url}: only https (or http on localhost) is allowed`, {
-        source: "client",
-      });
+    // fetched unless it is https (or http on a loopback host). Redirects are
+    // followed by hand so each hop gets the same check; an automatic follow
+    // would let an allowed URL bounce to an internal or plain-http one.
+    let current = url;
+    let req = init;
+    for (let hop = 0; ; hop += 1) {
+      if (!isAllowedUrl(current, urlPolicy)) {
+        throw new WalletPassClientError(
+          "unsupported",
+          `refusing to ${hop === 0 ? "fetch" : "follow a redirect to"} ${current}: only https (or http on localhost) is allowed`,
+          { source: "client" },
+        );
+      }
+      let res: Response;
+      try {
+        res = await doFetch(current, { ...req, redirect: "manual" });
+      } catch (e) {
+        if ((e as { name?: string }).name === "AbortError") throw e;
+        throw new WalletPassClientError("network", `request to ${current} failed: ${(e as Error).message}`, {
+          source: "server",
+          retryable: true,
+        });
+      }
+      if (res.type === "opaqueredirect") {
+        // A browser hides the target of a manual redirect, so it cannot be
+        // checked before it is fetched. For a GET, ask once more and let the
+        // browser follow: only the URL the answer came from can be checked, and
+        // the body is dropped unless that one passes. Anything else fails closed.
+        if ((req.method ?? "GET").toUpperCase() !== "GET") {
+          throw new WalletPassClientError("unsupported", `refusing to follow a redirect from ${current}: its target cannot be checked here`, {
+            source: "client",
+          });
+        }
+        let followed: Response;
+        try {
+          followed = await doFetch(current, { ...req, redirect: "follow" });
+        } catch (e) {
+          if ((e as { name?: string }).name === "AbortError") throw e;
+          throw new WalletPassClientError("network", `request to ${current} failed: ${(e as Error).message}`, {
+            source: "server",
+            retryable: true,
+          });
+        }
+        if (!isAllowedUrl(followed.url, urlPolicy)) {
+          await followed.body?.cancel().catch(() => undefined);
+          throw new WalletPassClientError(
+            "unsupported",
+            `refusing the redirect from ${current} to ${followed.url === "" ? "an unknown address" : followed.url}: only https (or http on localhost) is allowed`,
+            { source: "client" },
+          );
+        }
+        return { res: followed, body: await readBody(followed) };
+      }
+      const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get("location") : null;
+      if (location === null) return { res, body: await readBody(res) };
+      await res.body?.cancel().catch(() => undefined);
+      if (hop >= MAX_REDIRECTS) {
+        throw new WalletPassClientError("unsupported", `refusing ${url}: it redirected more than ${MAX_REDIRECTS} times`, {
+          source: "client",
+        });
+      }
+      let next: string;
+      try {
+        next = new URL(location, current).toString();
+      } catch {
+        throw new WalletPassClientError("unsupported", `refusing to follow a redirect from ${current}: its Location is not a URL`, {
+          source: "client",
+        });
+      }
+      // As fetch does: 303, and 301 or 302 after a POST, continue as a body-less GET.
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && req.method === "POST")) {
+        const { body: _body, ...rest } = req;
+        const headers = new Headers(rest.headers);
+        headers.delete("content-type");
+        req = { ...rest, method: "GET", headers };
+      }
+      current = next;
     }
-    let res: Response;
-    try {
-      res = await doFetch(url, init);
-    } catch (e) {
-      if ((e as { name?: string }).name === "AbortError") throw e;
-      throw new WalletPassClientError("network", `request to ${url} failed: ${(e as Error).message}`, {
-        source: "server",
-        retryable: true,
-      });
-    }
-    return { res, body: await readBody(res) };
   };
 
   const validManifest = (body: unknown, url: string): { manifest: PassManifest; issues: ManifestIssue[] } => {
