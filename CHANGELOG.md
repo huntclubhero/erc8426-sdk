@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 (apple; every package republished at 0.2.2)
+
+Bounded Apple Wallet registrations, from a review of WALLETCHI's PassKit web service by Nexory (2026-10-14). No API changes.
+
+- `@erc8426/apple`: a pass keeps at most `MAX_REGISTRATIONS_PER_PASS` (10) registered devices. `MemoryApplePassStore` evicts the least recently registered device; a device re-registering counts as fresh and evicts nobody. Every update sends one APNs request per token, so an unbounded set let anyone holding a pass make each push arbitrarily expensive. `DeviceRegistrationStore` now documents the cap as a MUST for custom stores, and `pushPassUpdate` sends to at most that many tokens even if a store does not enforce it.
+- `@erc8426/apple`: the web service answers 400 for a device library identifier that is longer than 64 characters or not path-safe.
+- Example app: the Redis store keeps a per-pass recency list and evicts past the cap.
+- `@erc8426/contracts` (comment only, not republished): `StoredValueCard` notes that in a token-bound variant an approval granted from the card's own account survives a transfer, and that a production account should refuse approvals and allow only revocations.
+
 ## 0.2.1 (core, client, conformance; every package republished at 0.2.1)
 
 Three fixes from an outside security review (Nexory, 2026-10-14). No API changes.

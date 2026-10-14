@@ -67,6 +67,13 @@ import {BoundedAction} from "../utils/BoundedAction.sol";
 ///  accounting in one contract, which is simpler to audit and cheaper, at the
 ///  cost of the card not being a general-purpose account.
 ///
+///  Approvals in the token-bound variant: an allowance or operator approval granted FROM the card's
+///  own account belongs to that account, not to whoever held the card when it was set, so it
+///  survives a transfer of the card. A seller could approve themselves, sell the card, and later
+///  pull the buyer's balance with transferFrom. A production account should refuse calls that
+///  grant approvals (approve, increaseAllowance, setApprovalForAll(true)) and only allow ones
+///  that revoke them. Reported by Nexory (2026-10-14) against WALLETCHI's pet accounts.
+///
 ///  Transfer semantics: the balance and punches travel with the token, as
 ///  they would with a token-bound account. A seller can withdraw before a
 ///  sale settles, so buyers and marketplaces must not price the balance

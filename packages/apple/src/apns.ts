@@ -3,6 +3,7 @@ import http2 from "node:http2";
 import { importPKCS8, SignJWT } from "jose";
 
 import type { DeviceRegistrationStore } from "./store.js";
+import { MAX_REGISTRATIONS_PER_PASS } from "./store.js";
 
 /// APNs for Wallet passes. A pass update push goes to each registered push
 ///  token with the Pass Type ID as `apns-topic` and an empty `{}` payload; the
@@ -312,7 +313,10 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
     const store = options.store;
     const passType = options.passTypeIdentifier;
     if (!store || !passType) throw new Error("pushPassUpdate needs both store and passTypeIdentifier");
-    const tokens = await store.pushTokensForSerial(passType, serial);
+    // A conforming store already keeps at most MAX_REGISTRATIONS_PER_PASS; this
+    // bounds the work even for one that does not (newest last, as the memory store orders them).
+    const all = await store.pushTokensForSerial(passType, serial);
+    const tokens = all.length > MAX_REGISTRATIONS_PER_PASS ? all.slice(-MAX_REGISTRATIONS_PER_PASS) : all;
     const outcomes = await send(tokens, { topic: passType });
     // 410: the device removed the pass (or the token is no longer valid for
     // the topic). Pushing it again is wasted work that Apple counts against us.
