@@ -175,3 +175,157 @@ describe("audit B: no SSRF through contract or issuer URLs", () => {
     expect(isAllowedUrl("ftp://x/y", { allowInsecureHttp: true })).toBe(false);
   });
 });
+
+describe("audit B: no SSRF through a redirect", () => {
+  const redirect = (status: number, location: string) => new Response(null, { status, headers: { location } });
+  const manifest = () => Response.json({ formats: { google: "https://pay.google.com/gp/v/save/x" } });
+  const token = { contract: CONTRACT, tokenId: 1n };
+
+  // Serves `routes` by URL (query ignored) and records every URL asked for.
+  // Like the real fetch, it follows redirects itself unless asked for "manual".
+  const serve = (routes: Record<string, () => Response>) => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL, init: RequestInit = {}) => {
+      let url = String(input);
+      for (let followed = 0; ; followed += 1) {
+        seen.push(url);
+        const res = routes[url.split("?")[0]!]?.() ?? Response.json({ error: "not_found" }, { status: 404 });
+        const location = res.headers.get("location");
+        if (init.redirect === "manual" || location === null || followed >= 20) return res;
+        url = new URL(location, url).toString();
+      }
+    });
+    return { seen, fetchImpl: fetchImpl as unknown as typeof fetch };
+  };
+
+  it("refuses a redirect to a link-local address without fetching it", async () => {
+    const { seen, fetchImpl } = serve({
+      "https://issuer.example/wallet-pass/1": () => redirect(302, "http://169.254.169.254/latest/meta-data"),
+      "http://169.254.169.254/latest/meta-data": () => Response.json({ formats: { google: "https://pay.google.com/gp/v/save/x" } }),
+    });
+    const err = await clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token).catch((e) => e);
+    expect(err).toMatchObject({ code: "unsupported", source: "client" });
+    expect(seen).toEqual(["https://issuer.example/wallet-pass/1"]);
+  });
+
+  it("refuses a redirect from https down to plain http, even through a relative hop", async () => {
+    const { seen, fetchImpl } = serve({
+      "https://issuer.example/wallet-pass/1": () => redirect(301, "/moved"),
+      "https://issuer.example/moved": () => redirect(307, "http://issuer.example/wallet-pass/1"),
+      "http://issuer.example/wallet-pass/1": manifest,
+    });
+    await expect(clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token)).rejects.toMatchObject({ code: "unsupported", source: "client" });
+    expect(seen).toEqual(["https://issuer.example/wallet-pass/1", "https://issuer.example/moved"]);
+  });
+
+  it("applies the same check to a redirect on the challenge request", async () => {
+    const owner = privateKeyToAccount(generatePrivateKey());
+    const { seen, fetchImpl } = serve({
+      "https://issuer.example/challenge": () => redirect(302, "http://169.254.169.254/latest/meta-data"),
+      "http://169.254.169.254/latest/meta-data": () => Response.json({ message: "not a challenge" }),
+    });
+    const client = clientFor("https://issuer.example/wallet-pass/1", fetchImpl);
+    const err = await client
+      .requestChallenge(token, "feed", owner.address, { endpoint: "https://issuer.example/challenge", presentTo: "https://issuer.example/wallet-pass/1" })
+      .catch((e) => e);
+    expect(err).toMatchObject({ code: "unsupported", source: "client" });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("still follows a redirect that stays allowed, and checks each hop by hand", async () => {
+    const { seen, fetchImpl } = serve({
+      "https://issuer.example/wallet-pass/1": () => redirect(301, "https://www.issuer.example/wallet-pass/1"),
+      "https://www.issuer.example/wallet-pass/1": () => redirect(302, "/final"),
+      "https://www.issuer.example/final": manifest,
+    });
+    const result = await clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token);
+    expect(result.configuration).toBe("public");
+    expect(seen).toEqual(["https://issuer.example/wallet-pass/1", "https://www.issuer.example/wallet-pass/1", "https://www.issuer.example/final"]);
+    for (const call of vi.mocked(fetchImpl).mock.calls) expect(call[1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("gives up after three redirects", async () => {
+    const hop = (n: number) => () => redirect(302, `https://issuer.example/hop${n + 1}`);
+    const { seen, fetchImpl } = serve({
+      "https://issuer.example/wallet-pass/1": hop(0),
+      "https://issuer.example/hop1": hop(1),
+      "https://issuer.example/hop2": hop(2),
+      "https://issuer.example/hop3": hop(3),
+      "https://issuer.example/hop4": manifest,
+    });
+    await expect(clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token)).rejects.toMatchObject({ code: "unsupported", source: "client" });
+    expect(seen).toHaveLength(4);
+  });
+
+  // What a browser returns for redirect "manual": a response with no status,
+  // no headers and no body, whatever the server answered.
+  const opaque = () => Object.defineProperty(new Response(null), "type", { value: "opaqueredirect" });
+  const endingAt = (res: Response, url: string) => Object.defineProperty(res, "url", { value: url });
+
+  it("in a browser, resolves a redirect whose final URL is allowed", async () => {
+    const modes: Array<RequestInit["redirect"]> = [];
+    const fetchImpl = (async (_input: string | URL, init: RequestInit = {}) => {
+      modes.push(init.redirect);
+      return init.redirect === "manual" ? opaque() : endingAt(manifest(), "https://www.issuer.example/wallet-pass/1");
+    }) as unknown as typeof fetch;
+    const result = await clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token);
+    expect(result.configuration).toBe("public");
+    expect(modes).toEqual(["manual", "follow"]);
+  });
+
+  it("in a browser, refuses a redirect whose final URL is not allowed, and does not read the body", async () => {
+    const reads: string[] = [];
+    const fetchImpl = (async (_input: string | URL, init: RequestInit = {}) => {
+      if (init.redirect === "manual") return opaque();
+      const res = endingAt(manifest(), "http://169.254.169.254/latest/meta-data");
+      for (const name of ["text", "json", "arrayBuffer", "blob"] as const) {
+        Object.defineProperty(res, name, { value: async () => void reads.push(name) });
+      }
+      return res;
+    }) as unknown as typeof fetch;
+    const err = await clientFor("https://issuer.example/wallet-pass/1", fetchImpl).getManifest(token).catch((e) => e);
+    expect(err).toMatchObject({ code: "unsupported", source: "client" });
+    expect(err.body).toBeUndefined();
+    expect(reads).toEqual([]);
+  });
+
+  it("in a browser, refuses a redirect on a request that is not a GET, without asking again", async () => {
+    const owner = privateKeyToAccount(generatePrivateKey());
+    const issuer = fakeIssuer({ contract: CONTRACT, mode: "gated", ownerOf: () => owner.address });
+    const calls: Array<RequestInit["redirect"]> = [];
+    const fetchImpl = (async (input: string | URL, init: RequestInit = {}) => {
+      if (String(input).includes("/actions/")) {
+        calls.push(init.redirect);
+        return opaque();
+      }
+      return issuer.fetch(input, init);
+    }) as unknown as typeof fetch;
+    const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });
+    const client = createWalletPassClient({ publicClient: chain.client, fetch: fetchImpl });
+    await expect(client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "feed", signer: owner })).rejects.toMatchObject({
+      code: "unsupported",
+      source: "client",
+    });
+    expect(calls).toEqual(["manual"]);
+  });
+
+  it("continues a POST as a body-less GET after a 303, as fetch does", async () => {
+    const owner = privateKeyToAccount(generatePrivateKey());
+    const issuer = fakeIssuer({ contract: CONTRACT, mode: "gated", ownerOf: () => owner.address });
+    const after: Array<{ method: string | undefined; body: unknown; contentType: string | null }> = [];
+    const fetchImpl = (async (input: string | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      if (url === "https://issuer.test/pass/5/actions/feed") return redirect(303, "/pass/5/done");
+      if (url === "https://issuer.test/pass/5/done") {
+        after.push({ method: init.method, body: init.body, contentType: new Headers(init.headers).get("content-type") });
+        return Response.json({ ok: true });
+      }
+      return issuer.fetch(input, init);
+    }) as unknown as typeof fetch;
+    const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });
+    const client = createWalletPassClient({ publicClient: chain.client, fetch: fetchImpl });
+    const result = await client.signedAction({ token: { contract: CONTRACT, tokenId: 5 }, action: "feed", signer: owner });
+    expect(result).toEqual({ status: 200, body: { ok: true } });
+    expect(after).toEqual([{ method: "GET", body: undefined, contentType: null }]);
+  });
+});
