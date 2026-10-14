@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.2.0 (unreleased: not published until an iOS 27 device has shown a poster built by this code)
+## 0.2.1 (core, client, conformance; every package republished at 0.2.1)
+
+Three fixes from an outside security review (Nexory, 2026-10-14). No API changes.
+
+- `@erc8426/client`: redirects are followed by hand, at most three, and every hop must pass the same https (or loopback http) check as the first URL. Before, `fetch` followed them unchecked, so an allowed URL could bounce the client to `http://169.254.169.254/` or any plain-http host. In a browser, where a manual redirect comes back opaque, a GET is asked once more and the browser follows it itself: only the final URL is checked (https, or loopback http), and the body is dropped if it fails; any other method is refused. Regression tests in `audit-regressions.test.ts`.
+- `@erc8426/conformance`: the owner key no longer signs whatever challenge the server under test returns. Before signing, the run applies the check `@erc8426/client` uses (`checkChallengeScope`): the challenge must come from the origin that serves the manifest and name that host, this token, the owner's account and the acquire action, with an Expiration Time inside the default lifetime limit. Otherwise nothing is signed and the owner checks are skipped with the reason. A server that issues challenges naming another host, or a lifetime above one hour, now gets its owner checks skipped instead of run.
+- `@erc8426/core`: `parseChallenge` refuses a message longer than `MAX_CHALLENGE_MESSAGE_CHARS` (4096) before parsing it. The SIWE parser is quadratic on repeated `URI: ` without a newline (about 600 ms at 64 KiB), and an issuer parses before it knows the caller. A conforming challenge is under 2 KiB. Reported by Nexory (2026-10-14); the parser itself is being reported upstream to viem.
+
+## 0.2.0 (published 2026-10-09)
 
 Apple's iOS 27 Poster Generic face, and a signing-time check that the certificate matches the pass.
 
@@ -8,9 +16,6 @@ Apple's iOS 27 Poster Generic face, and a signing-time check that the certificat
 - `@erc8426/apple`: `posterGeneric` emits two dictionaries on one pass, the poster (one header field, up to four primary, one footer, the back) and a legacy fallback (`posterFallback`, default `generic`) with the full field set, so iOS 26 and earlier render the legacy layout. More fields than the poster face shows throws, as a duplicate key already did; a footer on another style throws. Images ship for both faces. Needs passkit-generator 3.6 or later at signing (the range already resolves 3.6.1); 3.5 strips the `posterGeneric` key silently.
 - `@erc8426/apple`: `buildPkpass` refuses a signer certificate whose subject UID is not the `passTypeIdentifier` or whose OU is not the `teamIdentifier` (`validateSignerCertificate`). Such a pass signs fine and installs nowhere. Test certificates now carry Apple's UID and OU attributes.
 - `@erc8426/google`: `posterGeneric` maps to the generic vertical; the portrait `artwork` is not used as the wide Google hero.
-- `@erc8426/client`: redirects are followed by hand, at most three, and every hop must pass the same https (or loopback http) check as the first URL. Before, `fetch` followed them unchecked, so an allowed URL could bounce the client to `http://169.254.169.254/` or any plain-http host. In a browser, where a manual redirect comes back opaque, a GET is asked once more and the browser follows it itself: only the final URL is checked (https, or loopback http), and the body is dropped if it fails; any other method is refused. Regression tests in `audit-regressions.test.ts`.
-- `@erc8426/conformance`: the owner key no longer signs whatever challenge the server under test returns. Before signing, the run applies the check `@erc8426/client` uses (`checkChallengeScope`): the challenge must come from the origin that serves the manifest and name that host, this token, the owner's account and the acquire action, with an Expiration Time inside the default lifetime limit. Otherwise nothing is signed and the owner checks are skipped with the reason. A server that issues challenges naming another host, or a lifetime above one hour, now gets its owner checks skipped instead of run.
-- `@erc8426/core`: `parseChallenge` refuses a message longer than `MAX_CHALLENGE_MESSAGE_CHARS` (4096) before parsing it. The SIWE parser is quadratic on repeated `URI: ` without a newline (about 600 ms at 64 KiB), and an issuer parses before it knows the caller. A conforming challenge is under 2 KiB. Reported by Nexory (2026-10-14); the parser itself is being reported upstream to viem.
 
 ## 0.1.1 (client, react, conformance)
 
