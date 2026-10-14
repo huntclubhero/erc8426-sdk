@@ -69,10 +69,21 @@ export interface ParsedChallenge {
   action: string | null;
 }
 
+/// Hard ceiling on a challenge message, in characters, checked before any
+///  parsing. A conforming challenge carries a domain, an address, a nonce, a
+///  few timestamps and two resource URIs: well under 2 KiB. The SIWE parser is
+///  quadratic on a message made of repeated "URI: " without a newline (viem
+///  2.57: about 600 ms at 64 KiB), and an issuer parses before it knows the
+///  caller, so an unauthenticated request could spend that CPU. Anything past
+///  the cap is not a challenge and is refused unread.
+export const MAX_CHALLENGE_MESSAGE_CHARS = 4096;
+
 /// Parse an ERC-4361 challenge. Returns null when the message lacks any field
-///  the floor needs (domain, address, chain id, nonce). Callers still compare
-///  every field against what they hold: parsing is not verification.
+///  the floor needs (domain, address, chain id, nonce), or exceeds
+///  MAX_CHALLENGE_MESSAGE_CHARS. Callers still compare every field against what
+///  they hold: parsing is not verification.
 export function parseChallenge(message: string): ParsedChallenge | null {
+  if (message.length > MAX_CHALLENGE_MESSAGE_CHARS) return null;
   let parsed: ReturnType<typeof parseSiweMessage>;
   try {
     parsed = parseSiweMessage(message);
