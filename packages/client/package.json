@@ -1,6 +1,6 @@
 {
   "name": "@erc8426/client",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Discover, resolve and acquire ERC-8426 wallet passes from any compliant token",
   "license": "MIT",
   "type": "module",
