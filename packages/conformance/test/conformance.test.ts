@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { getAddress, type Hex } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { WALLET_PASS_INTERFACE_ID } from "@erc8426/core";
+import { WALLET_PASS_INTERFACE_ID, parseChallenge, readProofHeaders } from "@erc8426/core";
 import { formatReport, parseArgs, runCli, runConformance, type ConformanceReport } from "@erc8426/conformance";
 
 import { RevertError, fakeChain, fakeIssuer, type FakeContract, type IssuerFaults } from "../../client/test/fixtures.js";
@@ -177,6 +177,70 @@ describe("broken implementations are caught", () => {
     });
     expect(byId(r, "manifest.apple-reachable")).toMatchObject({ status: "fail", level: "SHOULD" });
     expect(byId(r, "manifest.apple-media-type").status).toBe("skip");
+  });
+});
+
+/// How many requests carried a control proof for `account`: the signature
+///  left the run only if the run signed.
+function proofsFor(requests: ReadonlyArray<{ headers: Headers }>, account: Address): number {
+  return requests.filter((r) => {
+    const read = readProofHeaders(r.headers);
+    return read.kind === "present" && parseChallenge(read.proof.message)?.address.toLowerCase() === account.toLowerCase();
+  }).length;
+}
+
+const OWNER_CHECKS = ["gated.owner-200", "gated.no-store", "gated.replay-refused"] as const;
+
+describe("client requirement: a challenge is signed only if it names the verifier, token and action it was asked for", () => {
+  it("a challenge naming the serving host is signed (control)", async () => {
+    const { run, ownerKey, owner, issuer } = world({ mode: "gated" });
+    const r = await run({ ownerPrivateKey: ownerKey });
+    expect(proofsFor(issuer.requests, owner.address)).toBeGreaterThan(0);
+    for (const id of OWNER_CHECKS) expect(byId(r, id).status, id).toBe("pass");
+  });
+
+  it.each<[string, IssuerFaults]>([
+    ["names another verifier", { wrongDomain: "evil.example" }],
+    ["is for another token", { wrongTokenInChallenge: true }],
+    ["has already expired", { expiredChallenge: true }],
+  ])("a challenge that %s is not signed and the owner checks are skipped", async (_name, faults) => {
+    const { run, ownerKey, owner, issuer } = world({ mode: "gated", faults });
+    const r = await run({ ownerPrivateKey: ownerKey });
+    expect(proofsFor(issuer.requests, owner.address)).toBe(0);
+    for (const id of OWNER_CHECKS) {
+      expect(byId(r, id).status, id).toBe("skip");
+      expect(byId(r, id).detail, id).toMatch(/^refused to sign the owner's challenge: /);
+    }
+  });
+
+  it("a wrong verifier is named in the reason", async () => {
+    const { run, ownerKey } = world({ mode: "gated", faults: { wrongDomain: "evil.example" } });
+    const r = await run({ ownerPrivateKey: ownerKey });
+    expect(byId(r, "gated.owner-200").detail).toContain("evil.example");
+  });
+
+  it("a challenge endpoint on another origin than the manifest is not signed", async () => {
+    const { chain, ownerKey, owner, issuer } = world({ mode: "gated" });
+    const other = "https://challenge.other.test";
+    const seen: Array<{ headers: Headers }> = [];
+    const routed = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = new Request(input, init);
+      seen.push({ headers: req.headers });
+      const url = new URL(req.url);
+      if (url.origin === other) return issuer.fetch(`${issuer.base}${url.pathname}${url.search}`, { headers: req.headers });
+      const res = await issuer.fetch(input, init);
+      const body = res.status === 401 ? ((await res.clone().json().catch(() => null)) as { challenge?: unknown } | null) : null;
+      if (typeof body?.challenge !== "string") return res;
+      return new Response(JSON.stringify({ ...body, challenge: `${other}${new URL(body.challenge, issuer.base).pathname}` }), {
+        status: 401,
+        headers: res.headers,
+      });
+    }) as typeof fetch;
+    const r = await runConformance({ publicClient: chain.client, fetch: routed, contract: CONTRACT, tokenId: 7, nonexistentTokenId: 999, ownerPrivateKey: ownerKey });
+    expect(byId(r, "challenge.issued").status).toBe("pass");
+    expect(proofsFor(seen, owner.address)).toBe(0);
+    expect(byId(r, "gated.owner-200")).toMatchObject({ status: "skip" });
+    expect(byId(r, "gated.owner-200").detail).toContain(other);
   });
 });
 

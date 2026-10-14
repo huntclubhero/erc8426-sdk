@@ -13,6 +13,8 @@ export ERC8426_OWNER_KEY=0x...    # or any name, with --owner-key-env NAME
 npx @erc8426/conformance --rpc $RPC --contract $CONTRACT --token 412 --nonexistent-token 999999
 ```
 
+The owner key signs only a challenge that passes the check `@erc8426/client` applies before it signs: it comes from the origin that serves the manifest, names that host as its verifier, and is scoped to this token, the owner's account and the acquire action, with an Expiration Time at most one hour ahead. A challenge that does not is never signed; the owner checks are skipped (`gated.owner-200`, `gated.no-store`, `gated.replay-refused`) with the reason as their detail.
+
 Exit codes: `0` conforms to every MUST checked, `1` a MUST check failed, `2` usage error. SHOULD failures are reported as warnings and do not change the exit code. `--json` prints the full report.
 
 ## What is checked

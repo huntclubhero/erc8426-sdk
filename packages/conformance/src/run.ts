@@ -21,7 +21,7 @@ import {
   type PassManifest,
   type TokenRef,
 } from "@erc8426/core";
-import { decodeDataUri, resolveUri, type GatewayOptions } from "@erc8426/client";
+import { checkChallengeScope, decodeDataUri, domainsForUrl, resolveUri, type GatewayOptions } from "@erc8426/client";
 
 import type { CheckLevel, CheckResult, CheckStatus, ConformanceOptions, ConformanceReport } from "./types.js";
 
@@ -352,6 +352,20 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     record("challenge.invalid-address", "The challenge endpoint answers 400 for an invalid address", S.gated, "MUST", "fail", (e as Error).message);
   }
 
+  /// Why the owner's key must not sign `message`, or null when it may. The
+  ///  proof goes to the manifest URL, so the challenge must come from that
+  ///  origin and be scoped to that verifier, this token and the acquire
+  ///  action: the same rule @erc8426/client applies before it signs. The
+  ///  server under test is not trusted with a real key.
+  const signingRefusal = (message: string, account: Address): string | null => {
+    const target = new URL(manifestUrl);
+    if (challengeUrl.origin !== target.origin) {
+      return `the challenge endpoint is on ${challengeUrl.origin}, not on ${target.origin} where the proof would be sent`;
+    }
+    const scope = checkChallengeScope(message, { token: ref, action: ACQUIRE_ACTION, account, domains: domainsForUrl(manifestUrl) });
+    return scope.ok ? null : scope.detail;
+  };
+
   const fetchChallenge = async (address: Address): Promise<string | null> => {
     try {
       const r = await httpGet(withAddress(address));
@@ -472,8 +486,11 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     for (const [id, title] of ownerIds) record(id, title, S.gated, "MUST", "skip", ownerSkip ?? "no owner key supplied");
   } else {
     const ownerMessage = await fetchChallenge(owner.address);
+    const refusal = ownerMessage === null ? null : signingRefusal(ownerMessage, owner.address);
     if (ownerMessage === null) {
       for (const [id, title] of ownerIds) record(id, title, S.gated, "MUST", "skip", "no challenge issued for the owner");
+    } else if (refusal !== null) {
+      for (const [id, title] of ownerIds) record(id, title, S.gated, "MUST", "skip", `refused to sign the owner's challenge: ${refusal}`);
     } else {
       const signature = await owner.signMessage({ message: ownerMessage });
       const headers = proofHeaders({ message: ownerMessage, signature });
