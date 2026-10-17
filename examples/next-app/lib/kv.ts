@@ -1,7 +1,7 @@
 import { Redis } from "@upstash/redis";
 import type { KeyValueStore } from "@erc8426/issuer";
 import type { ApplePassRecord, ApplePassStore, DeviceRegistration } from "@erc8426/apple";
-import { MAX_REGISTRATIONS_PER_PASS } from "@erc8426/apple";
+import { MAX_REGISTRATIONS_PER_PASS, SUPERSEDED_PUSH_WINDOW_MS } from "@erc8426/apple";
 import type { GoogleObjectRecord, GoogleObjectStore } from "@erc8426/google";
 
 /// Shared state for serverless hosting (Vercel and similar), where every
@@ -63,7 +63,9 @@ function decode<T>(text: string | null): T | null {
 
 /// ApplePassStore on Redis: a record per serial, and registrations kept as
 /// two sets (serials per device, push tokens per serial) plus one key per
-/// registration.
+/// registration. The LIVE devices of a pass are a list in registration order
+/// (at most MAX_REGISTRATIONS_PER_PASS, never evicted); a rotation moves them
+/// to a sorted set of superseded devices scored by when it happened.
 export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStore {
   const passKey = (serial: string) => `${prefix}apple:pass:${serial}`;
   const regKey = (d: string, t: string, s: string) => `${prefix}apple:reg:${d}:${t}:${s}`;
@@ -71,6 +73,11 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
   const serialKey = (t: string, s: string) => `${prefix}apple:serial:${t}:${s}`;
   const tokenKey = (pushToken: string) => `${prefix}apple:token:${pushToken}`;
   const recentKey = (t: string, s: string) => `${prefix}apple:recent:${t}:${s}`;
+  const supersededKey = (t: string, s: string) => `${prefix}apple:superseded:${t}:${s}`;
+  const tokensOf = async (devices: string[], t: string, s: string): Promise<string[]> => {
+    const regs = await Promise.all(devices.map(async (d) => decode<DeviceRegistration>(await redis.get<string>(regKey(d, t, s)))));
+    return regs.filter((r): r is DeviceRegistration => r !== null).map((r) => r.pushToken);
+  };
   return {
     async getPass(serial) {
       return decode<ApplePassRecord>(await redis.get<string>(passKey(serial)));
@@ -80,28 +87,45 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
     },
     async register(r: DeviceRegistration) {
       const key = regKey(r.deviceLibraryIdentifier, r.passTypeIdentifier, r.serial);
+      const live = recentKey(r.passTypeIdentifier, r.serial);
       const previous = decode<DeviceRegistration>(await redis.get<string>(key));
+      const isLive = previous !== null && (await redis.lpos(live, r.deviceLibraryIdentifier)) !== null;
+      // A new (or superseded) device at the cap is refused: nobody is evicted.
+      if (!isLive && (await redis.llen(live)) >= MAX_REGISTRATIONS_PER_PASS) return "full" as const;
       const tx = redis.multi();
-      tx.set(key, encode(r));
+      tx.set(key, encode({ deviceLibraryIdentifier: r.deviceLibraryIdentifier, passTypeIdentifier: r.passTypeIdentifier, serial: r.serial, pushToken: r.pushToken }));
       tx.sadd(deviceKey(r.deviceLibraryIdentifier, r.passTypeIdentifier), r.serial);
       if (previous && previous.pushToken !== r.pushToken) {
         tx.srem(serialKey(r.passTypeIdentifier, r.serial), previous.pushToken);
       }
       tx.sadd(serialKey(r.passTypeIdentifier, r.serial), r.pushToken);
       tx.sadd(tokenKey(r.pushToken), key);
-      // Recency list per pass (newest last): a re-registering device moves to the end.
-      tx.lrem(recentKey(r.passTypeIdentifier, r.serial), 0, r.deviceLibraryIdentifier);
-      tx.rpush(recentKey(r.passTypeIdentifier, r.serial), r.deviceLibraryIdentifier);
+      if (!isLive) {
+        tx.zrem(supersededKey(r.passTypeIdentifier, r.serial), r.deviceLibraryIdentifier);
+        tx.rpush(live, r.deviceLibraryIdentifier);
+      }
       await tx.exec();
-      // Keep at most MAX_REGISTRATIONS_PER_PASS devices per pass: evict the least recently registered.
-      for (;;) {
-        const n = await redis.llen(recentKey(r.passTypeIdentifier, r.serial));
-        if (n <= MAX_REGISTRATIONS_PER_PASS) break;
-        const oldest = await redis.lpop<string>(recentKey(r.passTypeIdentifier, r.serial));
-        if (!oldest) break;
-        await this.unregister(oldest, r.passTypeIdentifier, r.serial);
+      if (!isLive) {
+        // Concurrent newcomers can all pass the length check: the first MAX in the
+        // list keep their slot, and a later one withdraws.
+        const pos = await redis.lpos(live, r.deviceLibraryIdentifier);
+        if (pos !== null && pos >= MAX_REGISTRATIONS_PER_PASS) {
+          await this.unregister(r.deviceLibraryIdentifier, r.passTypeIdentifier, r.serial);
+          return "full" as const;
+        }
       }
       return previous === null;
+    },
+    async supersede(passType, serial) {
+      const live = recentKey(passType, serial);
+      const devices = await redis.lrange<string>(live, 0, -1);
+      if (devices.length === 0) return;
+      const at = Date.now();
+      const [first, ...rest] = devices.map((member) => ({ score: at, member }));
+      const tx = redis.multi();
+      tx.zadd(supersededKey(passType, serial), first!, ...rest);
+      tx.del(live);
+      await tx.exec();
     },
     async unregister(device, passType, serial) {
       const key = regKey(device, passType, serial);
@@ -110,6 +134,7 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
       tx.del(key);
       tx.srem(deviceKey(device, passType), serial);
       tx.lrem(recentKey(passType, serial), 0, device);
+      tx.zrem(supersededKey(passType, serial), device);
       if (previous) {
         tx.srem(serialKey(passType, serial), previous.pushToken);
         tx.srem(tokenKey(previous.pushToken), key);
@@ -120,7 +145,10 @@ export function redisApplePassStore(redis: Redis, prefix: string): ApplePassStor
       return redis.smembers(deviceKey(device, passType));
     },
     async pushTokensForSerial(passType, serial) {
-      return redis.smembers(serialKey(passType, serial));
+      // Recently superseded devices first, then the live set (newest last).
+      const recent = await redis.zrange<string[]>(supersededKey(passType, serial), Date.now() - SUPERSEDED_PUSH_WINDOW_MS, "+inf", { byScore: true });
+      const live = await redis.lrange<string>(recentKey(passType, serial), 0, -1);
+      return [...new Set([...(await tokensOf(recent.slice(-MAX_REGISTRATIONS_PER_PASS), passType, serial)), ...(await tokensOf(live, passType, serial))])];
     },
     async removePushToken(pushToken) {
       const keys = await redis.smembers(tokenKey(pushToken));

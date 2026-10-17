@@ -150,6 +150,8 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
         const pushToken = body?.pushToken;
         if (typeof pushToken !== "string" || !PUSH_TOKEN_RE.test(pushToken)) return empty(400);
         const created = await opts.store.register({ deviceLibraryIdentifier: device, passTypeIdentifier: passType, serial, pushToken });
+        // At the cap a new device is refused, never let in by evicting another (store.ts).
+        if (created === "full") return empty(403);
         return empty(created ? 201 : 200);
       }
       if (method === "DELETE") {

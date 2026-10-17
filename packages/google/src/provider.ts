@@ -113,6 +113,8 @@ export function defaultSupersededMessage(reason: SupersededReason | undefined): 
   };
 }
 
+const EXPIRE_RETRY_DELAY_MS = 500;
+
 function hashOf(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -172,7 +174,15 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     const id = `${client.issuerId}.${record.objectSuffix}`;
     const type = `${record.vertical}Object` as const;
     try {
-      await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
+      // One retry on a transient failure: the caller forgets this object id once it
+      // returns, so an expire that never lands leaves every saved copy ACTIVE.
+      try {
+        await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
+      } catch (first) {
+        report(first, `expire superseded object ${id} for ${serial} (retrying)`);
+        await new Promise((r) => setTimeout(r, EXPIRE_RETRY_DELAY_MS));
+        await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
+      }
       const msg = supersededMessageFor(reason);
       if (msg) await client.addMessage(type, id, msg);
     } catch (err) {

@@ -221,6 +221,9 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
       record = { ...record, content: ctx.content, updatedAt: new Date() };
     }
     await store.putPass(record);
+    // The devices of the superseded pass stay registered (they refresh into the
+    // superseded rendering on the push that follows) but stop holding the slots.
+    if (rotated) await store.supersede?.(opts.passTypeIdentifier, serial);
     return { record, rotated };
   }
 
@@ -297,6 +300,7 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
       if (!record) throw new Error(`unknown serial ${serial}`);
       const next = { ...rotatedRecord(record, undefined, "reset"), ...(content ? { content } : {}) };
       await store.putPass(next);
+      await store.supersede?.(opts.passTypeIdentifier, serial);
       await push(serial);
       return secret ? downloadUrl(next) : undefined;
     },

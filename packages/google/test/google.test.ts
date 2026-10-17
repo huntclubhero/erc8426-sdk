@@ -235,6 +235,7 @@ function fakeGoogle() {
   const messages: Array<{ path: string; body: any }> = [];
   let tokenGrants = 0;
   let failNextUpsert = false;
+  let failPatches = 0;
   const reject401 = new Set<string>();
 
   const fetchFn = (async (input: string | URL, init: RequestInit = {}) => {
@@ -277,6 +278,10 @@ function fakeGoogle() {
     if (!existing) return Response.json({ error: { code: 404 } }, { status: 404 });
     if (method === "GET") return Response.json(existing);
     if (method === "PATCH") {
+      if (failPatches > 0) {
+        failPatches -= 1;
+        return new Response("boom", { status: 503 });
+      }
       const merged = { ...existing, ...body };
       resources.set(path, merged);
       return Response.json(merged);
@@ -295,6 +300,9 @@ function fakeGoogle() {
     },
     failNext() {
       failNextUpsert = true;
+    },
+    failPatches(n: number) {
+      failPatches = n;
     },
   };
 }
@@ -405,6 +413,20 @@ describe("googleFormatProvider", () => {
     expect(g.messages.at(-1)!.body.message.body).toContain("If you hold it, add the current pass");
     const next = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
     expect(next[0]!.id).not.toBe(first[0]!.id);
+  });
+
+  it("rotate retries one failed expire, so the forgotten object id does not stay ACTIVE", async () => {
+    const { g, p, errors } = setup();
+    const first = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
+    g.failPatches(1);
+    await p.rotate("s3r1al");
+    expect(g.resources.get(`genericObject/${first[0]!.id}`)!.state).toBe("EXPIRED");
+    expect(errors.some((w) => w.includes("(retrying)"))).toBe(true);
+    // Two failures in a row are reported, never thrown into the rotation.
+    const second = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
+    g.failPatches(2);
+    await expect(p.rotate("s3r1al")).resolves.toBeUndefined();
+    expect(g.resources.get(`genericObject/${second[0]!.id}`)!.state).toBe("ACTIVE");
   });
 
   it("a superseded serial (voided, as the issuer sends on owner rotation) expires the shared object and clears its links, once", async () => {

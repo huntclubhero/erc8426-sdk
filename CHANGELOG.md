@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3 (apple, google; every package republished at 0.2.3)
+
+Registration cap without eviction, from Nexory's review of the WALLETCHI PassKit web service (2026-10-15), which found that 0.2.2's eviction rule lets a forwarded pass push the holder's devices out.
+
+- `@erc8426/apple`: at `MAX_REGISTRATIONS_PER_PASS` live devices a NEW device is refused (the web service answers 403); no registered device is ever evicted. Under 0.2.2 anyone holding a copy of the current pass (a forwarded file or mail) could register ten devices and silently cut the holder's own devices off updates. A device already registered still re-registers at the cap.
+- `@erc8426/apple`: `DeviceRegistrationStore.register` may return `"full"` (the type widens to `Promise<boolean | "full">`; a store returning a boolean still compiles, but MUST stop evicting). New optional `supersede(passType, serial)`: the provider calls it whenever a pass's token rotates (transfer, voided supersede, `rotate()`). Superseded registrations still answer the device's list call and get pushes for `SUPERSEDED_PUSH_WINDOW_MS` (24 h), so the old pass refreshes into its superseded rendering, but they no longer count toward the cap, so an owner's rotation always frees the slots a forwarded copy filled. `MemoryApplePassStore` implements both; `pushPassUpdate` now sends to at most `MAX_PUSH_TOKENS_PER_PASS` (20: the live set plus as many superseded).
+- `@erc8426/google`: expiring a superseded object retries one failure before giving up. The provider forgets the old object id once the call returns, so an expire that never landed left every saved copy ACTIVE with nothing able to retry it.
+- Example app: the Redis store keeps a live list (refuse at the cap, concurrent newcomers withdraw past it) and a sorted set of superseded devices.
+
 ## 0.2.2 (apple; every package republished at 0.2.2)
 
 Bounded Apple Wallet registrations, from a review of WALLETCHI's PassKit web service by Nexory (2026-10-14). No API changes.
