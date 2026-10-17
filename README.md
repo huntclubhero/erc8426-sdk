@@ -108,7 +108,7 @@ Every use case below ships as a Solidity contract in [`packages/contracts/src/ex
 
 | Use case | What the pass does | Pass-reachable (bounded link) | Needs the owner's signature |
 | --- | --- | --- | --- |
-| **Pet game** | A living pet on the card; care for it from the pass | feed, water, play (cooldown bounded on chain) | anything that moves the pet |
+| **Pet game** | A living pet on the card; care for it from the pass | feed, water, play (each capped at 4 per token per day on chain) | anything that moves the pet |
 | **Stablecoin spending card** | A self-custody stored-value card: tap to pay, punches, rewards | merchant charge within per-transaction and daily caps | withdraw |
 | **NFT staking** | A receipt pass showing accrued rewards | claim (pays only the current owner; relayer rate limited on chain) | unstake |
 | **Event ticket** | Check in at the door, becomes a keepsake after the show | none (door staff check in) | transfer, resale |

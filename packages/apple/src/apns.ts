@@ -7,8 +7,9 @@ import { MAX_REGISTRATIONS_PER_PASS } from "./store.js";
 
 /// APNs for Wallet passes. A pass update push goes to each registered push
 ///  token with the Pass Type ID as `apns-topic` and an empty `{}` payload; the
-///  device then calls the web service for the fresh pass, and each changed
-///  field's `changeMessage` becomes the lock-screen line.
+///  device then calls the web service for the fresh pass. A changed field that
+///  has a `changeMessage` can raise a lock-screen line; several at once collapse
+///  to a generic "Pass changed" (docs/platforms/apple.md, Lock-screen notifications).
 ///
 /// Two ways to authenticate:
 ///  - certificate (mutual TLS with the Pass Type ID certificate and key).
