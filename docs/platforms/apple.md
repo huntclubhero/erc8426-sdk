@@ -44,7 +44,7 @@ Keep `basePath` outside the issuer's `/wallet-pass` so the two route trees never
 - **Field keys are unique across the whole pass**, links included. A duplicate is silently dropped at signing time; the builder throws instead.
 - **Apple silently drops overflow fields.** A storeCard shows at most four secondary plus auxiliary fields. Plan the front of the card, do not rely on truncation.
 - **Header labels crowd the logo.** Header fields are never dropped; Apple narrows the logo instead. Keep header labels short.
-- **`changeMessage` fires on every change.** Put it only on fields whose change the holder wants a lock-screen banner for. A countdown or a balance that moves on every push becomes spam.
+- **Notifications have their own rules.** See [Lock-screen notifications](#lock-screen-notifications) below before you put `changeMessage` on anything.
 - **Countdowns: use relative dates.** A date field with `isRelative` redraws on the device between pushes. (Not in `PassContent` today; render the absolute time as text or extend the mapping.)
 - **Links need anchors.** Apple only auto-detects bare URLs; labelled links go in `attributedValue` as `<a href>` with `&` escaped. The builder does this for `links`.
 - **Images are PNG** and ship at @1x, @2x and @3x for sharpness. Strip art that worked in production: 375x144, 750x288, 1125x432. Icon: 29, 58, 87.
@@ -53,3 +53,25 @@ Keep `basePath` outside the issuer's `/wallet-pass` so the two route trees never
 - **Each retired token remembers why.** The record keeps a reason per retired token (`retiredReasons`, `transfer` or `reset`), so a seller's old pass reads "Transferred" and the same owner's pre-reset pass reads "Links reset" even on one serial. Records written before 0.1.1 have no reasons and render the generic wording. A custom `supersede(content, reason)` receives the reason.
 - **Log route is unauthenticated** by Apple's design. The handler caps entries and strips control characters; do not widen it.
 - **Persistent store.** `MemoryApplePassStore` is for tests. On serverless each instance has its own memory, so registrations vanish. Implement `ApplePassStore` over Postgres or Redis; records carry `PassContent`, whose `Date` and `Uint8Array` values need serializing.
+
+## Lock-screen notifications
+
+**Documented** (the `changeMessage` field key, as described in the Passcreator, PassKit and Airship help documentation):
+
+- A changed field raises a lock-screen message only if that field has a `changeMessage`. The message should contain `%@`, which Wallet replaces with the field's new value. A field without `changeMessage` changes silently.
+- When several fields with a `changeMessage` change in one update, Wallet does not show each message: it shows one generic "Pass changed".
+
+**Observed, not documented** (production passes of one issuer, 2026-10-17, iPhone on iOS 27; device behavior that may differ on other versions):
+
+- Adding a back field **without** a `changeMessage` raised "Pass changed".
+- Removing a back field raised nothing.
+- A field with both `changeMessage` and `attributedValue` raised a message that showed the raw `<a href>` HTML: Wallet filled `%@` from `attributedValue`, not `value`.
+- Adding a back field **with** a `changeMessage` reached holders as "Pass changed" plus the message. The cause is not yet known.
+
+**What to do:**
+
+- Put `changeMessage` only on fields whose change the holder wants to hear about. A countdown, a balance that moves on every push, or flavor text becomes spam, and holders mute the pass.
+- **Never put `changeMessage` on a field that has `attributedValue`.** The builder never adds one to `links`; keep it that way if you post-process `pass.json`.
+- Prefer changing the value of a field that already exists over adding a new field. On iOS 27 an added field raised "Pass changed" even without a `changeMessage`.
+- **`posterGeneric` repeats keys.** The poster dictionary and the fallback dictionary share the same field objects, so header, primary and back fields appear in both. One logical change can count as several changed fields in an update, which may turn your message into "Pass changed".
+- Before any update that reaches every holder, test the exact change on more than one device and more than one iOS version, starting from a pass that matches what holders have installed.
