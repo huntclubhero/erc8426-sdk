@@ -17,11 +17,14 @@ import {
   isPrivateAddress,
   MAX_LOG_BODY_BYTES,
   MAX_REGISTRATIONS_PER_PASS,
+  MAX_PUSH_TOKENS_PER_PASS,
+  SUPERSEDED_PUSH_WINDOW_MS,
   hexToRgb,
   newPassRecord,
   rotatedRecord,
   toPassJson,
   type ApnsClient,
+  type ApplePassStore,
   type PushOutcome,
 } from "@erc8426/apple";
 import { decodeProtectedHeader, importSPKI, jwtVerify } from "jose";
@@ -398,39 +401,68 @@ describe("PassKit web service", () => {
     expect(await store.pushTokensForSerial(PASS_TYPE, "s3r1al")).toEqual([]);
   });
 
-  it("keeps at most MAX_REGISTRATIONS_PER_PASS devices per pass, evicting the least recently registered", async () => {
+  it("keeps at most MAX_REGISTRATIONS_PER_PASS devices per pass by refusing newcomers, never evicting", async () => {
     const { call, record, store } = await setup();
     const tok = (i: number) => i.toString(16).padStart(64, "0");
-    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS + 3; i++) {
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS; i++) {
       const res = await call("POST", `/v1/devices/dev${i}/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(i) } });
       expect([200, 201]).toContain(res.status);
     }
+    // A forwarded copy carries the same token: it cannot push the holder's devices out.
+    for (let i = 0; i < 3; i++) {
+      const res = await call("POST", `/v1/devices/intruder${i}/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(100 + i) } });
+      expect(res.status).toBe(403);
+    }
     const kept = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
     expect(kept).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
-    expect(kept).not.toContain(tok(0));
-    expect(kept).not.toContain(tok(2));
-    expect(kept).toContain(tok(MAX_REGISTRATIONS_PER_PASS + 2));
-    // A known device re-registering at the cap evicts nobody else and becomes the newest.
-    await call("POST", `/v1/devices/dev3/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(900) } });
+    expect(kept).toContain(tok(0));
+    expect(kept).not.toContain(tok(100));
+    // A known device re-registering at the cap rotates its token and evicts nobody.
+    const again = await call("POST", `/v1/devices/dev3/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(900) } });
+    expect(again.status).toBe(200);
     const after = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
     expect(after).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
     expect(after).toContain(tok(900));
-    expect(after).toContain(tok(4));
-    // The next new device evicts the oldest remaining one (dev4), not the refreshed dev3.
-    await call("POST", `/v1/devices/devnew/registrations/${PASS_TYPE}/s3r1al`, { token: record.authenticationToken, body: { pushToken: tok(901) } });
-    const last = await store.pushTokensForSerial(PASS_TYPE, "s3r1al");
-    expect(last).toContain(tok(900));
-    expect(last).not.toContain(tok(4));
-    expect(last).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
+    expect(after).not.toContain(tok(3));
+    expect(after).toContain(tok(0));
   });
 
   it("caps the pass of another serial independently", async () => {
     const store = new MemoryApplePassStore();
     const tok = (i: number) => i.toString(16).padStart(64, "0");
-    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS + 5; i++) await store.register({ deviceLibraryIdentifier: `a${i}`, passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(i) });
-    await store.register({ deviceLibraryIdentifier: "b0", passTypeIdentifier: PASS_TYPE, serial: "two", pushToken: tok(500) });
+    const results = [];
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS + 5; i++) results.push(await store.register({ deviceLibraryIdentifier: `a${i}`, passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(i) }));
+    expect(results.filter((r) => r === "full")).toHaveLength(5);
+    expect(await store.register({ deviceLibraryIdentifier: "b0", passTypeIdentifier: PASS_TYPE, serial: "two", pushToken: tok(500) })).toBe(true);
     expect(await store.pushTokensForSerial(PASS_TYPE, "one")).toHaveLength(MAX_REGISTRATIONS_PER_PASS);
     expect(await store.pushTokensForSerial(PASS_TYPE, "two")).toEqual([tok(500)]);
+  });
+
+  it("supersede frees the slots but keeps the old devices listed, and pushed within the window", async () => {
+    const store = new MemoryApplePassStore();
+    const tok = (i: number) => i.toString(16).padStart(64, "0");
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS; i++) await store.register({ deviceLibraryIdentifier: `old${i}`, passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(i) });
+    expect(await store.register({ deviceLibraryIdentifier: "new0", passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(50) })).toBe("full");
+    await store.supersede(PASS_TYPE, "one");
+    expect(await store.register({ deviceLibraryIdentifier: "new0", passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(50) })).toBe(true);
+    // The superseded devices still answer the list call, so their pass can refresh.
+    expect(await store.serialsForDevice("old0", PASS_TYPE)).toEqual(["one"]);
+    const pushed = await store.pushTokensForSerial(PASS_TYPE, "one");
+    expect(pushed).toContain(tok(0));
+    expect(pushed).toContain(tok(50));
+    expect(pushed.length).toBeLessThanOrEqual(MAX_PUSH_TOKENS_PER_PASS);
+    // A superseded device that adds the current pass rejoins the live set.
+    expect(await store.register({ deviceLibraryIdentifier: "old0", passTypeIdentifier: PASS_TYPE, serial: "one", pushToken: tok(60) })).toBe(false);
+    // Past the window the superseded rows stop receiving pushes.
+    const realNow = Date.now;
+    Date.now = () => realNow() + SUPERSEDED_PUSH_WINDOW_MS + 1000;
+    try {
+      const later = await store.pushTokensForSerial(PASS_TYPE, "one");
+      expect(later.sort()).toEqual([tok(50), tok(60)].sort());
+      expect(await store.serialsForDevice("old1", PASS_TYPE)).toEqual(["one"]);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it("answers 404 for another pass type", async () => {
@@ -762,6 +794,42 @@ describe("appleFormatProvider", () => {
     expect(apns.pushed).toEqual(["s3r1al"]);
   });
 
+  it("supersedes the devices before persisting a rotation, so a failing supersede leaves the token unrotated", async () => {
+    const inner = new MemoryApplePassStore();
+    let down = true;
+    const store: ApplePassStore = {
+      getPass: (s) => inner.getPass(s),
+      putPass: (r) => inner.putPass(r),
+      register: (r) => inner.register(r),
+      async supersede(t, s) {
+        if (down) throw new Error("store down");
+        await inner.supersede(t, s);
+      },
+      unregister: (d, t, s) => inner.unregister(d, t, s),
+      serialsForDevice: (d, t) => inner.serialsForDevice(d, t),
+      pushTokensForSerial: (t, s) => inner.pushTokensForSerial(t, s),
+      removePushToken: (p) => inner.removePushToken(p),
+    };
+    const { p, apns } = provider(fakeApns(), { store });
+    const url = await p.acquisitionUrl(ctx(OWNER_A));
+    const token = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    // Owner reset and transfer both fail before anything is written: the old
+    // token is still current, nothing was pushed, and the devices keep their slots.
+    await expect(p.rotate("s3r1al")).rejects.toThrow(/store down/);
+    await expect(p.acquisitionUrl(ctx(OWNER_B))).rejects.toThrow(/store down/);
+    const unchanged = (await p.store.getPass("s3r1al"))!;
+    expect(unchanged.authenticationToken).toBe(token);
+    expect(unchanged.owner).toBe(OWNER_A.toLowerCase());
+    expect(apns.pushed).toEqual([]);
+    expect((await p.handle(new Request(url))).status).toBe(200);
+    // Once the store answers, the same calls rotate.
+    down = false;
+    const fresh = await p.rotate("s3r1al");
+    expect(fresh).not.toBe(url);
+    expect((await p.store.getPass("s3r1al"))!.authenticationToken).not.toBe(token);
+    expect(apns.pushed).toEqual(["s3r1al"]);
+  });
+
   it("notifyUpdate stores the new content, bumps updatedAt and pushes", async () => {
     const { p, apns } = provider();
     await p.acquisitionUrl(ctx(OWNER_A));
@@ -853,6 +921,29 @@ describe("appleFormatProvider", () => {
     const owners = await passJsonOf(await p.handle(new Request(url!)));
     expect(JSON.stringify(owners)).toContain("fresh-link");
     expect(owners.voided).toBeUndefined();
+  });
+
+  it("an owner rotation frees the device slots a forwarded copy filled", async () => {
+    const { p, apns } = provider();
+    await p.acquisitionUrl(ctx(OWNER_A));
+    const leakedToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    const reg = (device: string, token: string, pushToken: string) =>
+      p.handle(
+        new Request(`https://issuer.example/apple/v1/devices/${device}/registrations/${PASS_TYPE}/s3r1al`, {
+          method: "POST",
+          headers: { authorization: `ApplePass ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ pushToken }),
+        }),
+      );
+    for (let i = 0; i < MAX_REGISTRATIONS_PER_PASS; i++) expect((await reg(`junk${i}`, leakedToken, String(i).padStart(64, "a"))).status).toBe(201);
+    expect((await reg("owner", leakedToken, "b".repeat(64))).status).toBe(403);
+    const url = await p.rotate("s3r1al");
+    expect(apns.pushed).toEqual(["s3r1al"]);
+    const fresh = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    expect(url).toBeDefined();
+    expect((await reg("owner", fresh, "b".repeat(64))).status).toBe(201);
+    // The junk devices refresh into the superseded rendering, and stay listed for it.
+    expect(await p.store.serialsForDevice("junk0", PASS_TYPE)).toEqual(["s3r1al"]);
   });
 
   it("a superseded serial carrying the issuer's reason renders that reason", async () => {

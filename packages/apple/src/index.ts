@@ -2,7 +2,7 @@ export { buildPkpass, toPassJson, passImages, hexToRgb, validateSignerCertificat
 export type { AppleCertificates, PassJsonOptions, BuildPkpassOptions } from "./pkpass.js";
 export { fetchImage, resolveImage, isPng, isPrivateAddress } from "./images.js";
 export type { ImageFetchOptions } from "./images.js";
-export { MemoryApplePassStore, newPassRecord, rotatedRecord, retiredReasonFor, MAX_RETIRED_TOKENS, MAX_REGISTRATIONS_PER_PASS } from "./store.js";
+export { MemoryApplePassStore, newPassRecord, rotatedRecord, retiredReasonFor, MAX_RETIRED_TOKENS, MAX_REGISTRATIONS_PER_PASS, MAX_PUSH_TOKENS_PER_PASS, SUPERSEDED_PUSH_WINDOW_MS } from "./store.js";
 export type {
   ApplePassRecord,
   ApplePassStore,

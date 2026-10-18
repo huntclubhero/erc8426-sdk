@@ -39,21 +39,49 @@ export interface DeviceRegistration {
   passTypeIdentifier: string;
   serial: string;
   pushToken: string;
+  /// Set by supersede(): when a rotation retired the token this device's pass
+  ///  was installed under. Absent on a live registration.
+  supersededAt?: number;
 }
 
-/// Most devices one pass keeps registered for push. Every update sends one APNs
-///  request per registered token, so an unbounded set lets anyone holding a pass
-///  make each push arbitrarily expensive. Stores evict the least recently
-///  registered device past this; a device re-registering (rotating its token)
-///  counts as fresh and evicts nobody. pushPassUpdate also caps what it sends.
+/// Most LIVE devices one pass keeps registered for push. Every update sends one
+///  APNs request per registered token, so an unbounded set lets anyone holding
+///  a pass make each push arbitrarily expensive. At the cap a NEW device is
+///  refused; nobody is ever evicted, because eviction lets anyone holding a
+///  forwarded copy of the pass register ten devices and push the holder's own
+///  devices out of updates. A device already registered always re-registers
+///  (rotating its push token). A rotation supersedes the set (see supersede),
+///  which frees the slots for the owner's new pass.
 export const MAX_REGISTRATIONS_PER_PASS = 10;
+
+/// How long superseded registrations keep receiving pushes after a rotation,
+///  so the old pass refreshes into its superseded rendering. After that they
+///  stay only to answer the device's list call.
+export const SUPERSEDED_PUSH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/// Most tokens pushPassUpdate sends for one pass: the live set plus as many
+///  superseded registrations.
+export const MAX_PUSH_TOKENS_PER_PASS = 2 * MAX_REGISTRATIONS_PER_PASS;
 
 export interface DeviceRegistrationStore {
   /// Upsert. Returns true when the (device, pass type, serial) triple was new,
-  ///  which is Apple's 201 versus 200. Implementations MUST keep at most
-  ///  MAX_REGISTRATIONS_PER_PASS devices per (pass type, serial), evicting the
-  ///  least recently registered one.
-  register(registration: DeviceRegistration): Promise<boolean>;
+  ///  which is Apple's 201 versus 200, and "full" when it is a new (or a
+  ///  superseded) device and the pass already holds MAX_REGISTRATIONS_PER_PASS
+  ///  live devices; the web service answers that with 403. Implementations MUST
+  ///  NOT evict a registered device to make room, and MUST NOT store more than
+  ///  MAX_REGISTRATIONS_PER_PASS live devices per (pass type, serial), also
+  ///  under concurrent registrations. Re-registering a superseded device makes
+  ///  it live again (it counts toward the cap).
+  register(registration: DeviceRegistration): Promise<boolean | "full">;
+  /// Mark every live registration of the pass superseded: called when its
+  ///  token rotates, BEFORE the rotated record is persisted (so a failure here
+  ///  leaves the rotation unpersisted and retried; the call is idempotent).
+  ///  Superseded rows still answer serialsForDevice (so the old pass can
+  ///  refresh), still get pushes for SUPERSEDED_PUSH_WINDOW_MS, and do not
+  ///  count toward the cap. Required: without it a forwarded copy that filled
+  ///  the slots would keep them across every rotation, and the owner's new
+  ///  pass would be refused (403) forever.
+  supersede(passTypeIdentifier: string, serial: string): Promise<void>;
   unregister(deviceLibraryIdentifier: string, passTypeIdentifier: string, serial: string): Promise<void>;
   serialsForDevice(deviceLibraryIdentifier: string, passTypeIdentifier: string): Promise<string[]>;
   pushTokensForSerial(passTypeIdentifier: string, serial: string): Promise<string[]>;
@@ -85,19 +113,29 @@ export class MemoryApplePassStore implements ApplePassStore {
     });
   }
 
-  async register(r: DeviceRegistration): Promise<boolean> {
+  async register(r: DeviceRegistration): Promise<boolean | "full"> {
     const k = MemoryApplePassStore.key(r.deviceLibraryIdentifier, r.passTypeIdentifier, r.serial);
-    const created = !this.registrations.has(k);
-    // Delete first so Map order is registration order, then evict the oldest of this pass.
-    this.registrations.delete(k);
-    this.registrations.set(k, { ...r });
-    const mine = [...this.registrations.entries()].filter(
-      ([, x]) => x.passTypeIdentifier === r.passTypeIdentifier && x.serial === r.serial,
-    );
-    for (const [old] of mine.slice(0, Math.max(0, mine.length - MAX_REGISTRATIONS_PER_PASS))) {
-      this.registrations.delete(old);
+    const existing = this.registrations.get(k);
+    // A live device only rotates its push token: it keeps its slot.
+    if (existing && existing.supersededAt === undefined) {
+      existing.pushToken = r.pushToken;
+      return false;
     }
-    return created;
+    const live = [...this.registrations.values()].filter(
+      (x) => x.passTypeIdentifier === r.passTypeIdentifier && x.serial === r.serial && x.supersededAt === undefined,
+    );
+    if (live.length >= MAX_REGISTRATIONS_PER_PASS) return "full";
+    // Delete first so Map order is registration order (a superseded device rejoins as the newest).
+    this.registrations.delete(k);
+    this.registrations.set(k, { deviceLibraryIdentifier: r.deviceLibraryIdentifier, passTypeIdentifier: r.passTypeIdentifier, serial: r.serial, pushToken: r.pushToken });
+    return !existing;
+  }
+
+  async supersede(passType: string, serial: string): Promise<void> {
+    const at = Date.now();
+    for (const r of this.registrations.values()) {
+      if (r.passTypeIdentifier === passType && r.serial === serial && r.supersededAt === undefined) r.supersededAt = at;
+    }
   }
 
   async unregister(device: string, passType: string, serial: string): Promise<void> {
@@ -113,11 +151,16 @@ export class MemoryApplePassStore implements ApplePassStore {
   }
 
   async pushTokensForSerial(passType: string, serial: string): Promise<string[]> {
-    const out = new Set<string>();
+    // Recently superseded first, then the live set: newest last, as pushPassUpdate expects.
+    const since = Date.now() - SUPERSEDED_PUSH_WINDOW_MS;
+    const superseded: string[] = [];
+    const live: string[] = [];
     for (const r of this.registrations.values()) {
-      if (r.passTypeIdentifier === passType && r.serial === serial) out.add(r.pushToken);
+      if (r.passTypeIdentifier !== passType || r.serial !== serial) continue;
+      if (r.supersededAt === undefined) live.push(r.pushToken);
+      else if (r.supersededAt >= since) superseded.push(r.pushToken);
     }
-    return [...out];
+    return [...new Set([...superseded.slice(-MAX_REGISTRATIONS_PER_PASS), ...live])];
   }
 
   async removePushToken(pushToken: string): Promise<void> {
