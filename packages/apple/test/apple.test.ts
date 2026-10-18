@@ -24,6 +24,7 @@ import {
   rotatedRecord,
   toPassJson,
   type ApnsClient,
+  type ApplePassStore,
   type PushOutcome,
 } from "@erc8426/apple";
 import { decodeProtectedHeader, importSPKI, jwtVerify } from "jose";
@@ -790,6 +791,42 @@ describe("appleFormatProvider", () => {
     const fresh = await p.rotate("s3r1al");
     expect(fresh).not.toBe(url);
     expect((await p.handle(new Request(url))).status).toBe(404);
+    expect(apns.pushed).toEqual(["s3r1al"]);
+  });
+
+  it("supersedes the devices before persisting a rotation, so a failing supersede leaves the token unrotated", async () => {
+    const inner = new MemoryApplePassStore();
+    let down = true;
+    const store: ApplePassStore = {
+      getPass: (s) => inner.getPass(s),
+      putPass: (r) => inner.putPass(r),
+      register: (r) => inner.register(r),
+      async supersede(t, s) {
+        if (down) throw new Error("store down");
+        await inner.supersede(t, s);
+      },
+      unregister: (d, t, s) => inner.unregister(d, t, s),
+      serialsForDevice: (d, t) => inner.serialsForDevice(d, t),
+      pushTokensForSerial: (t, s) => inner.pushTokensForSerial(t, s),
+      removePushToken: (p) => inner.removePushToken(p),
+    };
+    const { p, apns } = provider(fakeApns(), { store });
+    const url = await p.acquisitionUrl(ctx(OWNER_A));
+    const token = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    // Owner reset and transfer both fail before anything is written: the old
+    // token is still current, nothing was pushed, and the devices keep their slots.
+    await expect(p.rotate("s3r1al")).rejects.toThrow(/store down/);
+    await expect(p.acquisitionUrl(ctx(OWNER_B))).rejects.toThrow(/store down/);
+    const unchanged = (await p.store.getPass("s3r1al"))!;
+    expect(unchanged.authenticationToken).toBe(token);
+    expect(unchanged.owner).toBe(OWNER_A.toLowerCase());
+    expect(apns.pushed).toEqual([]);
+    expect((await p.handle(new Request(url))).status).toBe(200);
+    // Once the store answers, the same calls rotate.
+    down = false;
+    const fresh = await p.rotate("s3r1al");
+    expect(fresh).not.toBe(url);
+    expect((await p.store.getPass("s3r1al"))!.authenticationToken).not.toBe(token);
     expect(apns.pushed).toEqual(["s3r1al"]);
   });
 

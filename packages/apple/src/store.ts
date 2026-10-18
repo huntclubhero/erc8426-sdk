@@ -74,12 +74,14 @@ export interface DeviceRegistrationStore {
   ///  it live again (it counts toward the cap).
   register(registration: DeviceRegistration): Promise<boolean | "full">;
   /// Mark every live registration of the pass superseded: called when its
-  ///  token rotates. Superseded rows still answer serialsForDevice (so the old
-  ///  pass can refresh), still get pushes for SUPERSEDED_PUSH_WINDOW_MS, and do
-  ///  not count toward the cap. Optional for compatibility; without it a
-  ///  forwarded copy that filled the slots keeps them until those devices are
-  ///  pruned.
-  supersede?(passTypeIdentifier: string, serial: string): Promise<void>;
+  ///  token rotates, BEFORE the rotated record is persisted (so a failure here
+  ///  leaves the rotation unpersisted and retried; the call is idempotent).
+  ///  Superseded rows still answer serialsForDevice (so the old pass can
+  ///  refresh), still get pushes for SUPERSEDED_PUSH_WINDOW_MS, and do not
+  ///  count toward the cap. Required: without it a forwarded copy that filled
+  ///  the slots would keep them across every rotation, and the owner's new
+  ///  pass would be refused (403) forever.
+  supersede(passTypeIdentifier: string, serial: string): Promise<void>;
   unregister(deviceLibraryIdentifier: string, passTypeIdentifier: string, serial: string): Promise<void>;
   serialsForDevice(deviceLibraryIdentifier: string, passTypeIdentifier: string): Promise<string[]>;
   pushTokensForSerial(passTypeIdentifier: string, serial: string): Promise<string[]>;

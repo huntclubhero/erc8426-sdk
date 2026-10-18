@@ -429,6 +429,21 @@ describe("googleFormatProvider", () => {
     expect(g.resources.get(`genericObject/${second[0]!.id}`)!.state).toBe("ACTIVE");
   });
 
+  it("does not retry an expire that Google answered for good (404): one PATCH, reported once", async () => {
+    const { g, p, errors } = setup();
+    const first = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
+    const key = `genericObject/${first[0]!.id}`;
+    // The object is gone on Google's side: PATCH answers 404, which a retry cannot change.
+    g.resources.delete(key);
+    await expect(p.rotate("s3r1al")).resolves.toBeUndefined();
+    expect(g.calls.filter((c) => c.method === "PATCH" && c.path === key)).toHaveLength(1);
+    expect(errors.some((w) => w.includes("(retrying)"))).toBe(false);
+    expect(errors.filter((w) => w.startsWith("expire superseded object"))).toHaveLength(1);
+    // The rotation itself went through: the next acquisition issues a new id.
+    const next = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
+    expect(next[0]!.id).not.toBe(first[0]!.id);
+  });
+
   it("a superseded serial (voided, as the issuer sends on owner rotation) expires the shared object and clears its links, once", async () => {
     const { g, p } = setup();
     const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));

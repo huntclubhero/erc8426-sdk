@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { FORMAT_GOOGLE, type PassContext, type PassFormatProvider, type SupersededReason } from "@erc8426/core";
 
-import type { GoogleMessage, GoogleWalletClient } from "./client.js";
+import { GoogleWalletApiError, type GoogleMessage, type GoogleWalletClient } from "./client.js";
 import { suffixForSerial } from "./ids.js";
 import {
   classIdFor,
@@ -115,6 +115,13 @@ export function defaultSupersededMessage(reason: SupersededReason | undefined): 
 
 const EXPIRE_RETRY_DELAY_MS = 500;
 
+/// Worth one retry: a server-side failure, a rate limit, or no HTTP answer at
+///  all (a thrown network error). Anything else is Google's final word.
+function isTransient(err: unknown): boolean {
+  if (err instanceof GoogleWalletApiError) return err.status >= 500 || err.status === 429;
+  return true;
+}
+
 function hashOf(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -175,10 +182,12 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     const type = `${record.vertical}Object` as const;
     try {
       // One retry on a transient failure: the caller forgets this object id once it
-      // returns, so an expire that never lands leaves every saved copy ACTIVE.
+      // returns, so an expire that never lands leaves every saved copy ACTIVE. A
+      // definite answer (404, 400, 403) is not retried: it would only fail again.
       try {
         await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
       } catch (first) {
+        if (!isTransient(first)) throw first;
         report(first, `expire superseded object ${id} for ${serial} (retrying)`);
         await new Promise((r) => setTimeout(r, EXPIRE_RETRY_DELAY_MS));
         await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });

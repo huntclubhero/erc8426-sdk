@@ -220,10 +220,13 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
     if (forceTouch || rotated || fingerprint(record.content) !== fingerprint(ctx.content)) {
       record = { ...record, content: ctx.content, updatedAt: new Date() };
     }
-    await store.putPass(record);
     // The devices of the superseded pass stay registered (they refresh into the
     // superseded rendering on the push that follows) but stop holding the slots.
-    if (rotated) await store.supersede?.(opts.passTypeIdentifier, serial);
+    // Supersede BEFORE persisting the rotation: if it throws, nothing is
+    // rotated yet and the next sync retries both; the other way round a
+    // failed supersede left the old devices holding the slots forever.
+    if (rotated) await store.supersede(opts.passTypeIdentifier, serial);
+    await store.putPass(record);
     return { record, rotated };
   }
 
@@ -299,8 +302,10 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
       const record = await store.getPass(serial);
       if (!record) throw new Error(`unknown serial ${serial}`);
       const next = { ...rotatedRecord(record, undefined, "reset"), ...(content ? { content } : {}) };
+      // Supersede first, for the same reason as in sync(): a failure must not
+      // leave a persisted rotation with the old devices still holding the slots.
+      await store.supersede(opts.passTypeIdentifier, serial);
       await store.putPass(next);
-      await store.supersede?.(opts.passTypeIdentifier, serial);
       await push(serial);
       return secret ? downloadUrl(next) : undefined;
     },
