@@ -38,6 +38,11 @@ export interface GoogleMessage {
   body: string;
   /// Defaults to a time-based id.
   id?: string;
+  /// Raise an Android notification for this message (Google `TEXT_AND_NOTIFY`). Default false:
+  /// a plain `TEXT` message only shows inside the saved pass, it never wakes the holder, so a
+  /// warning the holder must act on (a pet about to lapse, a boarding change) needs `notify: true`.
+  /// Google caps notifying messages per object per day (three at the time of writing).
+  notify?: boolean;
 }
 
 export interface GoogleWalletClient {
@@ -183,7 +188,7 @@ export function googleWalletClient(opts: GoogleWalletClientOptions): GoogleWalle
           id: message.id ?? `m-${Date.now().toString(36)}`,
           header: message.header,
           body: message.body,
-          messageType: "TEXT",
+          messageType: message.notify ? "TEXT_AND_NOTIFY" : "TEXT",
         },
       });
     },

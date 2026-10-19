@@ -34,7 +34,7 @@ export const google = googleFormatProvider({
 });
 ```
 
-When the issuer resolves a manifest it calls `google.acquisitionUrl({ token, owner, content })` and puts the result under `formats.google`. The object is upserted through the REST API and the returned link references it by id, so the link is short and constant in size, expires after an hour by default, and is minted fresh on every manifest resolution (the spec allows acquisition URLs to be short-lived). `google.notifyUpdate(...)` patches the object; Google pushes object changes to every device that saved it, and `messageFor` can attach a notification.
+When the issuer resolves a manifest it calls `google.acquisitionUrl({ token, owner, content })` and puts the result under `formats.google`. The object is upserted through the REST API and the returned link references it by id, so the link is short and constant in size, expires after an hour by default, and is minted fresh on every manifest resolution (the spec allows acquisition URLs to be short-lived). `google.notifyUpdate(...)` patches the object; Google pushes object changes to every device that saved it, and `messageFor` can attach a message. A message is card-only text unless it sets `notify: true` (Google `TEXT_AND_NOTIFY`), which is what raises an Android notification; use it for anything the holder must act on, and expect Google's per-object daily cap on notifying messages (three at the time of writing).
 
 ## Transfers
 

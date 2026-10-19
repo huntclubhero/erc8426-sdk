@@ -40,3 +40,7 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 - **Access tokens** are cached until a minute before expiry, one exchange is shared by concurrent callers, and a 401 drops the cached token so a rotated key costs one failed call.
 - **Save and delete callbacks** (`callbackOptions` on the class, via `classOverrides`) are informational: this SDK does not verify Google's callback signature, so never gate anything on them.
 - **Persistent store.** `MemoryGoogleObjectStore` is per process. Implement `GoogleObjectStore` (three methods) over your database so object ids survive restarts.
+
+## Notifications
+
+A Google Wallet message is card-only text by default (`messageType: TEXT`): the holder sees it inside the saved pass and nothing else happens on the phone. Set `notify: true` on the message returned by `messageFor` to send `TEXT_AND_NOTIFY`, which raises an Android notification. Use it for anything the holder must act on and keep the rest silent; Google caps notifying messages per object per day (three at the time of writing). Apple has no equivalent switch: an Apple banner comes from a field whose value changed while it carries `changeMessage`, see the Apple notes.
