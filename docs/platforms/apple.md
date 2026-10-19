@@ -67,12 +67,14 @@ Keep `basePath` outside the issuer's `/wallet-pass` so the two route trees never
 - Adding a back field **without** a `changeMessage` raised "Pass changed".
 - Removing a back field raised nothing.
 - A field with both `changeMessage` and `attributedValue` raised a message that showed the raw `<a href>` HTML: Wallet filled `%@` from `attributedValue`, not `value`.
-- Adding a back field **with** a `changeMessage` reached holders as "Pass changed" plus the message. The cause is not yet known.
+- Adding a back field **with** a `changeMessage` reached some holders as "Pass changed" plus the message, when other text moved in the same update.
+- Changing the value of an existing field that has a `changeMessage` raised exactly one message with that text, even on a `posterGeneric` pass that repeats the key. Dropping a `changeMessage` while keeping the value raised nothing.
 
 **What to do:**
 
+- **One banner = one field.** Send a notifying update whose only visible change is the value of one existing field that carries `changeMessage` "%@". Move every other change (new fields, removed fields, moving text) to a separate silent update.
 - Put `changeMessage` only on fields whose change the holder wants to hear about. A countdown, a balance that moves on every push, or flavor text becomes spam, and holders mute the pass.
 - **Never put `changeMessage` on a field that has `attributedValue`.** The builder never adds one to `links`; keep it that way if you post-process `pass.json`.
 - Prefer changing the value of a field that already exists over adding a new field. On iOS 27 an added field raised "Pass changed" even without a `changeMessage`.
-- **`posterGeneric` repeats keys.** The poster dictionary and the fallback dictionary share the same field objects, so header, primary and back fields appear in both. One logical change can count as several changed fields in an update, which may turn your message into "Pass changed".
+- **`posterGeneric` repeats keys.** The poster dictionary and the fallback dictionary share the same field objects, so header, primary and back fields appear in both. On iOS 27 a value change to one repeated key still raised one message, but changing two different fields that both carry `changeMessage` in one update collapses to "Pass changed".
 - Before any update that reaches every holder, test the exact change on more than one device and more than one iOS version, starting from a pass that matches what holders have installed.

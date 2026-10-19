@@ -32,6 +32,7 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 - **Hero ratio is about 3:1** (1032x336 is Google's guidance; 2064x672 for sharpness). A square image in the hero slot is stretched and cropped.
 - **Text is never tappable.** The links module is the only tappable surface; the mapping puts every `PassContent` link there.
 - **At most ten text modules render.** The mapping keeps the first ten, in front-of-card order.
+- **Only `TEXT_AND_NOTIFY` notifies.** A `TEXT` message lands on the card silently; set `notify: true` on a `GoogleMessage` for anything the holder must act on (see Notifications below). Superseded messages stay silent.
 - **No relative dates.** There is no on-device countdown; a time left field must be patched, so make it coarse (hourly) to keep patches rare.
 - **Thin save links.** A link embedding the whole object grows with content and fails on Android past roughly 1800 characters; an embedded class that drifts from the stored one is rejected. The provider upserts through the API and references by id, and only falls back to a fat link (reported through `onError`) when the API call failed.
 - **Origins: apex and www.** The save is refused from an origin not in the JWT; `saveOrigins` adds the www variant of each URL.
