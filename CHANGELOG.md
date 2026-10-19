@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 (google; every package republished at 0.2.4)
+
+Android notifications, from the WALLETCHI deployment (2026-10-19): the provider sent every Google Wallet message as `TEXT`, which only shows inside the saved pass, so Android holders were never notified of a deadline reminder.
+
+- `@erc8426/google`: `GoogleMessage` gains `notify?: boolean`. `addMessage` sends `messageType: TEXT_AND_NOTIFY` when it is set, which is the only kind that raises an Android notification; the default stays `TEXT`, so 0.2.3 behavior is unchanged and superseded messages stay silent. Google caps notifying messages per object per day (three at the time of writing).
+- Docs: `docs/platforms/google.md` says which message kind notifies; `docs/platforms/apple.md` records the one-banner rule (a notifying update whose only visible change is the value of one existing field with `changeMessage`), that a value change to a repeated `posterGeneric` key raised one message on iOS 27, and that dropping a `changeMessage` is silent.
+
 ## 0.2.3 (apple, google; every package republished at 0.2.3)
 
 Registration cap without eviction, from Nexory's review of the WALLETCHI PassKit web service (2026-10-15), which found that 0.2.2's eviction rule lets a forwarded pass push the holder's devices out.

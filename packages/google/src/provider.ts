@@ -64,7 +64,8 @@ export interface GoogleFormatProviderOptions {
   /// Extra class fields, merged over the generated class on first insert.
   classOverrides?: ClassOptions["overrides"];
   redemptionChannel?: ClassOptions["redemptionChannel"];
-  /// A notification to attach on notifyUpdate, or null for a silent update.
+  /// A message to attach on notifyUpdate, or null for a silent update. Card-only text unless the
+  /// message sets `notify: true`, which is what raises an Android notification.
   messageFor?(ctx: PassContext): GoogleMessage | null;
   /// Shown on an object when it is superseded: a fixed message, null for
   ///  none, or a function of why ("transfer" or "reset", undefined when

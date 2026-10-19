@@ -32,6 +32,7 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 - **Hero ratio is about 3:1** (1032x336 is Google's guidance; 2064x672 for sharpness). A square image in the hero slot is stretched and cropped.
 - **Text is never tappable.** The links module is the only tappable surface; the mapping puts every `PassContent` link there.
 - **At most ten text modules render.** The mapping keeps the first ten, in front-of-card order.
+- **Only `TEXT_AND_NOTIFY` notifies.** A `TEXT` message lands on the card silently; set `notify: true` on a `GoogleMessage` for anything the holder must act on (see Notifications below). Superseded messages stay silent.
 - **No relative dates.** There is no on-device countdown; a time left field must be patched, so make it coarse (hourly) to keep patches rare.
 - **Thin save links.** A link embedding the whole object grows with content and fails on Android past roughly 1800 characters; an embedded class that drifts from the stored one is rejected. The provider upserts through the API and references by id, and only falls back to a fat link (reported through `onError`) when the API call failed.
 - **Origins: apex and www.** The save is refused from an origin not in the JWT; `saveOrigins` adds the www variant of each URL.
@@ -40,3 +41,7 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 - **Access tokens** are cached until a minute before expiry, one exchange is shared by concurrent callers, and a 401 drops the cached token so a rotated key costs one failed call.
 - **Save and delete callbacks** (`callbackOptions` on the class, via `classOverrides`) are informational: this SDK does not verify Google's callback signature, so never gate anything on them.
 - **Persistent store.** `MemoryGoogleObjectStore` is per process. Implement `GoogleObjectStore` (three methods) over your database so object ids survive restarts.
+
+## Notifications
+
+A Google Wallet message is card-only text by default (`messageType: TEXT`): the holder sees it inside the saved pass and nothing else happens on the phone. Set `notify: true` on the message returned by `messageFor` to send `TEXT_AND_NOTIFY`, which raises an Android notification. Use it for anything the holder must act on and keep the rest silent; Google caps notifying messages per object per day (three at the time of writing). Apple has no equivalent switch: an Apple banner comes from a field whose value changed while it carries `changeMessage`, see the Apple notes.

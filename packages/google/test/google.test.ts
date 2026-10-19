@@ -404,6 +404,15 @@ describe("googleFormatProvider", () => {
     expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Updated", body: "Balance moved", messageType: "TEXT" });
   });
 
+  it("a message with notify: true is sent as TEXT_AND_NOTIFY (the only kind that raises an Android notification)", async () => {
+    const { g, p } = setup({ messageFor: () => ({ header: "Last chance", body: "Your pass lapses in 2h.", notify: true }) });
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
+    expect(g.messages.at(-1)!.path).toBe(`genericObject/${id}/addMessage`);
+    expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Last chance", body: "Your pass lapses in 2h.", messageType: "TEXT_AND_NOTIFY" });
+  });
+
   it("rotate expires the object so the next acquisition issues a new id", async () => {
     const { g, p } = setup();
     const first = (await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)))).payload.genericObjects as Array<{ id: string }>;
