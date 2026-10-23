@@ -151,6 +151,7 @@ export function buildHarness(overrides: Partial<CreateIssuerOptions> = {}): Harn
     onError: (e) => {
       errors.push(e);
     },
+    onWarning: () => undefined,
     ...overrides,
   });
   const url = (path: string) => (path.startsWith("http") ? path : `${BASE}${path}`);

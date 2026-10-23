@@ -11,7 +11,7 @@ The issuer and the Apple web service are Fetch API handlers (`Request` in, `Resp
 | Apple pass records and device registrations | apple | Durable `ApplePassStore`. Records hold `PassContent`; serialize `Date` and `Uint8Array` values. |
 | Google object records | google | Durable `GoogleObjectStore` (get, put, delete), so object ids survive restarts. |
 
-The in-memory defaults are for tests and a single process only.
+The in-memory defaults are for tests and a single process only. `createIssuer` refuses them under `NODE_ENV=production` unless every store is named (`stores: kvStores(kv)`, or an explicit `stores: memoryStores()` for a deliberate single instance), and warns once outside production.
 
 ## Next.js on Vercel
 

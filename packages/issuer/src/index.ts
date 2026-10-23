@@ -1,6 +1,7 @@
 export {
   createIssuer,
   isFileProvider,
+  isProductionEnv,
   type CreateIssuerOptions,
   type Issuer,
   type IssuedChallenge,

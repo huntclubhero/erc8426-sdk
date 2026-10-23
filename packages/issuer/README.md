@@ -182,7 +182,7 @@ Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so eit
 
 ## Stores
 
-The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another.
+The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. Since 0.3.0 `createIssuer` refuses the in-memory fallback under `NODE_ENV=production` (an `IssuerConfigError` naming the missing stores): pass `stores: kvStores(kv)`, or `stores: memoryStores()` to run one instance deliberately. Outside production a store left out falls back to memory with one warning (`onWarning`, default `console.warn`).
 
 Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood: rate limit `GET /:tokenId/challenge` (per IP, per address) in front of the issuer, since a flood past the cap evicts honest users' pending challenges.
 

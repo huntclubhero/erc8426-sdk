@@ -84,8 +84,17 @@ export interface CreateIssuerOptions extends IssuerConfig {
   verifier?: SignatureVerifier;
   /// Default `ownerOnly()`.
   entitlement?: EntitlementPolicy;
-  /// Default in-memory stores (single instance only).
+  /// Nonce, pass record and link stores. Any store left out falls back to
+  ///  the in-memory one, which serves one process and forgets everything on
+  ///  restart. With NODE_ENV=production the fallback is refused at startup
+  ///  (IssuerConfigError): pass `kvStores(kv)` for a shared store, or an
+  ///  explicit `memoryStores()` for a deployment that really runs one
+  ///  instance. Outside production the fallback logs one warning through
+  ///  `onWarning` (default console.warn).
   stores?: Partial<IssuerStores>;
+  /// Where a startup warning goes (an in-memory store fallback outside
+  ///  production). Default console.warn.
+  onWarning?(message: string): void;
   /// Clock, epoch milliseconds. Default Date.now.
   now?: () => number;
   /// Failures that must not fail the request that triggered them (a push
@@ -183,6 +192,40 @@ export interface IssuerInternals {
 
 type RotationReason = "transfer" | "claim" | "owner_request";
 
+/// True under NODE_ENV=production. Guarded so the issuer still runs where
+///  there is no `process` (Workers, Deno without Node compatibility).
+export function isProductionEnv(): boolean {
+  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+}
+
+/// Fill in any store the options leave out with the in-memory one, refusing
+///  to in production: a nonce spent on one instance would still be live on
+///  another, and every pass record and link would vanish on restart, so a
+///  deployment that reaches production without naming its stores almost
+///  certainly did not mean to. An explicit `stores: memoryStores()` passes,
+///  since every store is then named.
+function resolveStores(options: CreateIssuerOptions, now: () => number): IssuerStores {
+  const given = options.stores ?? {};
+  const missing = (["nonces", "passes", "links"] as const).filter((k) => !given[k]);
+  if (missing.length === 0) return { nonces: given.nonces!, passes: given.passes!, links: given.links! };
+  const names = missing.join(", ");
+  if (isProductionEnv()) {
+    throw new IssuerConfigError(
+      `NODE_ENV is production but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
+    );
+  }
+  const warn = options.onWarning ?? ((message: string) => console.warn(message));
+  warn(
+    `[erc8426/issuer] no ${names} store${missing.length > 1 ? "s" : ""} configured: falling back to the in-memory store${missing.length > 1 ? "s" : ""} (one process, lost on restart). Production refuses this; pass stores: kvStores(kv) or an explicit memoryStores().`,
+  );
+  const defaults = memoryStores({ now });
+  return {
+    nonces: given.nonces ?? defaults.nonces,
+    passes: given.passes ?? defaults.passes,
+    links: given.links ?? defaults.links,
+  };
+}
+
 /// Build an issuer. Validates the configuration up front (IssuerConfigError)
 ///  so a setup the spec forbids never serves a request.
 export function createIssuer(options: CreateIssuerOptions): Issuer {
@@ -209,12 +252,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   if (!chain) throw new IssuerConfigError("pass publicClient or chain: check (2), the fresh entitlement read, needs a chain reader");
   const verifier = options.verifier ?? (options.publicClient ? publicClientSignatureVerifier(options.publicClient) : eoaSignatureVerifier());
   const entitlement = options.entitlement ?? ownerOnly();
-  const defaults = memoryStores({ now });
-  const stores: IssuerStores = {
-    nonces: options.stores?.nonces ?? defaults.nonces,
-    passes: options.stores?.passes ?? defaults.passes,
-    links: options.stores?.links ?? defaults.links,
-  };
+  const stores = resolveStores(options, now);
   const onError =
     options.onError ?? ((error: unknown, ctx: IssuerErrorContext) => console.error(`[erc8426/issuer] ${ctx.operation} failed`, error));
   const fileProviders = providers.filter(isFileProvider);

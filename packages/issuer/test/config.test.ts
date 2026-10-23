@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { IssuerConfigError, createIssuer, resolveConfig, type CreateIssuerOptions, type IssuerConfig } from "@erc8426/issuer";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { IssuerConfigError, createIssuer, isProductionEnv, memoryStores, resolveConfig, type CreateIssuerOptions, type IssuerConfig } from "@erc8426/issuer";
 
 import { CONTRACT, FakeChain, fakeProviders } from "./helpers.js";
 
@@ -107,5 +107,68 @@ describe("createIssuer validation", () => {
 
   it("requires render", () => {
     expect(() => createIssuer({ ...opts(), render: undefined as never })).toThrowError(/render/);
+  });
+});
+
+describe("stores at startup", () => {
+  const minimal = (): CreateIssuerOptions => ({
+    ...base,
+    chain: new FakeChain(),
+    providers: fakeProviders([]),
+    render: () => ({ serial: "s", organizationName: "o", description: "d", title: "t" }),
+  });
+  const originalEnv = process.env.NODE_ENV;
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it("refuses the in-memory fallback under NODE_ENV=production, naming the missing stores", () => {
+    process.env.NODE_ENV = "production";
+    expect(isProductionEnv()).toBe(true);
+    expect(() => createIssuer(minimal())).toThrowError(IssuerConfigError);
+    expect(() => createIssuer(minimal())).toThrowError(/nonces, passes, links stores were configured/);
+    expect(() => createIssuer(minimal())).toThrowError(/kvStores/);
+    // One store named, two still missing: the message names the two.
+    expect(() => createIssuer({ ...minimal(), stores: { nonces: memoryStores().nonces } })).toThrowError(/no passes, links stores/);
+  });
+
+  it("accepts explicit stores in production, including a deliberate memoryStores()", () => {
+    process.env.NODE_ENV = "production";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(() => createIssuer({ ...minimal(), stores: memoryStores() })).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("outside production falls back to the in-memory stores with one warning naming them", () => {
+    process.env.NODE_ENV = "test";
+    expect(isProductionEnv()).toBe(false);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const issuer = createIssuer(minimal());
+    expect(issuer.stores.nonces).toBeDefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/no nonces, passes, links stores configured/);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/in-memory/);
+    // A partial configuration warns only about what is missing, through onWarning when given.
+    const messages: string[] = [];
+    createIssuer({ ...minimal(), stores: { nonces: memoryStores().nonces, passes: memoryStores().passes }, onWarning: (m) => messages.push(m) });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatch(/no links store configured/);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("with NODE_ENV unset the fallback is allowed and warned about", () => {
+    delete process.env.NODE_ENV;
+    const messages: string[] = [];
+    expect(() => createIssuer({ ...minimal(), onWarning: (m) => messages.push(m) })).not.toThrow();
+    expect(messages).toHaveLength(1);
+  });
+
+  it("stays silent when every store is given", () => {
+    process.env.NODE_ENV = "test";
+    const messages: string[] = [];
+    createIssuer({ ...minimal(), stores: memoryStores(), onWarning: (m) => messages.push(m) });
+    expect(messages).toEqual([]);
   });
 });
