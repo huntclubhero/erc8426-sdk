@@ -238,8 +238,70 @@ describe("buildPkpass", () => {
     await expect(
       buildPkpass(content(), { ...base, certificates: { wwdr: wrongTeam.wwdr, signerCert: wrongTeam.signerCert, signerKey: wrongTeam.signerKey } }),
     ).rejects.toThrow(/team "OTHERTEAM1"/);
-    // A certificate with no UID at all (a bare development certificate) carries nothing to compare.
-    expect(() => validateSignerCertificate(makeTestCerts({ bare: true }).signerCert, base)).not.toThrow();
+  });
+
+  it("refuses a signer certificate with no subject UID: it is not a Pass Type ID certificate", async () => {
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+    const bare = makeTestCerts({ bare: true });
+    expect(() => validateSignerCertificate(bare.signerCert, base)).toThrow(/no subject UID/);
+    await expect(buildPkpass(content(), { ...base, certificates: { wwdr: bare.wwdr, signerCert: bare.signerCert, signerKey: bare.signerKey } })).rejects.toThrow(
+      /no subject UID/,
+    );
+  });
+
+  it("refuses an expired or not yet valid signer certificate, by an injectable clock", async () => {
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+    const day = 24 * 3600_000;
+    const expired = makeTestCerts({ notBefore: new Date(Date.now() - 400 * day), notAfter: new Date(Date.now() - 30 * day) });
+    expect(() => validateSignerCertificate(expired.signerCert, base)).toThrow(/expired on .*renew/);
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: expired.wwdr, signerCert: expired.signerCert, signerKey: expired.signerKey } }),
+    ).rejects.toThrow(/expired/);
+    // The same certificate was fine while it was valid.
+    expect(() => validateSignerCertificate(expired.signerCert, base, { now: new Date(Date.now() - 100 * day) })).not.toThrow();
+
+    const future = makeTestCerts({ notBefore: new Date(Date.now() + 30 * day), notAfter: new Date(Date.now() + 400 * day) });
+    expect(() => validateSignerCertificate(future.signerCert, base)).toThrow(/not valid until/);
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: future.wwdr, signerCert: future.signerCert, signerKey: future.signerKey } }),
+    ).rejects.toThrow(/not valid until/);
+    expect(() => validateSignerCertificate(future.signerCert, base, { now: new Date(Date.now() + 60 * day) })).not.toThrow();
+    // Boundaries: valid at notBefore, invalid just past notAfter.
+    const valid = makeTestCerts();
+    const notBefore = new Date(valid.signer.validity.notBefore);
+    const notAfter = new Date(valid.signer.validity.notAfter);
+    expect(() => validateSignerCertificate(valid.signerCert, base, { now: notBefore })).not.toThrow();
+    expect(() => validateSignerCertificate(valid.signerCert, base, { now: new Date(notBefore.getTime() - 1000) })).toThrow(/not valid until/);
+    expect(() => validateSignerCertificate(valid.signerCert, base, { now: new Date(notAfter.getTime() + 1000) })).toThrow(/expired/);
+    // buildPkpass takes the same clock.
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: valid.wwdr, signerCert: valid.signerCert, signerKey: valid.signerKey }, now: new Date(notAfter.getTime() + day) }),
+    ).rejects.toThrow(/expired/);
+  });
+
+  it("refuses a signer key that is not the certificate's own, and accepts the right one, encrypted or not", async () => {
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+    const wrongKey = makeTestCerts({ mismatchedKey: true });
+    expect(() => validateSignerCertificate(wrongKey.signerCert, base, { signerKey: wrongKey.signerKey })).toThrow(/not the private key of the signer certificate/);
+    await expect(
+      buildPkpass(content(), { ...base, certificates: { wwdr: wrongKey.wwdr, signerCert: wrongKey.signerCert, signerKey: wrongKey.signerKey } }),
+    ).rejects.toThrow(/not the private key/);
+    // Without the key nothing about it is checked (the certificate alone is fine).
+    expect(() => validateSignerCertificate(wrongKey.signerCert, base)).not.toThrow();
+    // The matching key passes, as bytes too.
+    const good = makeTestCerts();
+    expect(() => validateSignerCertificate(good.signerCert, base, { signerKey: good.signerKey })).not.toThrow();
+    expect(() => validateSignerCertificate(new TextEncoder().encode(good.signerCert), base, { signerKey: new TextEncoder().encode(good.signerKey) })).not.toThrow();
+    // An encrypted key needs its passphrase, and a wrong one is reported as unreadable, not as a mismatch.
+    const encrypted = makeTestCerts({ keyPassphrase: "s3cret" });
+    expect(() => validateSignerCertificate(encrypted.signerCert, base, { signerKey: encrypted.signerKey, signerKeyPassphrase: "s3cret" })).not.toThrow();
+    expect(() => validateSignerCertificate(encrypted.signerCert, base, { signerKey: encrypted.signerKey })).toThrow(/could not be read/);
+    expect(() => validateSignerCertificate(encrypted.signerCert, base, { signerKey: encrypted.signerKey, signerKeyPassphrase: "wrong" })).toThrow(/could not be read/);
+    const bytes = await buildPkpass(content(), {
+      ...base,
+      certificates: { wwdr: encrypted.wwdr, signerCert: encrypted.signerCert, signerKey: encrypted.signerKey, signerKeyPassphrase: "s3cret" },
+    });
+    expect(Object.keys(unzip(bytes))).toContain("signature");
   });
 
   it("produces a signed bundle whose manifest covers every file", async () => {

@@ -29,12 +29,13 @@ function makeCert(
   issuer: { cn: string; key: forge.pki.rsa.PrivateKey },
   ca: boolean,
   serial: string,
+  validity: { notBefore?: Date; notAfter?: Date } = {},
 ): forge.pki.Certificate {
   const cert = forge.pki.createCertificate();
   cert.publicKey = keys.publicKey;
   cert.serialNumber = serial;
-  cert.validity.notBefore = new Date(Date.now() - 60_000);
-  cert.validity.notAfter = new Date(Date.now() + 365 * 24 * 3600_000);
+  cert.validity.notBefore = validity.notBefore ?? new Date(Date.now() - 60_000);
+  cert.validity.notAfter = validity.notAfter ?? new Date(Date.now() + 365 * 24 * 3600_000);
   cert.setSubject(subject);
   cert.setIssuer([{ name: "commonName", value: issuer.cn }]);
   cert.setExtensions([{ name: "basicConstraints", cA: ca }]);
@@ -42,10 +43,26 @@ function makeCert(
   return cert;
 }
 
+export interface TestCertOptions {
+  passTypeId?: string;
+  teamId?: string;
+  /// A certificate with a common name only, like a self-signed development
+  ///  or TLS certificate: no UID, no OU.
+  bare?: boolean;
+  /// Validity period of the signer certificate. Defaults to a minute ago
+  ///  until a year from now.
+  notBefore?: Date;
+  notAfter?: Date;
+  /// Return the private key of a different key pair as `signerKey`.
+  mismatchedKey?: boolean;
+  /// Encrypt `signerKey` with this passphrase (PEM, PKCS#8 style).
+  keyPassphrase?: string;
+}
+
 /// The subject Apple puts on a Pass Type ID certificate: the pass type as UID
 ///  (OID 0.9.2342.19200300.100.1.1), the team as OU. `bare` makes a certificate
 ///  with a common name only, like a self-signed development certificate.
-export function makeTestCerts(o: { passTypeId?: string; teamId?: string; bare?: boolean } = {}): TestCerts {
+export function makeTestCerts(o: TestCertOptions = {}): TestCerts {
   const caKeys = rsaKeys();
   const ca = makeCert([{ name: "commonName", value: "Test WWDR" }], caKeys, { cn: "Test WWDR", key: caKeys.privateKey }, true, "01");
   const signerKeys = rsaKeys();
@@ -59,11 +76,12 @@ export function makeTestCerts(o: { passTypeId?: string; teamId?: string; bare?: 
         { name: "organizationName", value: "Test Org" },
         { name: "countryName", value: "US" },
       ];
-  const signer = makeCert(subject, signerKeys, { cn: "Test WWDR", key: caKeys.privateKey }, false, "02");
+  const signer = makeCert(subject, signerKeys, { cn: "Test WWDR", key: caKeys.privateKey }, false, "02", { notBefore: o.notBefore, notAfter: o.notAfter });
+  const keyOut = o.mismatchedKey ? rsaKeys().privateKey : signerKeys.privateKey;
   return {
     wwdr: forge.pki.certificateToPem(ca),
     signerCert: forge.pki.certificateToPem(signer),
-    signerKey: forge.pki.privateKeyToPem(signerKeys.privateKey),
+    signerKey: o.keyPassphrase !== undefined ? forge.pki.encryptRsaPrivateKey(keyOut, o.keyPassphrase) : forge.pki.privateKeyToPem(keyOut),
     signer,
   };
 }
