@@ -11,7 +11,7 @@ import {
   type PassFileProvider,
 } from "@erc8426/core";
 
-import { defaultConfirmPage, resultPage } from "./capability.js";
+import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
@@ -323,9 +323,11 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
   // GET {base}/links/:link. Side-effect free: no read, no execution, no
   // state change. Devices, previewers and crawlers prefetch pass links.
+  // Every answer, page or JSON, built in or custom, carries the link page
+  // headers (no-store, noindex, no-referrer, frame-ancestors 'none').
   async function describeLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("unknown_capability");
+    if (!resolved) return withLinkPageHeaders(error("unknown_capability"));
     const { binding, def } = resolved;
     const ctx: LinkPageContext = {
       token: x.token(binding.tokenId),
@@ -335,16 +337,18 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       postUrl: x.linkUrl(linkToken),
       request,
     };
-    if (config.capability.confirmPage) return config.capability.confirmPage(ctx);
-    if (wantsHtml(request)) return defaultConfirmPage(ctx);
-    return json(200, {
-      tokenId: binding.tokenId,
-      action: binding.name,
-      description: def.description,
-      bound: def.bound,
-      method: "POST",
-      executed: false,
-    });
+    if (config.capability.confirmPage) return withLinkPageHeaders(await config.capability.confirmPage(ctx));
+    if (wantsHtml(request)) return withLinkPageHeaders(defaultConfirmPage(ctx));
+    return withLinkPageHeaders(
+      json(200, {
+        tokenId: binding.tokenId,
+        action: binding.name,
+        description: def.description,
+        bound: def.bound,
+        method: "POST",
+        executed: false,
+      }),
+    );
   }
 
   // POST {base}/links/:link. The capability URL stands in for check (1);
@@ -415,8 +419,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const page = resultPage(response.ok, message, response.status);
     const retry = response.headers.get("Retry-After");
     if (retry) page.headers.set("Retry-After", retry);
-    page.headers.set("Cache-Control", "no-store");
-    return page;
+    return withLinkPageHeaders(page);
   }
 
   async function dispatch(request: Request, url: URL, segments: string[]): Promise<Response> {

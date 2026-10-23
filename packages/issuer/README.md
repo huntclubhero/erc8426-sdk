@@ -92,7 +92,7 @@ All under `basePath` (default `/wallet-pass`). Every response carries `Cache-Con
 | `GET /:tokenId/challenge?address=&action=` | A fresh ERC-4361 challenge. `action` defaults to `acquire`. 400 on a missing or invalid address or an unknown action. |
 | `POST /:tokenId/actions/:action` | Signed action. Body `{ message, signature, params? }` (or the proof headers). |
 | `POST /:tokenId/rotate` | Rotate on a signed `rotate` proof from the holder of record (or an account entitled to acquire). Answers `{ ok, rotated }` only, never the manifest: the holder re-adds the new pass with an acquire proof. |
-| `GET /links/:link` | Describe a capability link. No side effects: a confirm page for browsers, JSON otherwise. |
+| `GET /links/:link` | Describe a capability link. No side effects: a confirm page for browsers, JSON otherwise. Every link page answer (and the result page of a form POST) carries `Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: frame-ancestors 'none'` (`LINK_PAGE_HEADERS`); a custom `confirmPage` gets them too, keeping its own CSP directives. |
 | `POST /links/:link` | Perform a capability link's action. |
 | `GET /passes/:link` | Download a pass file from a file provider (Apple `.pkpass`). `HEAD` answers the same headers with no body. |
 

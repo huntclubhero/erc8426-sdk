@@ -34,6 +34,42 @@ export function isLinkTokenShape(value: string): boolean {
   return LINK_TOKEN_RE.test(value);
 }
 
+/// Headers every capability link page carries, HTML or JSON, built in or
+///  custom. A link page is reached from a URL that is itself the capability,
+///  so nothing about it may leak or be framed:
+///   - `Cache-Control: no-store`: never cached by a shared cache or a browser.
+///   - `X-Robots-Tag: noindex, nofollow`: a previewer or crawler that fetched
+///     the link must not index the page (the HTML also carries the meta tag).
+///   - `Referrer-Policy: no-referrer`: no navigation from the page (a link in
+///     its text, the result page's links) sends the capability URL as a
+///     Referer to another origin.
+///   - `Content-Security-Policy: frame-ancestors 'none'`: no page may frame
+///     the confirm page and clickjack its Confirm button.
+export const LINK_PAGE_HEADERS: Readonly<Record<string, string>> = {
+  "Cache-Control": "no-store",
+  "X-Robots-Tag": "noindex, nofollow",
+  "Referrer-Policy": "no-referrer",
+  "Content-Security-Policy": "frame-ancestors 'none'",
+};
+
+/// Re-wrap a response so its headers are mutable (a custom confirm page may
+///  return a fetched one) and add LINK_PAGE_HEADERS. A custom page's own
+///  Content-Security-Policy is kept and gains `frame-ancestors 'none'` when
+///  it does not set that directive; every other header is set outright.
+export function withLinkPageHeaders(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(LINK_PAGE_HEADERS)) {
+    if (name === "Content-Security-Policy") {
+      const existing = headers.get(name);
+      if (existing === null) headers.set(name, value);
+      else if (!/(^|;)\s*frame-ancestors\b/i.test(existing)) headers.set(name, `${existing.replace(/;\s*$/, "")}; ${value}`);
+      continue;
+    }
+    headers.set(name, value);
+  }
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
