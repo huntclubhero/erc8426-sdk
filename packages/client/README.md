@@ -118,7 +118,7 @@ These match the `@erc8426/issuer` routes. Query parameters are always added with
 
 ## Issuer notes (CORS)
 
-The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `X-Wallet-Pass-Proof` and `X-Wallet-Pass-Signature`, so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers: X-Wallet-Pass-Proof, X-Wallet-Pass-Signature`.
+The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `X-Wallet-Pass-Proof` and `X-Wallet-Pass-Signature`, so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers: X-Wallet-Pass-Proof, X-Wallet-Pass-Signature`. An `@erc8426/issuer` sends no CORS headers unless configured (`cors: { origins: [...] }` or an explicit `"*"`), so a browser client on another origin needs the issuer to name it.
 
 ## API
 

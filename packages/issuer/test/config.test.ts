@@ -20,8 +20,18 @@ describe("config validation", () => {
     expect(c.challengeTtlSeconds).toBe(300);
     expect(c.nonceTtlSeconds).toBe(600);
     expect(c.retryAfterSeconds).toBe(5);
-    expect(c.cors).toEqual({ origins: "*", maxAgeSeconds: 600 });
+    expect(c.cors).toBe(false);
     expect(c.capabilityActions).toEqual([]);
+  });
+
+  it("sends no CORS headers unless cors is set, and a wildcard only when written explicitly", () => {
+    expect(resolveConfig(base).cors).toBe(false);
+    expect(resolveConfig({ ...base, cors: false }).cors).toBe(false);
+    expect(resolveConfig({ ...base, cors: { origins: "*" } }).cors).toEqual({ origins: "*", maxAgeSeconds: 600 });
+    expect(resolveConfig({ ...base, cors: { origins: ["https://app.example"], maxAgeSeconds: 60 } }).cors).toEqual({ origins: ["https://app.example"], maxAgeSeconds: 60 });
+    refuses({ cors: { origins: "https://app.example" as unknown as "*" } }, /must be "\*" or an array/);
+    refuses({ cors: { origins: ["https://app.example/path"] } }, /no path/);
+    refuses({ cors: { origins: ["app.example"] } }, /scheme/);
   });
 
   it("refuses the capability configuration outside the gated configuration", () => {

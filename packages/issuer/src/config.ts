@@ -117,9 +117,18 @@ export interface IssuerConfig {
   /// Pass-reachable actions, keyed by action name.
   actions?: Record<string, ActionDefinition>;
   capability?: CapabilityConfig;
-  /// CORS for browser clients. Default { origins: "*" }: no cookies are
-  ///  involved (proofs travel in headers), so a wildcard is safe. `false`
-  ///  disables CORS headers entirely.
+  /// CORS for browser clients: a marketplace or wallet web app that fetches
+  ///  the manifest and resolves a gated one from its own origin. Default:
+  ///  none. With no `cors` the issuer sends no Access-Control headers and a
+  ///  browser on another origin cannot read any response, which is what a
+  ///  deployment whose only browser caller is its own site wants. To serve
+  ///  browser clients on other origins, name them (`{ origins: [...] }`) or
+  ///  say `{ origins: "*" }` explicitly. Until 0.3.0 the default was `"*"`,
+  ///  which made every manifest, including a gated one resolved with a
+  ///  stolen proof, readable cross-origin by any page; no cookies are
+  ///  involved, so a wildcard is not a credential leak, but it is a decision
+  ///  the operator should make rather than inherit. `false` is the same as
+  ///  leaving it out and is kept for explicitness.
   cors?: CorsConfig | false;
   /// Largest BatchPassUpdate range walked id by id. Wider ranges are served
   ///  from the pass store's index when it has one. Default 10000.
@@ -257,10 +266,18 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     capabilityActions.push(name);
   }
 
-  let cors: CorsConfig | false = config.cors === undefined ? { origins: "*" } : config.cors;
+  // No CORS unless asked for: a wildcard has to be written down.
+  let cors: CorsConfig | false = config.cors === undefined ? false : config.cors;
   if (cors !== false) {
     if (cors.origins !== "*" && !Array.isArray(cors.origins)) {
       throw new IssuerConfigError('cors.origins must be "*" or an array of origins');
+    }
+    if (Array.isArray(cors.origins)) {
+      for (const o of cors.origins) {
+        if (typeof o !== "string" || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
+          throw new IssuerConfigError(`cors.origins entries must be origins (scheme://host[:port]) with no path, got "${String(o)}"`);
+        }
+      }
     }
     cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
   }

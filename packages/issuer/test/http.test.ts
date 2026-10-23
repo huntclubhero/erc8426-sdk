@@ -9,8 +9,27 @@ import { TOKEN_ID, buildHarness, newSigner, proof, signChallenge, type Harness }
 const MANIFEST = `/wallet-pass/${TOKEN_ID}`;
 
 describe("CORS", () => {
-  it("answers a preflight admitting the two proof headers", async () => {
+  it("sends no Access-Control headers at all when cors is not configured", async () => {
     const h = buildHarness();
+    const res = await h.get(MANIFEST, { Origin: "https://wallet.example" });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(res.headers.get("access-control-expose-headers")).toBeNull();
+    expect(res.headers.get("vary")).toBeNull();
+    const preflight = await h.issuer.handler(
+      new Request(`https://issuer.example${MANIFEST}`, {
+        method: "OPTIONS",
+        headers: { Origin: "https://wallet.example", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "x-wallet-pass-proof" },
+      }),
+    );
+    expect(preflight.status).toBe(204);
+    const names: string[] = [];
+    preflight.headers.forEach((_v, k) => names.push(k));
+    expect(names.filter((k) => k.startsWith("access-control"))).toEqual([]);
+  });
+
+  it("answers a preflight admitting the two proof headers when a wildcard is set explicitly", async () => {
+    const h = buildHarness({ cors: { origins: "*" } });
     const res = await h.issuer.handler(
       new Request(`https://issuer.example${MANIFEST}`, {
         method: "OPTIONS",
@@ -25,8 +44,8 @@ describe("CORS", () => {
     expect(res.headers.get("access-control-allow-methods")).toContain("POST");
   });
 
-  it("lets a browser read the 401 challenge and the Retry-After of a 503", async () => {
-    const h = buildHarness();
+  it("lets a browser read the 401 challenge and the Retry-After of a 503 under an explicit wildcard", async () => {
+    const h = buildHarness({ cors: { origins: "*" } });
     const res = await h.get(MANIFEST, { Origin: "https://wallet.example" });
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-expose-headers")).toContain("Retry-After");
@@ -39,6 +58,14 @@ describe("CORS", () => {
     expect(ok.headers.get("vary")).toContain("Origin");
     const other = await h.get(MANIFEST, { Origin: "https://evil.example" });
     expect(other.headers.get("access-control-allow-origin")).toBeNull();
+    // Never a wildcard from a list, and nothing without an Origin header.
+    expect(ok.headers.get("access-control-allow-origin")).not.toBe("*");
+    expect((await h.get(MANIFEST)).headers.get("access-control-allow-origin")).toBeNull();
+    const preflight = await h.issuer.handler(
+      new Request(`https://issuer.example${MANIFEST}`, { method: "OPTIONS", headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "GET" } }),
+    );
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
   });
 
   it("can be switched off", async () => {
