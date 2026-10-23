@@ -3,6 +3,7 @@ import { toFunctionSelector } from "viem";
 
 import {
   CANONICAL_WALLET_PASS_ERROR_CODES,
+  MAX_TOKEN_ID,
   WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
   actionUrn,
@@ -63,6 +64,32 @@ describe("caip", () => {
     expect(normalizeTokenId(2n ** 200n)).toBe((2n ** 200n).toString());
     expect(() => normalizeTokenId("-1")).toThrow();
     expect(() => normalizeTokenId(2 ** 60)).toThrow();
+  });
+  it("accepts every uint256 and nothing past it", () => {
+    const max = 2n ** 256n - 1n;
+    expect(MAX_TOKEN_ID).toBe(max);
+    expect(normalizeTokenId(max)).toBe(max.toString());
+    expect(normalizeTokenId(max.toString())).toBe(max.toString());
+    expect(normalizeTokenId(`000${max.toString()}`)).toBe(max.toString());
+    expect(normalizeTokenId(0)).toBe("0");
+    expect(normalizeTokenId("0")).toBe("0");
+    expect(() => normalizeTokenId(2n ** 256n)).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId((2n ** 256n).toString())).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId("1".repeat(79))).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId("9".repeat(400))).toThrow(/exceeds uint256/);
+    expect(() => tokenRef(1, EXAMPLE_CONTRACT, 2n ** 256n)).toThrow(/exceeds uint256/);
+    expect(parseAssetId(`eip155:1/erc721:${EXAMPLE_CONTRACT}/${(2n ** 256n).toString()}`)).toBeNull();
+  });
+  it("refuses negative and non-integer ids in every input type", () => {
+    expect(() => normalizeTokenId(-1)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(-1n)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(1.5)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("1.5")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("1e3")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("0x10")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(Number.NaN)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(Number.POSITIVE_INFINITY)).toThrow(/invalid token id/);
   });
   it("round-trips action URNs and rejects junk", () => {
     expect(actionUrn("feed")).toBe("urn:wallet-pass:action:feed");

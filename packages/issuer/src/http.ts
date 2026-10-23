@@ -37,10 +37,6 @@ export const MAX_BODY_BYTES = 64 * 1024;
 /// Largest proof header accepted, in characters. A SIWE challenge is well
 ///  under 2 KiB; base64url adds a third.
 const MAX_PROOF_HEADER_CHARS = 8 * 1024;
-const UINT256_LIMIT = 1n << 256n;
-/// uint256 max has 78 decimal digits; anything longer is not a token id and
-///  is refused before BigInt parses it.
-const MAX_TOKEN_ID_CHARS = 78;
 
 type Json = Record<string, unknown>;
 
@@ -55,11 +51,11 @@ function wantsHtml(request: Request): boolean {
   return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
+/// A path segment as a token id, or null. normalizeTokenId refuses anything
+///  outside uint256 (and an over-long string before parsing it).
 function parseTokenId(segment: string): string | null {
-  if (segment.length > MAX_TOKEN_ID_CHARS) return null;
   try {
-    const id = normalizeTokenId(segment);
-    return BigInt(id) < UINT256_LIMIT ? id : null;
+    return normalizeTokenId(segment);
   } catch {
     return null;
   }

@@ -5,6 +5,9 @@ import { ACTION_URN_PREFIX } from "./constants.js";
 /// Token ids travel as canonical decimal strings so ids above 2^53 survive.
 export type TokenId = string;
 
+/// The largest ERC-721 token id: uint256 max, 2^256 - 1.
+export const MAX_TOKEN_ID = (1n << 256n) - 1n;
+
 /// The (chain, contract, token) triple a challenge and a capability link bind.
 export interface TokenRef {
   chainId: number;
@@ -12,6 +15,11 @@ export interface TokenRef {
   tokenId: TokenId;
 }
 
+/// Canonical decimal form of a token id. Throws for anything that is not a
+///  non-negative integer in uint256 range: a negative or fractional number, a
+///  string with any character but digits, or a value above 2^256 - 1 (such an
+///  id cannot exist on chain, and an asset id built from it would never match
+///  any token).
 export function normalizeTokenId(value: string | number | bigint): TokenId {
   if (typeof value === "number" && !Number.isSafeInteger(value)) {
     throw new Error(`invalid token id: ${value} is not a safe integer, pass a bigint or string`);
@@ -20,7 +28,13 @@ export function normalizeTokenId(value: string | number | bigint): TokenId {
   if (!/^[0-9]+$/.test(asString)) throw new Error(`invalid token id: ${asString}`);
   // Canonical decimal with no leading zeros, so "007" and "7" can never
   // produce two different asset ids for one token.
-  return BigInt(asString).toString();
+  const digits = asString.replace(/^0+(?=[0-9])/, "");
+  // uint256 max has 78 decimal digits; a longer string is refused before
+  // BigInt parses it, so an oversized request value costs nothing to reject.
+  if (digits.length > 78) throw new Error(`invalid token id: ${digits.slice(0, 16)}... exceeds uint256`);
+  const id = BigInt(digits);
+  if (id > MAX_TOKEN_ID) throw new Error(`invalid token id: ${digits} exceeds uint256`);
+  return id.toString();
 }
 
 export function tokenRef(chainId: number, contract: string, tokenId: string | number | bigint): TokenRef {
