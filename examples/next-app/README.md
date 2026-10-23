@@ -6,7 +6,7 @@ It runs with **no Apple or Google account**: the pass is drawn in the page from 
 
 ## Quickstart
 
-Needs Node 20+, pnpm and [Foundry](https://getfoundry.sh) (for `anvil`).
+Needs Node 22+, pnpm and [Foundry](https://getfoundry.sh) (for `anvil`).
 
 ```sh
 pnpm install && pnpm build                                  # once, from the repository root

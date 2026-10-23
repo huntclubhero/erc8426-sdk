@@ -1,8 +1,11 @@
 {
   "name": "@erc8426/contracts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Solidity interface, base implementation and use-case examples for ERC-8426 wallet passes",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "src",
     "abi",

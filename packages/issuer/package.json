@@ -1,8 +1,11 @@
 {
   "name": "@erc8426/issuer",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Issue ERC-8426 wallet passes: challenges, the authorization floor, gated manifests, capability links, rotation",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
