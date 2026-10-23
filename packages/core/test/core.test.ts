@@ -97,9 +97,44 @@ describe("challenge", () => {
     expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
     expect(parsed.action).toBe("feed");
   });
-  it("treats two token resources as ambiguous", () => {
-    const doubled = SPEC_EXAMPLE + "\n- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/413";
-    expect(parseChallenge(doubled)!.token).toBeNull();
+  it("reads the token and the action by position: first resource, second resource", () => {
+    // Swapped: the action URN sits where the token belongs and vice versa,
+    // so neither is read. A verifier refuses this as binding_mismatch.
+    const swapped = SPEC_EXAMPLE.replace(
+      "- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412\n- urn:wallet-pass:action:feed",
+      "- urn:wallet-pass:action:feed\n- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412",
+    );
+    expect(swapped).not.toBe(SPEC_EXAMPLE);
+    const parsed = parseChallenge(swapped)!;
+    expect(parsed.token).toBeNull();
+    expect(parsed.action).toBeNull();
+    expect(parsed.resources).toHaveLength(2);
+  });
+  it("binds whatever sits in the action's place, not an action listed elsewhere", () => {
+    // A second token in the action's place: the token still comes from the
+    // first resource, and the action is null even though a URN follows.
+    const shifted = SPEC_EXAMPLE.replace(
+      "- urn:wallet-pass:action:feed",
+      "- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/413\n- urn:wallet-pass:action:feed",
+    );
+    const parsed = parseChallenge(shifted)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBeNull();
+  });
+  it("tolerates resources after the second, as the reference verifier does", () => {
+    const extra = SPEC_EXAMPLE + "\n- https://issuer.example/terms";
+    const parsed = parseChallenge(extra)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBe("feed");
+    expect(parsed.resources).toHaveLength(3);
+  });
+  it("carries no token or action when the message has fewer than two resources", () => {
+    const none = SPEC_EXAMPLE.replace(/\nResources:[\s\S]*$/, "");
+    expect(parseChallenge(none)!.token).toBeNull();
+    const one = SPEC_EXAMPLE.replace("\n- urn:wallet-pass:action:feed", "");
+    const parsed = parseChallenge(one)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBeNull();
   });
   it("returns null for text that is not a challenge", () => {
     expect(parseChallenge("hello")).toBeNull();

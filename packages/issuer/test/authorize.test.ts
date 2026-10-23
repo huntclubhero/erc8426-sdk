@@ -17,7 +17,10 @@ async function primed(h: Harness, action = "feed") {
 
 /// Issue a nonce the way the challenge endpoint would, for a message the
 ///  test builds itself (to put fields the endpoint would never issue).
-async function forged(h: Harness, overrides: { chainId?: number; contract?: string; domain?: string; tokenId?: string; action?: string; notBefore?: Date }) {
+async function forged(
+  h: Harness,
+  overrides: { chainId?: number; contract?: string; domain?: string; tokenId?: string; action?: string; notBefore?: Date; resources?: string[] },
+) {
   const account = newSigner();
   h.chain.setOwner(TOKEN_ID, account.address);
   const nonce = generateNonce();
@@ -36,6 +39,7 @@ async function forged(h: Harness, overrides: { chainId?: number; contract?: stri
     expirationTime: new Date(now + 300_000),
   });
   if (overrides.notBefore) message = message.replace("\nResources:", `\nNot Before: ${overrides.notBefore.toISOString()}\nResources:`);
+  if (overrides.resources) message = message.replace(/\nResources:[\s\S]*$/, `\nResources:\n${overrides.resources.map((r) => `- ${r}`).join("\n")}`);
   return { account, message, signature: await account.signMessage({ message }) };
 }
 
@@ -190,6 +194,34 @@ describe("signed action (the two-check floor)", () => {
     const res = await h.post(ACTION_PATH("feed", "999"), { message, signature });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+  });
+
+  it("reads the token and action by position: a message with the two resources swapped binds nothing", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: ["urn:wallet-pass:action:feed", asset] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+    expect(h.executed).toHaveLength(0);
+  });
+
+  it("binds the action in the second place, not one listed further down", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: [asset, "urn:wallet-pass:action:water", "urn:wallet-pass:action:feed"] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+  });
+
+  it("tolerates a resource after the token and the action, as the reference verifier does", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: [asset, "urn:wallet-pass:action:feed", "https://issuer.example/terms"] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(200);
+    expect(h.executed).toHaveLength(1);
   });
 
   it("refuses a proof scoped to a chain the verifier does not serve", async () => {
