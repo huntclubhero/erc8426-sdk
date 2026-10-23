@@ -7,11 +7,11 @@ The issuer and the Apple web service are Fetch API handlers (`Request` in, `Resp
 | State | Package | Requirement |
 | - | - | - |
 | Nonces | issuer | Shared across instances with an **atomic read and delete** (`getDel`). Otherwise a nonce spent on one instance stays live on another. |
-| Pass records and link bindings | issuer | Shared, durable. `kvStores(kv)` covers nonces, records and links. |
+| Pass records and link bindings | issuer | Shared, durable. `kvStores(kv, { chainId, contract })` covers nonces, records and links, keyed per collection. |
 | Apple pass records and device registrations | apple | Durable `ApplePassStore`. Records hold `PassContent`; serialize `Date` and `Uint8Array` values. |
 | Google object records | google | Durable `GoogleObjectStore` (get, put, delete), so object ids survive restarts. |
 
-The in-memory defaults are for tests and a single process only. `createIssuer` refuses them under `NODE_ENV=production` unless every store is named (`stores: kvStores(kv)`, or an explicit `stores: memoryStores()` for a deliberate single instance), and warns once outside production.
+The in-memory defaults are for tests and a single process only. `createIssuer` refuses them under `NODE_ENV=production` unless every store is named (`stores: kvStores(kv, { chainId, contract })`, or an explicit `stores: memoryStores()` for a deliberate single instance), and warns once outside production.
 
 ## Next.js on Vercel
 
@@ -72,7 +72,7 @@ app.all("/wallet-pass/*", (c) => issuer.handler(c.req.raw));
 export default app;
 ```
 
-- **Nonces must not live in Workers KV.** KV is eventually consistent and has no atomic read and delete. Put nonces in a Durable Object or Upstash, and records and links wherever you like: `stores: { ...kvStores(workersKv), nonces: kvStores(upstash).nonces }`.
+- **Nonces must not live in Workers KV.** KV is eventually consistent and has no atomic read and delete. Put nonces in a Durable Object or Upstash, and records and links wherever you like: `stores: { ...kvStores(workersKv, scope), nonces: kvStores(upstash, scope).nonces }` with `scope = { chainId, contract }`.
 - **Apple needs Node.** `@erc8426/apple` uses `node:http2` for APNs, and pass signing uses `node-forge` over Node buffers. Workers do not provide `node:http2`. Run the Apple provider and web service on a Node host, or run the whole issuer there if you serve Apple passes.
 - **Google on Workers** uses `jose` (Web Crypto) and `node:crypto` helpers; it should run under the `nodejs_compat` flag but has not been verified there.
 - **Events:** a Cron Trigger that reads logs since the last block, or an indexer webhook into a Worker route.

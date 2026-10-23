@@ -25,11 +25,13 @@ export {
 } from "./config.js";
 export { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 export {
+  kvKeyNamespace,
   kvStores,
   memoryKv,
   memoryStores,
   type IssuerStores,
   type KeyValueStore,
+  type KvStoresOptions,
   type KvSetOptions,
   type LinkBinding,
   type LinkStore,

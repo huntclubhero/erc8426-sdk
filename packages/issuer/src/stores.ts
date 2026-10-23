@@ -1,3 +1,4 @@
+import { getAddress, isAddress } from "viem";
 import type { Address } from "viem";
 
 /// Storage seams. Every store is async so the same issuer runs on one
@@ -182,14 +183,41 @@ export interface KeyValueStore {
   del(key: string): Promise<void>;
 }
 
-/// Build all three stores on a key-value store. Keys are namespaced under
-///  `prefix` (default "erc8426:"); give each collection its own prefix when
-///  one Redis serves several.
-export function kvStores(kv: KeyValueStore, options: { prefix?: string } = {}): IssuerStores {
-  const prefix = options.prefix ?? "erc8426:";
-  const nonceKey = (n: string) => `${prefix}nonce:${n}`;
-  const passKey = (t: string) => `${prefix}pass:${t}`;
-  const linkKey = (l: string) => `${prefix}link:${l}`;
+export interface KvStoresOptions {
+  /// The chain the collection lives on. Part of every key.
+  chainId: number;
+  /// The collection's contract address. Part of every key, lowercased.
+  contract: string;
+  /// Literal key prefix. Default "erc8426:".
+  prefix?: string;
+}
+
+/// Build the namespace every key of a collection lives under:
+///  `${prefix}${chainId}:${contract}:`, with the contract lowercased so the
+///  checksum casing of the configured address never splits one collection
+///  into two namespaces.
+export function kvKeyNamespace(options: KvStoresOptions): string {
+  if (!Number.isSafeInteger(options.chainId) || options.chainId <= 0) throw new Error(`kvStores: chainId must be a positive integer, got ${String(options.chainId)}`);
+  if (typeof options.contract !== "string" || !isAddress(options.contract, { strict: false })) {
+    throw new Error(`kvStores: contract must be an address, got "${String(options.contract)}"`);
+  }
+  return `${options.prefix ?? "erc8426:"}${options.chainId}:${getAddress(options.contract).toLowerCase()}:`;
+}
+
+/// Build all three stores on a key-value store. Every key carries the chain
+///  id and contract address, `${prefix}${chainId}:${contract}:pass:${tokenId}`
+///  (and `...:link:${token}`, `...:nonce:${nonce}`), so two collections on one
+///  Redis never share a row even when they share token ids, and a collection
+///  redeployed on another chain starts clean. `prefix` (default "erc8426:")
+///  is a further literal namespace, for example per environment.
+///
+///  Rows written by 0.2.x live under the old shape `${prefix}pass:${tokenId}`
+///  and are not read; see the 0.3.0 changelog for the one-off rekey.
+export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerStores {
+  const ns = kvKeyNamespace(options);
+  const nonceKey = (n: string) => `${ns}nonce:${n}`;
+  const passKey = (t: string) => `${ns}pass:${t}`;
+  const linkKey = (l: string) => `${ns}link:${l}`;
   // A client that parses JSON on read (@upstash/redis does by default, as
   // does Vercel KV) hands back the object rather than the string we wrote.
   // Accept both, so a shim written either way works.

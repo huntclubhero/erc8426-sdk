@@ -87,7 +87,7 @@ export interface CreateIssuerOptions extends IssuerConfig {
   /// Nonce, pass record and link stores. Any store left out falls back to
   ///  the in-memory one, which serves one process and forgets everything on
   ///  restart. With NODE_ENV=production the fallback is refused at startup
-  ///  (IssuerConfigError): pass `kvStores(kv)` for a shared store, or an
+  ///  (IssuerConfigError): pass `kvStores(kv, { chainId, contract })` for a shared store, or an
   ///  explicit `memoryStores()` for a deployment that really runs one
   ///  instance. Outside production the fallback logs one warning through
   ///  `onWarning` (default console.warn).
@@ -211,12 +211,12 @@ function resolveStores(options: CreateIssuerOptions, now: () => number): IssuerS
   const names = missing.join(", ");
   if (isProductionEnv()) {
     throw new IssuerConfigError(
-      `NODE_ENV is production but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
+      `NODE_ENV is production but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv, { chainId, contract }) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
     );
   }
   const warn = options.onWarning ?? ((message: string) => console.warn(message));
   warn(
-    `[erc8426/issuer] no ${names} store${missing.length > 1 ? "s" : ""} configured: falling back to the in-memory store${missing.length > 1 ? "s" : ""} (one process, lost on restart). Production refuses this; pass stores: kvStores(kv) or an explicit memoryStores().`,
+    `[erc8426/issuer] no ${names} store${missing.length > 1 ? "s" : ""} configured: falling back to the in-memory store${missing.length > 1 ? "s" : ""} (one process, lost on restart). Production refuses this; pass stores: kvStores(kv, { chainId, contract }) or an explicit memoryStores().`,
   );
   const defaults = memoryStores({ now });
   return {

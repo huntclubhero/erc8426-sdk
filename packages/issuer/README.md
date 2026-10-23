@@ -182,11 +182,11 @@ Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so eit
 
 ## Stores
 
-The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. Since 0.3.0 `createIssuer` refuses the in-memory fallback under `NODE_ENV=production` (an `IssuerConfigError` naming the missing stores): pass `stores: kvStores(kv)`, or `stores: memoryStores()` to run one instance deliberately. Outside production a store left out falls back to memory with one warning (`onWarning`, default `console.warn`).
+The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. Since 0.3.0 `createIssuer` refuses the in-memory fallback under `NODE_ENV=production` (an `IssuerConfigError` naming the missing stores): pass `stores: kvStores(kv, { chainId, contract })`, or `stores: memoryStores()` to run one instance deliberately. Outside production a store left out falls back to memory with one warning (`onWarning`, default `console.warn`).
 
 Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood: rate limit `GET /:tokenId/challenge` (per IP, per address) in front of the issuer, since a flood past the cap evicts honest users' pending challenges.
 
-`kvStores(kv)` builds all three stores on this interface:
+`kvStores(kv, { chainId, contract, prefix? })` builds all three stores on this interface. Every key is scoped by chain id and lowercased contract (`${prefix}${chainId}:${contract}:pass:${tokenId}`, and `:link:`, `:nonce:` alongside; `prefix` defaults to `erc8426:`), so two collections on one Redis never share a row even when they share token ids. Rows written by 0.2.x (`${prefix}pass:${tokenId}`) are not read; see the 0.3.0 changelog for the one-off rekey.
 
 ```ts
 interface KeyValueStore {
@@ -215,7 +215,7 @@ const kv: KeyValueStore = {
   getDel: (k) => redis.getdel(k), // Redis 6.2+
   del: async (k) => void (await redis.del(k)),
 };
-createIssuer({ ...config, stores: kvStores(kv) });
+createIssuer({ ...config, stores: kvStores(kv, { chainId: config.chainId, contract: config.contract }) });
 ```
 
 ### @upstash/redis (and Vercel KV)
@@ -239,7 +239,7 @@ const kv: KeyValueStore = {
 };
 ```
 
-Cloudflare Workers KV is eventually consistent and has no atomic read and delete, so it must not back the nonce store. Use a Durable Object or Upstash for nonces (`stores: { ...kvStores(workersKv), nonces: kvStores(upstash).nonces }`).
+Cloudflare Workers KV is eventually consistent and has no atomic read and delete, so it must not back the nonce store. Use a Durable Object or Upstash for nonces (`stores: { ...kvStores(workersKv, scope), nonces: kvStores(upstash, scope).nonces }` with `scope = { chainId, contract }`).
 
 ## API
 

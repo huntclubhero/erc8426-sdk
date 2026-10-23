@@ -271,7 +271,7 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
     contract: config.contract,
     mode: "gated",
     publicClient,
-    ...(redis ? { stores: kvStores(upstashKv(redis), { prefix: `${prefix}issuer:` }) } : {}),
+    ...(redis ? { stores: kvStores(upstashKv(redis), { chainId: config.chainId, contract: config.contract, prefix: `${prefix}issuer:` }) } : {}),
     providers,
     render,
     capability: { enabled: true },
