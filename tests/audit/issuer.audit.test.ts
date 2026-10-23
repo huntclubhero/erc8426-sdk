@@ -106,7 +106,8 @@ describe("AUDIT issuer: default in-memory nonce store", () => {
     };
     let h: ReturnType<typeof buildHarness>;
     try {
-      h = buildHarness();
+      // Rate limiting off: the store's own bound is what is under test here.
+      h = buildHarness({ rateLimit: false });
       const anyone = newSigner().address;
       for (let i = 0; i < 3000; i++) {
         const res = await h.get(`/wallet-pass/${TOKEN_ID}/challenge?address=${anyone}`);

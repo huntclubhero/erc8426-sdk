@@ -181,6 +181,12 @@ export interface KeyValueStore {
   /// Atomically read and delete. Null when the key does not exist.
   getDel(key: string): Promise<string | null>;
   del(key: string): Promise<void>;
+  /// OPTIONAL. Atomically add one to an integer counter, creating it at 1
+  ///  with the given expiry (Redis INCR, then EXPIRE on first create), and
+  ///  return the new value. `kvRateLimiter` uses it for an exact count
+  ///  across instances; without it the limiter reads and writes the counter
+  ///  back and may undercount racing attempts.
+  incr?(key: string, ttlSeconds: number): Promise<number>;
 }
 
 export interface KvStoresOptions {
@@ -301,6 +307,13 @@ export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & 
     },
     async del(key) {
       map.delete(key);
+    },
+    async incr(key, ttlSeconds) {
+      sweep();
+      const e = live(key);
+      const next = (e ? Number(e.value) : 0) + 1;
+      map.set(key, { value: String(next), expiresAt: e ? e.expiresAt : now() + ttlSeconds * 1000 });
+      return next;
     },
     size() {
       return map.size;

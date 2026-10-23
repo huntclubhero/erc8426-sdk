@@ -12,6 +12,7 @@ export {
 } from "./issuer.js";
 export { isPassFileProvider, type PassDeliveryProvider, type PassFile, type PassFileProvider } from "@erc8426/core";
 export {
+  DEFAULT_RATE_LIMITS,
   IssuerConfigError,
   resolveConfig,
   type ActionContext,
@@ -21,8 +22,22 @@ export {
   type IssuerConfig,
   type IssuerMode,
   type LinkPageContext,
+  type RateLimitConfig,
   type ResolvedIssuerConfig,
+  type ResolvedRateLimitConfig,
 } from "./config.js";
+export {
+  REMOTE_ADDRESS_HEADER,
+  defaultClientKey,
+  kvRateLimiter,
+  memoryRateLimiter,
+  unlimited,
+  type KvRateLimiterOptions,
+  type MemoryRateLimiterOptions,
+  type RateLimitDecision,
+  type RateLimitRule,
+  type RateLimiter,
+} from "./rateLimit.js";
 export { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 export {
   kvKeyNamespace,

@@ -13,6 +13,7 @@ import {
 
 import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
+import type { RateLimitRule } from "./rateLimit.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
 
@@ -173,6 +174,19 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         "Access-Control-Max-Age": String(config.cors ? config.cors.maxAgeSeconds : 600),
       },
     });
+  }
+
+  // Count one attempt for `family` under the client and the path token, and
+  // answer 429 rate_limited with Retry-After when it is over the limit. The
+  // attempt is counted before any work, so a refused request costs the
+  // issuer nothing but the count. Null when the request may proceed.
+  async function throttle(request: Request, family: "challenge" | "manifest" | "capability", pathToken: string): Promise<Response | null> {
+    const rule: RateLimitRule | false = config.rateLimit[family];
+    if (rule === false) return null;
+    const client = config.rateLimit.clientKey(request) ?? "unknown";
+    const decision = await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, x.now());
+    if (decision.allowed) return null;
+    return json(429, { error: "rate_limited", message: `too many ${family} requests; retry after ${decision.retryAfterSeconds} s` }, { "Retry-After": String(decision.retryAfterSeconds) });
   }
 
   function methodNotAllowed(allow: string): Response {
@@ -428,29 +442,33 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (first === undefined) return error("unknown_capability");
 
     if (first === "links" && segments.length === 2) {
+      if (method !== "GET" && method !== "POST") return methodNotAllowed("GET, POST, OPTIONS");
+      const limited = await throttle(request, "capability", second!);
+      if (limited) return method === "POST" ? asHtml(request, limited) : withLinkPageHeaders(limited);
       if (method === "GET") return describeLink(request, second!);
-      if (method === "POST") return asHtml(request, await followLink(request, second!));
-      return methodNotAllowed("GET, POST, OPTIONS");
+      return asHtml(request, await followLink(request, second!));
     }
     if (first === "passes" && segments.length === 2) {
       // HEAD lets a client (or the conformance suite) check the pkpass media
       // type before downloading; it runs the same checks as GET.
+      if (method !== "GET" && method !== "HEAD") return methodNotAllowed("GET, HEAD, OPTIONS");
+      const limited = await throttle(request, "capability", second!);
+      if (limited) return method === "HEAD" ? new Response(null, { status: limited.status, headers: limited.headers }) : limited;
       if (method === "GET") return download(second!);
-      if (method === "HEAD") {
-        const res = await download(second!);
-        return new Response(null, { status: res.status, headers: res.headers });
-      }
-      return methodNotAllowed("GET, HEAD, OPTIONS");
+      const res = await download(second!);
+      return new Response(null, { status: res.status, headers: res.headers });
     }
 
     const tokenId = parseTokenId(first);
     if (tokenId === null) return error("invalid_request", { message: `invalid token id: ${first}` });
 
     if (segments.length === 1) {
-      return method === "GET" ? manifest(request, tokenId) : methodNotAllowed("GET, OPTIONS");
+      if (method !== "GET") return methodNotAllowed("GET, OPTIONS");
+      return (await throttle(request, "manifest", tokenId)) ?? manifest(request, tokenId);
     }
     if (segments.length === 2 && second === "challenge") {
-      return method === "GET" ? challenge(url, tokenId) : methodNotAllowed("GET, OPTIONS");
+      if (method !== "GET") return methodNotAllowed("GET, OPTIONS");
+      return (await throttle(request, "challenge", tokenId)) ?? challenge(url, tokenId);
     }
     if (segments.length === 2 && second === "rotate") {
       return method === "POST" ? rotate(request, tokenId) : methodNotAllowed("POST, OPTIONS");

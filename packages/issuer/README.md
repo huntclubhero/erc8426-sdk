@@ -188,7 +188,31 @@ Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so eit
 
 The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. Since 0.3.0 `createIssuer` refuses the in-memory fallback under `NODE_ENV=production` (an `IssuerConfigError` naming the missing stores): pass `stores: kvStores(kv, { chainId, contract })`, or `stores: memoryStores()` to run one instance deliberately. Outside production a store left out falls back to memory with one warning (`onWarning`, default `console.warn`).
 
-Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood: rate limit `GET /:tokenId/challenge` (per IP, per address) in front of the issuer, since a flood past the cap evicts honest users' pending challenges.
+Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood on its own, since a flood past the cap evicts honest users' pending challenges; the built-in rate limiter (next section) is.
+
+## Rate limiting
+
+On by default. The challenge, manifest and capability endpoints each count attempts per client address and path token (`challenge:<client>:<tokenId>`, `manifest:<client>:<tokenId>`, `capability:<client>:<link>`) and answer `429 { "error": "rate_limited" }` with a `Retry-After` header (whole seconds) past the limit. The attempt is counted before any work, so a refused request costs nothing but the count. Defaults: `challenge` 30 per 60 s, `manifest` 60 per 60 s, `capability` (GET and POST `/links/:link`, GET and HEAD `/passes/:link`) 60 per 60 s.
+
+```ts
+import { createIssuer, kvRateLimiter, kvKeyNamespace } from "@erc8426/issuer";
+
+createIssuer({
+  ...config,
+  rateLimit: {
+    challenge: { limit: 10, windowSeconds: 60 },
+    manifest: false,                                   // one family off
+    limiter: kvRateLimiter(kv, { prefix: `${kvKeyNamespace(scope)}rl:` }), // one limit across instances
+    clientKey: (request) => request.headers.get("x-real-ip"),          // what counts as one client
+  },
+});
+createIssuer({ ...config, rateLimit: false });        // off entirely
+```
+
+- `memoryRateLimiter()` (default) keeps an exact sliding window per key in process memory, at most `maxKeys` keys (100000, least recently seen dropped). With several instances each enforces its own share.
+- `kvRateLimiter(kv)` keeps a fixed-window counter per key in the `KeyValueStore`, shared by every instance. With a store that implements the optional `incr` (Redis `INCR` plus `EXPIRE`) the count is exact; without it the counter is read and written back and racing attempts may undercount.
+- `clientKey` defaults to `defaultClientKey`: `CF-Connecting-IP`, `True-Client-IP`, `X-Real-IP`, `Fly-Client-IP`, the first `X-Forwarded-For` hop, then the socket address the Node adapter records (`toNodeHandler` and `expressMiddleware` set it from `req.socket.remoteAddress`, dropping any client-sent value). Behind no proxy `X-Forwarded-For` is client-supplied, so pass a `clientKey` that reads the socket address only.
+- Any object with `hit(key, rule, nowMs)` is a `RateLimiter`.
 
 `kvStores(kv, { chainId, contract, prefix? })` builds all three stores on this interface. Every key is scoped by chain id and lowercased contract (`${prefix}${chainId}:${contract}:pass:${tokenId}`, and `:link:`, `:nonce:` alongside; `prefix` defaults to `erc8426:`), so two collections on one Redis never share a row even when they share token ids. Rows written by 0.2.x (`${prefix}pass:${tokenId}`) are not read; see the 0.3.0 changelog for the one-off rekey.
 

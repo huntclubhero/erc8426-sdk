@@ -111,7 +111,8 @@ describe("request body limits (audit 5)", () => {
 
 describe("in-memory nonce store (audit 6)", () => {
   it("sweeps unconsumed nonces once their retention passes", async () => {
-    const h = buildHarness();
+    // The limiter would stop this flood at 30; the sweep is what is under test.
+    const h = buildHarness({ rateLimit: false });
     const anyone = newSigner().address;
     for (let i = 0; i < 500; i++) await h.get(`/wallet-pass/${TOKEN_ID}/challenge?address=${anyone}`);
     h.clock.advance(86_400_000);

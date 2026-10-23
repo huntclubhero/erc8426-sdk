@@ -1,6 +1,8 @@
 import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
+import { defaultClientKey, memoryRateLimiter, unlimited, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+
 /// The two configurations the standard defines under Acquisition URLs.
 ///
 ///  - "public": the manifest is served to anyone. Its acquisition URLs are one
@@ -80,6 +82,39 @@ export interface CapabilityConfig {
   confirmPage?: (ctx: LinkPageContext) => Response | Promise<Response>;
 }
 
+/// Rate limits on the anonymous surface. Each endpoint family has one rule
+///  (at most `limit` attempts per `windowSeconds`), keyed by client address
+///  plus the token in the path, so one client cannot exhaust an endpoint for
+///  everyone and one token's traffic cannot hide another's. Over the limit
+///  the issuer answers 429 `{ "error": "rate_limited" }` with `Retry-After`.
+export interface RateLimitConfig {
+  /// Where counts live. Default `memoryRateLimiter()` (exact sliding window,
+  ///  one process). Pass `kvRateLimiter(kv)` for one limit across instances,
+  ///  or any `RateLimiter`.
+  limiter?: RateLimiter;
+  /// GET /:tokenId/challenge, keyed by client and token. Default 30 per 60 s.
+  ///  Every request mints a nonce and a store write. `false` disables.
+  challenge?: RateLimitRule | false;
+  /// GET /:tokenId (the manifest), keyed by client and token. Default 60 per
+  ///  60 s. A gated request costs a signature check and a chain read.
+  manifest?: RateLimitRule | false;
+  /// GET and POST /links/:link and GET /passes/:link, keyed by client and
+  ///  link. Default 60 per 60 s. A POST costs a chain read and an action.
+  capability?: RateLimitRule | false;
+  /// The client identity a request is counted under. Default
+  ///  `defaultClientKey` (proxy headers, then the socket address the Node
+  ///  adapter recorded). Return null to count every unknown client together.
+  clientKey?: (request: Request) => string | null;
+}
+
+export interface ResolvedRateLimitConfig {
+  limiter: RateLimiter;
+  challenge: RateLimitRule | false;
+  manifest: RateLimitRule | false;
+  capability: RateLimitRule | false;
+  clientKey: (request: Request) => string | null;
+}
+
 export interface CorsConfig {
   /// "*" or an explicit allowlist of origins (scheme://host[:port]).
   origins: "*" | string[];
@@ -133,6 +168,10 @@ export interface IssuerConfig {
   /// Largest BatchPassUpdate range walked id by id. Wider ranges are served
   ///  from the pass store's index when it has one. Default 10000.
   maxBatchRange?: number;
+  /// Rate limits on the challenge, manifest and capability endpoints. On by
+  ///  default with an in-process limiter and the defaults in
+  ///  `RateLimitConfig`; `false` turns limiting off entirely.
+  rateLimit?: RateLimitConfig | false;
 }
 
 export interface ResolvedIssuerConfig {
@@ -153,6 +192,7 @@ export interface ResolvedIssuerConfig {
   capability: CapabilityConfig;
   cors: CorsConfig | false;
   maxBatchRange: number;
+  rateLimit: ResolvedRateLimitConfig;
 }
 
 /// Thrown by `createIssuer` for a configuration the spec does not allow or
@@ -227,6 +267,7 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
   }
   const retryAfterSeconds = positiveInt("retryAfterSeconds", config.retryAfterSeconds, 5);
   const maxBatchRange = positiveInt("maxBatchRange", config.maxBatchRange, 10_000);
+  const rateLimit = resolveRateLimit(config.rateLimit);
 
   const capability: CapabilityConfig = config.capability ?? { enabled: false };
   if (capability.enabled && config.mode !== "gated") {
@@ -298,5 +339,35 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     capability,
     cors,
     maxBatchRange,
+    rateLimit,
+  };
+}
+
+export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability", RateLimitRule>> = {
+  challenge: { limit: 30, windowSeconds: 60 },
+  manifest: { limit: 60, windowSeconds: 60 },
+  capability: { limit: 60, windowSeconds: 60 },
+};
+
+function rule(name: string, value: RateLimitRule | false | undefined, fallback: RateLimitRule): RateLimitRule | false {
+  if (value === false) return false;
+  if (value === undefined) return fallback;
+  if (typeof value !== "object" || value === null) throw new IssuerConfigError(`rateLimit.${name} must be { limit, windowSeconds } or false`);
+  return { limit: positiveInt(`rateLimit.${name}.limit`, value.limit, fallback.limit), windowSeconds: positiveInt(`rateLimit.${name}.windowSeconds`, value.windowSeconds, fallback.windowSeconds) };
+}
+
+function resolveRateLimit(config: RateLimitConfig | false | undefined): ResolvedRateLimitConfig {
+  if (config === false) {
+    return { limiter: unlimited, challenge: false, manifest: false, capability: false, clientKey: defaultClientKey };
+  }
+  const c = config ?? {};
+  if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
+  if (c.clientKey !== undefined && typeof c.clientKey !== "function") throw new IssuerConfigError("rateLimit.clientKey must be a function");
+  return {
+    limiter: c.limiter ?? memoryRateLimiter(),
+    challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
+    manifest: rule("manifest", c.manifest, DEFAULT_RATE_LIMITS.manifest),
+    capability: rule("capability", c.capability, DEFAULT_RATE_LIMITS.capability),
+    clientKey: c.clientKey ?? defaultClientKey,
   };
 }

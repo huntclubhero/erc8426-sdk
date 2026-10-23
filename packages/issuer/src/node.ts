@@ -1,5 +1,6 @@
 import { MAX_BODY_BYTES } from "./http.js";
 import type { Issuer } from "./issuer.js";
+import { REMOTE_ADDRESS_HEADER } from "./rateLimit.js";
 
 /// Node and Express adapters for the fetch handler, typed structurally so
 ///  this package never imports `node:http` or `express` at runtime.
@@ -15,6 +16,9 @@ export interface NodeRequestLike extends AsyncIterable<Uint8Array | string> {
   /// Set when a body parser (express.json(), express.urlencoded()) already
   ///  consumed the stream.
   body?: unknown;
+  /// The connection, for the peer address the rate limiter keys by when no
+  ///  proxy header names the client.
+  socket?: { remoteAddress?: string | undefined };
 }
 
 /// The parts of `http.ServerResponse` the adapter writes.
@@ -45,6 +49,10 @@ export async function toFetchRequest(req: NodeRequestLike, origin = "http://loca
     if (value === undefined || name.startsWith(":") || SKIP_HEADERS.has(name.toLowerCase())) continue;
     headers.set(name, Array.isArray(value) ? value.join(", ") : value);
   }
+  // The socket's peer address, under a header the adapter owns: a value a
+  // client sent under this name is dropped, never trusted.
+  headers.delete(REMOTE_ADDRESS_HEADER);
+  if (req.socket?.remoteAddress) headers.set(REMOTE_ADDRESS_HEADER, req.socket.remoteAddress);
   const url = new URL(req.originalUrl ?? req.url ?? "/", origin);
   if (method === "GET" || method === "HEAD") return new Request(url, { method, headers });
 
