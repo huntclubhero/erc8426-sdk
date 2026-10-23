@@ -2,13 +2,18 @@ import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
 
 import {
+  CANONICAL_WALLET_PASS_ERROR_CODES,
+  WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
   actionUrn,
   assetId,
   buildChallenge,
+  canonicalErrorCode,
   createManifest,
   decodeBase64Url,
   encodeBase64Url,
+  isDeprecatedWalletPassErrorCode,
+  isWalletPassErrorCode,
   normalizeTokenId,
   parseActionUrn,
   parseAssetId,
@@ -19,6 +24,7 @@ import {
   readProofHeaders,
   statusForError,
   tokenRef,
+  type WalletPassErrorCode,
 } from "@erc8426/core";
 
 // The literals of the spec's worked example (Example challenge).
@@ -159,8 +165,50 @@ describe("proof headers", () => {
 
 describe("statuses", () => {
   it("reserves 403 for the entitlement refusal alone", () => {
-    const codes = ["invalid_message", "domain_mismatch", "nonce_invalid", "challenge_expired", "not_yet_valid", "binding_mismatch", "signature_invalid", "not_owner", "read_failed", "proof_required", "malformed_proof", "invalid_address", "invalid_token", "unknown_action", "link_invalid", "not_found"] as const;
-    expect(codes.filter((c) => statusForError(c) === 403)).toEqual(["not_owner"]);
+    expect(WALLET_PASS_ERROR_CODES.filter((c) => statusForError(c) === 403)).toEqual(["not_owner"]);
     expect(statusForError("read_failed")).toBe(503);
+  });
+
+  it("maps every code to the status of the spec's refusal table", () => {
+    const table: Record<string, number> = {
+      invalid_request: 400,
+      invalid_message: 400,
+      domain_mismatch: 400,
+      binding_mismatch: 400,
+      proof_required: 401,
+      nonce_invalid: 401,
+      challenge_expired: 401,
+      signature_invalid: 401,
+      not_owner: 403,
+      unknown_capability: 404,
+      insufficient_balance: 409,
+      rate_limited: 429,
+      read_failed: 503,
+    };
+    for (const [code, status] of Object.entries(table)) expect(statusForError(code as WalletPassErrorCode), code).toBe(status);
+    // Pending addition to the table (PR #2036): a Not Before in the future is a failed freshness check.
+    expect(statusForError("not_yet_valid")).toBe(401);
+    for (const code of Object.keys(table)) expect(CANONICAL_WALLET_PASS_ERROR_CODES).toContain(code);
+  });
+
+  it("accepts the 0.2.x names as deprecated aliases of the spec's codes", () => {
+    const aliases: Record<string, [string, number]> = {
+      malformed_proof: ["invalid_request", 400],
+      invalid_address: ["invalid_request", 400],
+      invalid_token: ["invalid_request", 400],
+      link_invalid: ["unknown_capability", 404],
+      not_found: ["unknown_capability", 404],
+    };
+    for (const [old, [canonical, status]] of Object.entries(aliases)) {
+      expect(isWalletPassErrorCode(old)).toBe(true);
+      expect(isDeprecatedWalletPassErrorCode(old)).toBe(true);
+      expect(canonicalErrorCode(old as WalletPassErrorCode)).toBe(canonical);
+      expect(statusForError(old as WalletPassErrorCode)).toBe(status);
+      // The SDK never emits them.
+      expect(CANONICAL_WALLET_PASS_ERROR_CODES).not.toContain(old);
+    }
+    expect(isDeprecatedWalletPassErrorCode("not_owner")).toBe(false);
+    expect(canonicalErrorCode("not_owner")).toBe("not_owner");
+    expect(isWalletPassErrorCode("made_up")).toBe(false);
   });
 });

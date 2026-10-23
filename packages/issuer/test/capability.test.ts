@@ -55,7 +55,7 @@ describe("capability links (The capability configuration)", () => {
     expect(await h.issuer.onTransfer(TOKEN_ID, seller.address, buyer.address)).toBe(true);
     const dead = await h.post(links.feed!);
     expect(dead.status).toBe(404);
-    expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
+    expect(((await dead.json()) as { error: string }).error).toBe("unknown_capability");
     // Links minted at the transfer are issued to no one until the buyer
     // claims: 404, since no verified account was refused.
     const minted = new URL((await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!).pathname;

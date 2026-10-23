@@ -82,7 +82,7 @@ describe("challenge endpoint", () => {
     const h = buildHarness();
     const missing = await h.get("/wallet-pass/412/challenge");
     expect(missing.status).toBe(400);
-    expect(((await missing.json()) as { error: string }).error).toBe("invalid_address");
+    expect(((await missing.json()) as { error: string }).error).toBe("invalid_request");
     expect((await h.get("/wallet-pass/412/challenge?address=not-an-address")).status).toBe(400);
   });
 
@@ -93,11 +93,11 @@ describe("challenge endpoint", () => {
     expect(((await res.json()) as { error: string }).error).toBe("unknown_action");
   });
 
-  it("refuses an invalid token id with 400 invalid_token", async () => {
+  it("refuses an invalid token id with 400 invalid_request", async () => {
     const h = buildHarness();
     const res = await h.get(`/wallet-pass/abc/challenge?address=${newSigner().address}`);
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("invalid_token");
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
   });
 });
 
@@ -247,7 +247,7 @@ describe("signed action (the two-check floor)", () => {
     const notHex = await primed(h);
     const bad = await h.post(ACTION_PATH("feed"), { message: notHex.message, signature: "nothex" });
     expect(bad.status).toBe(400);
-    expect(((await bad.json()) as { error: string }).error).toBe("malformed_proof");
+    expect(((await bad.json()) as { error: string }).error).toBe("invalid_request");
   });
 
   it("the fresh read closes the transfer window: a token sold after the challenge stops acting", async () => {

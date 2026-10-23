@@ -270,7 +270,7 @@ describe("transfer", () => {
 
     const dead = await post(ownerLinks.feed!);
     expect(dead.status).toBe(404);
-    expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
+    expect(((await dead.json()) as { error: string }).error).toBe("unknown_capability");
 
     const old = (await client.getManifest(token(id), { signer: owner.account }).catch((e: unknown) => e)) as WalletPassClientError;
     expect(old.status).toBe(403);

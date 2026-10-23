@@ -397,10 +397,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       try {
         tokenId = normalizeTokenId(input.tokenId);
       } catch {
-        throw new IssuerError("invalid_token", `invalid token id: ${String(input.tokenId)}`);
+        throw new IssuerError("invalid_request", `invalid token id: ${String(input.tokenId)}`);
       }
       if (typeof input.account !== "string" || !isAddress(input.account, { strict: false })) {
-        throw new IssuerError("invalid_address", "address must be a valid account address");
+        throw new IssuerError("invalid_request", "address must be a valid account address");
       }
       const action = input.action ?? ACQUIRE_ACTION;
       if (action !== ACQUIRE_ACTION && action !== ROTATE_ACTION && !Object.hasOwn(config.actions, action)) {
@@ -500,7 +500,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         from = BigInt(normalizeTokenId(fromTokenId));
         to = toTokenId === undefined ? from : BigInt(normalizeTokenId(toTokenId));
       } catch {
-        throw new IssuerError("invalid_token", "invalid token id in pass update");
+        throw new IssuerError("invalid_request", "invalid token id in pass update");
       }
       if (to < from) throw new IssuerError("invalid_request", "BatchPassUpdate range is inverted: toTokenId < fromTokenId");
       let ids: string[];
@@ -571,7 +571,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     chain,
     route,
     async handler(request) {
-      return (await route(request)) ?? new Response(JSON.stringify({ error: "not_found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+      return (await route(request)) ?? new Response(JSON.stringify({ error: "unknown_capability" }), { status: 404, headers: { "Content-Type": "application/json" } });
     },
     passUri,
     challengeUri,

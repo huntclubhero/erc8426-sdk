@@ -40,8 +40,9 @@ export function describeError(error: Error): string {
         return "The pass server had a problem. Try again shortly.";
       case "action_refused":
         return "The issuer refused this request.";
+      case "unknown_capability":
       case "not_found":
-        return "This token does not exist.";
+        return "This token does not exist, or its pass link is no longer valid.";
       case "unsupported":
         return "This contract does not offer wallet passes.";
     }

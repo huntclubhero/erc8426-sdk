@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 (unreleased; every package to 0.3.0, contracts to 0.2.0)
+
+Mainnet hardening and alignment with the current ERC-8426 draft (ethereum/ERCs PR #2036).
+
+- `@erc8426/core`: the refusal codes follow the spec's refusal table. New codes `unknown_capability` (404), `insufficient_balance` (409) and `rate_limited` (429). `malformed_proof`, `invalid_address` and `invalid_token` collapse into `invalid_request` (400); `link_invalid` and `not_found` collapse into `unknown_capability` (404). `not_yet_valid` (401) stays and is being added to the table in PR #2036. The five retired names remain in `WalletPassErrorCode` as deprecated aliases for one minor version: `isWalletPassErrorCode` accepts them, `statusForError` maps them to the status of their replacement, and the new `canonicalErrorCode` resolves them. The issuer no longer emits them. `CANONICAL_WALLET_PASS_ERROR_CODES` lists what the SDK emits; `DEPRECATED_WALLET_PASS_ERROR_CODES` maps the aliases.
+- `@erc8426/issuer`: every 400 for a malformed address, token id or proof header is `invalid_request`; every 404 (a rotated or unknown link, a download link, a nonexistent token in the public configuration, an unknown route) is `unknown_capability`.
+- `@erc8426/client`: a code from a 0.2.x issuer is reported under the spec's name (`malformed_proof` arrives as `invalid_request`) with the string the issuer sent in `serverCode`. A reverted `passURI`, `tokenURI` or `ownerOf` read (a token that does not exist or was burned) is now `unknown_capability` with `source: "chain"`, where it was `not_found`; a 404 with no recognizable body is `unknown_capability` too. `@erc8426/react`'s `describeError` wording follows.
+
 ## 0.2.4 (google; every package republished at 0.2.4)
 
 Android notifications, from the WALLETCHI deployment (2026-10-19): the provider sent every Google Wallet message as `TEXT`, which only shows inside the saved pass, so Android holders were never notified of a deadline reminder.

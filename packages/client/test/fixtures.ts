@@ -174,6 +174,8 @@ export function fakeChain(opts: { chainId?: number; contracts: Record<string, Fa
 export interface IssuerFaults {
   /// Answer a garbage proof with 403 (reserved for not-entitled accounts).
   garbageProof403?: boolean;
+  /// Answer with the 0.2.x code names (malformed_proof, invalid_address, not_found).
+  legacyCodes?: boolean;
   /// Put acquisition URLs in the 401 body.
   leakUrlsIn401?: boolean;
   /// Issue the same nonce every time.
@@ -271,7 +273,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
     const req = new Request(input, init);
     const url = new URL(req.url);
     requests.push({ method: req.method, url: req.url, headers: req.headers });
-    if (url.origin !== new URL(base).origin) return json(404, { error: "not_found" });
+    if (url.origin !== new URL(base).origin) return json(404, { error: "unknown_capability" });
     const path = url.pathname;
     let m: RegExpExecArray | null;
 
@@ -293,7 +295,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
           account = getAddress("0x000000000000000000000000000000000000dEaD");
         } else account = getAddress(address);
       } catch {
-        return json(400, { error: "invalid_address" });
+        return json(400, { error: faults.legacyCodes ? "invalid_address" : "invalid_request" });
       }
       const nonce = faults.staticNonce ? "staticnonce1234" : generateNonce();
       nonces.add(nonce);
@@ -313,7 +315,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
 
     if ((m = /^\/pass\/([0-9]+)$/.exec(path)) && req.method === "GET") {
       const tokenId = m[1]!;
-      if (opts.ownerOf(tokenId) === null) return json(404, { error: "not_found" });
+      if (opts.ownerOf(tokenId) === null) return json(404, { error: faults.legacyCodes ? "not_found" : "unknown_capability" });
       if (opts.mode === "public" || faults.noGate) return json(200, manifestFor(tokenId), { "cache-control": "no-store" });
       const challenge = `${base}/pass/${tokenId}/challenge`;
       const proof = readProofHeaders(req.headers);
@@ -323,7 +325,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
         return json(401, body);
       }
       if (proof.kind === "malformed") {
-        return json(faults.garbageProof403 ? 403 : 400, { error: "malformed_proof" });
+        return json(faults.garbageProof403 ? 403 : 400, { error: faults.legacyCodes ? "malformed_proof" : "invalid_request" });
       }
       const result = await verify(proof.proof.message, proof.proof.signature, tokenId, "acquire");
       if (!result.ok) {
@@ -358,7 +360,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
       return json(200, { ok: true, rotated: true, ...manifestFor(tokenId) }, { "cache-control": "no-store" });
     }
 
-    return json(404, { error: "not_found" });
+    return json(404, { error: "unknown_capability" });
   };
 
   return {

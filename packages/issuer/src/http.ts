@@ -228,18 +228,18 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       } catch {
         return error("read_failed");
       }
-      if (owner === null) return error("not_found", { message: "token does not exist" });
+      if (owner === null) return error("unknown_capability", { message: "token does not exist" });
       const record = await x.recordIssuance(tokenId, owner);
       return json(200, await x.buildManifest(record, owner));
     }
 
     // Gated configuration.
     const challenge = x.challengeUri(tokenId);
-    if (proofHeadersTooLarge(request.headers)) return error("malformed_proof", { message: "proof header too large" });
+    if (proofHeadersTooLarge(request.headers)) return error("invalid_request", { message: "proof header too large" });
     const proof = readProofHeaders(request.headers);
     // No proof: 401, the challenge URI, and no acquisition URLs.
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge });
-    if (proof.kind === "malformed") return error("malformed_proof", { message: `proof headers could not be decoded (${proof.reason})` });
+    if (proof.kind === "malformed") return error("invalid_request", { message: `proof headers could not be decoded (${proof.reason})` });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
@@ -255,7 +255,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function challenge(url: URL, tokenId: string): Promise<Response> {
     const address = url.searchParams.get("address");
     if (!address || !isAddress(address, { strict: false })) {
-      return error("invalid_address", { message: "the address query parameter must be a valid account address" });
+      return error("invalid_request", { message: "the address query parameter must be a valid account address" });
     }
     try {
       return json(200, await x.issueChallenge({ tokenId, account: address, action: url.searchParams.get("action") ?? ACQUIRE_ACTION }));
@@ -276,7 +276,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const challengeUri = x.challengeUri(tokenId, action);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("malformed_proof");
+    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
     const result = await x.authorize({ ...proof.proof, tokenId, action });
     if (!result.ok) return refuse(result.error, challengeUri);
     return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
@@ -289,7 +289,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const challengeUri = x.challengeUri(tokenId, ROTATE_ACTION);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("malformed_proof");
+    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
     // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
     if (!result.ok) return refuse(result.error, challengeUri);
@@ -329,7 +329,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // state change. Devices, previewers and crawlers prefetch pass links.
   async function describeLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("link_invalid");
+    if (!resolved) return error("unknown_capability");
     const { binding, def } = resolved;
     const ctx: LinkPageContext = {
       token: x.token(binding.tokenId),
@@ -356,7 +356,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // to, runs unconditionally.
   async function followLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("link_invalid");
+    if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
     const body = await readBody(request);
     if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
@@ -366,7 +366,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const holder = record.lastIssuedTo;
     // A link minted since a transfer and not yet issued to anyone authorizes
     // no one. It is not a verified non-entitled account, so not a 403.
-    if (!holder) return error("link_invalid");
+    if (!holder) return error("unknown_capability");
     let entitled;
     try {
       entitled = await x.entitled(binding.tokenId, holder, binding.name);
@@ -392,10 +392,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // capability URL, re-checked against a fresh entitlement read.
   async function download(linkToken: string): Promise<Response> {
     const resolved = await x.resolveLink(linkToken, "download");
-    if (!resolved || !resolved.record.lastIssuedTo) return error("link_invalid");
+    if (!resolved || !resolved.record.lastIssuedTo) return error("unknown_capability");
     const { binding, record } = resolved;
     const provider = x.providers.find((p) => p.format === binding.name) as PassFileProvider | undefined;
-    if (!provider || typeof provider.passFile !== "function") return error("link_invalid");
+    if (!provider || typeof provider.passFile !== "function") return error("unknown_capability");
     const holder = record.lastIssuedTo!;
     let entitled;
     try {
@@ -426,7 +426,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function dispatch(request: Request, url: URL, segments: string[]): Promise<Response> {
     const method = request.method.toUpperCase();
     const [first, second, third] = segments;
-    if (first === undefined) return error("not_found");
+    if (first === undefined) return error("unknown_capability");
 
     if (first === "links" && segments.length === 2) {
       if (method === "GET") return describeLink(request, second!);
@@ -445,7 +445,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     }
 
     const tokenId = parseTokenId(first);
-    if (tokenId === null) return error("invalid_token", { message: `invalid token id: ${first}` });
+    if (tokenId === null) return error("invalid_request", { message: `invalid token id: ${first}` });
 
     if (segments.length === 1) {
       return method === "GET" ? manifest(request, tokenId) : methodNotAllowed("GET, OPTIONS");
@@ -459,7 +459,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (segments.length === 3 && second === "actions") {
       return method === "POST" ? signedAction(request, tokenId, third!) : methodNotAllowed("POST, OPTIONS");
     }
-    return error("not_found");
+    return error("unknown_capability");
   }
 
   return async function route(request: Request): Promise<Response | null> {

@@ -96,7 +96,29 @@ All under `basePath` (default `/wallet-pass`). Every response carries `Cache-Con
 | `POST /links/:link` | Perform a capability link's action. |
 | `GET /passes/:link` | Download a pass file from a file provider (Apple `.pkpass`). `HEAD` answers the same headers with no body. |
 
-Status codes follow the spec: 400 malformed or mis-scoped, 401 failed possession or freshness check (always with a `challenge` member), 403 only for a verified proof from a non-entitled account, 404 unknown or rotated link, 503 `read_failed` with `Retry-After` when the chain read could not be taken.
+Refusals carry the `error` codes of the spec's refusal table (Refusal responses), with the listed status. 401s always carry a `challenge` member; 429 and 503 carry `Retry-After`.
+
+| `error` | Status | When | Retry |
+| :- | :- | :- | :- |
+| `invalid_request` | 400 | Malformed request: a bad token id or `address`, a proof header that cannot be decoded, a body that is not JSON | After correcting it |
+| `invalid_message` | 400 | The presented message is not a parseable challenge, or exceeds the size bound | Fresh challenge |
+| `domain_mismatch` | 400 | The challenge names another verifier | Fresh challenge |
+| `binding_mismatch` | 400 | The proof or link does not bind this exact token and action | Fresh challenge |
+| `unknown_action` | 400 | The action is not registered (SDK code, outside the table) | No |
+| `proof_required` | 401 | No control proof was presented | Fresh challenge |
+| `nonce_invalid` | 401 | Unknown or already spent nonce | Fresh challenge |
+| `challenge_expired` | 401 | Expiration Time has passed | Fresh challenge |
+| `not_yet_valid` | 401 | Not Before is in the future (being added to the table in PR #2036) | Fresh challenge |
+| `signature_invalid` | 401 | The signature is not valid for the claimed account | Fresh challenge |
+| `not_owner` | 403 | A verified proof from an account that is not entitled (fresh read). Reserved: nothing else answers 403 | No |
+| `unknown_capability` | 404 | The capability URL, download link, token or route does not resolve, for example after rotation | No |
+| `method_not_allowed` | 405 | Wrong method (SDK code) | No |
+| `insufficient_balance` | 409 | An account the token controls holds less than the action spends (raise it from an action with `ActionError`) | After funding |
+| `rate_limited` | 429 | Too many attempts for this client, token or action | After `Retry-After` |
+| `action_failed`, `internal_error` | 500 | The action threw, or the issuer did (SDK codes) | Later |
+| `read_failed` | 503 | The fresh entitlement read could not be taken | After `Retry-After` |
+
+Until 0.4.0 the client and `isWalletPassErrorCode` also accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
 
 ## Security model
 

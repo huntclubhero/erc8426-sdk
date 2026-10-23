@@ -342,7 +342,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
   }
 
   /// Every token read goes through here so a nonexistent or burned token is
-  ///  a typed `not_found` and an RPC failure a retryable `network` error,
+  ///  a typed `unknown_capability` and an RPC failure a retryable `network` error,
   ///  never a raw viem error.
   async function readToken<T>(what: string, read: () => Promise<T>): Promise<T> {
     try {
