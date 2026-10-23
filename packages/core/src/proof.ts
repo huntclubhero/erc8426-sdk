@@ -1,7 +1,7 @@
 import type { Hex } from "viem";
 
 import { decodeBase64Url, encodeBase64Url } from "./base64url.js";
-import { PROOF_HEADER, SIGNATURE_HEADER } from "./constants.js";
+import { LEGACY_PROOF_HEADER, LEGACY_SIGNATURE_HEADER, PROOF_HEADER, SIGNATURE_HEADER } from "./constants.js";
 
 /// A signed challenge: the exact message text and its signature.
 export interface ControlProof {
@@ -9,13 +9,28 @@ export interface ControlProof {
   signature: Hex;
 }
 
-/// The two headers that carry a control proof on a gated manifest request.
-///  The message is base64url so the multi-line challenge fits in a header.
-export function proofHeaders(proof: ControlProof): Record<string, string> {
-  return {
-    [PROOF_HEADER]: encodeBase64Url(proof.message),
+export interface ProofHeadersOptions {
+  /// Also send the pre-0.3.0 X- names, so an issuer that has not moved to
+  ///  the RFC 6648 names still reads the proof. Default true for this
+  ///  release; a later minor flips the default and then drops the names.
+  legacy?: boolean;
+}
+
+/// The headers that carry a control proof on a gated manifest request: the
+///  message base64url encoded (so the multi-line challenge fits in a header)
+///  and the signature as hex, under `Wallet-Pass-Proof` and
+///  `Wallet-Pass-Signature`, and by default under the X- names too.
+export function proofHeaders(proof: ControlProof, options: ProofHeadersOptions = {}): Record<string, string> {
+  const encoded = encodeBase64Url(proof.message);
+  const headers: Record<string, string> = {
+    [PROOF_HEADER]: encoded,
     [SIGNATURE_HEADER]: proof.signature,
   };
+  if (options.legacy !== false) {
+    headers[LEGACY_PROOF_HEADER] = encoded;
+    headers[LEGACY_SIGNATURE_HEADER] = proof.signature;
+  }
+  return headers;
 }
 
 type HeaderSource = Headers | Record<string, string | string[] | undefined>;
@@ -34,12 +49,15 @@ export type ReadProofResult =
   | { kind: "malformed"; reason: "encoding" | "signature" | "partial" }
   | { kind: "present"; proof: ControlProof };
 
-/// Read a control proof from request headers. `absent` means neither header
-///  was sent (answer 401 proof_required); `malformed` means the proof cannot
-///  be decoded (answer 400); `present` still has to pass the floor.
+/// Read a control proof from request headers. `absent` means no proof header
+///  was sent under either name (answer 401 proof_required); `malformed` means
+///  the proof cannot be decoded (answer 400); `present` still has to pass the
+///  floor. Each of the two values is read from its RFC 6648 name first and
+///  from its X- name only when the new name is not there, so when a client
+///  sends both the new name wins.
 export function readProofHeaders(headers: HeaderSource): ReadProofResult {
-  const encoded = readHeader(headers, PROOF_HEADER);
-  const signature = readHeader(headers, SIGNATURE_HEADER);
+  const encoded = readHeader(headers, PROOF_HEADER) ?? readHeader(headers, LEGACY_PROOF_HEADER);
+  const signature = readHeader(headers, SIGNATURE_HEADER) ?? readHeader(headers, LEGACY_SIGNATURE_HEADER);
   if (encoded === undefined && signature === undefined) return { kind: "absent" };
   if (encoded === undefined || signature === undefined) return { kind: "malformed", reason: "partial" };
   if (!/^0x[0-9a-fA-F]+$/.test(signature) || signature.length % 2 !== 0) {

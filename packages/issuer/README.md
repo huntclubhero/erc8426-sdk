@@ -88,7 +88,7 @@ All under `basePath` (default `/wallet-pass`). Every response carries `Cache-Con
 
 | Route | Purpose |
 | :- | :- |
-| `GET /:tokenId` | The manifest. Public: served to anyone. Gated: 401 `{ error: "proof_required", challenge }` without a proof, the manifest with a valid `acquire` proof in `X-Wallet-Pass-Proof` / `X-Wallet-Pass-Signature`. |
+| `GET /:tokenId` | The manifest. Public: served to anyone. Gated: 401 `{ error: "proof_required", challenge }` without a proof, the manifest with a valid `acquire` proof in `Wallet-Pass-Proof` / `Wallet-Pass-Signature` (the pre-0.3.0 `X-` names are still read; the new name wins when both are sent). Served as `application/json` with `version: 1`. |
 | `GET /:tokenId/challenge?address=&action=` | A fresh ERC-4361 challenge. `action` defaults to `acquire`. 400 on a missing or invalid address or an unknown action. |
 | `POST /:tokenId/actions/:action` | Signed action. Body `{ message, signature, params? }` (or the proof headers). |
 | `POST /:tokenId/rotate` | Rotate on a signed `rotate` proof from the holder of record (or an account entitled to acquire). Answers `{ ok, rotated }` only, never the manifest: the holder re-adds the new pass with an acquire proof. |

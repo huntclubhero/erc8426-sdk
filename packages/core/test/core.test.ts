@@ -3,7 +3,13 @@ import { toFunctionSelector } from "viem";
 
 import {
   CANONICAL_WALLET_PASS_ERROR_CODES,
+  LEGACY_PROOF_HEADER,
+  LEGACY_SIGNATURE_HEADER,
+  MANIFEST_VERSION,
   MAX_TOKEN_ID,
+  PROOF_HEADER,
+  PROOF_HEADER_NAMES,
+  SIGNATURE_HEADER,
   WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
   actionUrn,
@@ -200,9 +206,22 @@ describe("manifest", () => {
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });
     expect(ms.ok && ms.issues.some((i) => i.level === "warning")).toBe(true);
   });
+  it("carries an optional integer version, tolerating its absence", () => {
+    expect(parseManifest(good)).toMatchObject({ ok: true, manifest: { formats: good.formats } });
+    expect((parseManifest(good) as { manifest: { version?: number } }).manifest.version).toBeUndefined();
+    const v1 = parseManifest({ ...good, version: 1 });
+    expect(v1.ok && v1.manifest.version).toBe(1);
+    expect(v1.issues).toEqual([]);
+    for (const bad of ["1", 0, -1, 1.5, null, {}]) expect(parseManifest({ ...good, version: bad }).ok, String(bad)).toBe(false);
+    const newer = parseManifest({ ...good, version: 2 });
+    expect(newer.ok).toBe(true);
+    expect(newer.issues.some((i) => i.level === "warning" && i.path === "version")).toBe(true);
+    expect(MANIFEST_VERSION).toBe(1);
+  });
   it("creates manifests and reads the metadata mirror", () => {
     const m = createManifest({ apple: "https://a.example/p.pkpass", google: "" }, new Date(1754500000000));
-    expect(m).toEqual({ formats: { apple: "https://a.example/p.pkpass" }, updatedAt: 1754500000 });
+    expect(m).toEqual({ version: 1, formats: { apple: "https://a.example/p.pkpass" }, updatedAt: 1754500000 });
+    expect(parseManifest(m)).toMatchObject({ ok: true, issues: [] });
     expect(readMetadataMirror({ name: "x" })).toBeNull();
     expect(readMetadataMirror({ wallet_pass: good })?.ok).toBe(true);
   });
@@ -214,8 +233,37 @@ describe("proof headers", () => {
     const read = readProofHeaders(headers);
     expect(read).toEqual({ kind: "present", proof: { message: SPEC_EXAMPLE, signature: "0xabcd" } });
     expect(readProofHeaders({})).toEqual({ kind: "absent" });
+    expect(readProofHeaders({ "wallet-pass-signature": "0xab" }).kind).toBe("malformed");
     expect(readProofHeaders({ "x-wallet-pass-signature": "0xab" }).kind).toBe("malformed");
-    expect(readProofHeaders({ "x-wallet-pass-proof": "e30", "x-wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
+    expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
+  });
+  it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
+    expect(PROOF_HEADER).toBe("Wallet-Pass-Proof");
+    expect(SIGNATURE_HEADER).toBe("Wallet-Pass-Signature");
+    expect(LEGACY_PROOF_HEADER).toBe("X-Wallet-Pass-Proof");
+    expect(LEGACY_SIGNATURE_HEADER).toBe("X-Wallet-Pass-Signature");
+    const sent = proofHeaders({ message: "m", signature: "0xabcd" });
+    expect(sent).toEqual({
+      "Wallet-Pass-Proof": encodeBase64Url("m"),
+      "Wallet-Pass-Signature": "0xabcd",
+      "X-Wallet-Pass-Proof": encodeBase64Url("m"),
+      "X-Wallet-Pass-Signature": "0xabcd",
+    });
+    expect(Object.keys(proofHeaders({ message: "m", signature: "0xabcd" }, { legacy: false }))).toEqual(["Wallet-Pass-Proof", "Wallet-Pass-Signature"]);
+    expect([...PROOF_HEADER_NAMES]).toEqual(["Wallet-Pass-Proof", "Wallet-Pass-Signature", "X-Wallet-Pass-Proof", "X-Wallet-Pass-Signature"]);
+  });
+  it("reads a proof under either name set, and the new name wins when both are present", () => {
+    const enc = encodeBase64Url("new");
+    const old = encodeBase64Url("old");
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
+    expect(readProofHeaders({ "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "old", signature: "0x02" } });
+    expect(
+      readProofHeaders(new Headers({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })),
+    ).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
+    // The new name wins per header: garbage under it is not rescued by a good X- value.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": "!!", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "malformed", reason: "encoding" });
+    // Mixed names still make one proof.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x02" } });
   });
   it("encodes base64url without padding and survives unicode", () => {
     const s = "café \u{1F43E}";

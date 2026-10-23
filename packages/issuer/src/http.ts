@@ -1,9 +1,8 @@
 import { isAddress, isAddressEqual, type Address, type Hex } from "viem";
 import {
   ACQUIRE_ACTION,
-  PROOF_HEADER,
+  PROOF_HEADER_NAMES,
   ROTATE_ACTION,
-  SIGNATURE_HEADER,
   normalizeTokenId,
   readProofHeaders,
   type AuthError,
@@ -112,10 +111,11 @@ async function readBody(request: Request): Promise<Json | null> {
 
 type ProofRead = { kind: "absent" } | { kind: "malformed" } | { kind: "present"; proof: ControlProof };
 
-/// A proof from the two headers (the Gated acquisition transport), or, for
-///  POST routes, from a JSON body `{ message, signature }`.
+/// A proof from the proof headers (the Gated acquisition transport, under
+///  the RFC 6648 names or the X- names), or, for POST routes, from a JSON
+///  body `{ message, signature }`.
 function proofHeadersTooLarge(headers: Headers): boolean {
-  return (headers.get(PROOF_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS || (headers.get(SIGNATURE_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS;
+  return PROOF_HEADER_NAMES.some((name) => (headers.get(name)?.length ?? 0) > MAX_PROOF_HEADER_CHARS);
 }
 
 function readProof(request: Request, body: Json | null): ProofRead {
@@ -168,9 +168,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       headers: {
         ...cors,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        // The proof travels in these two headers, so a browser client can only
-        // resolve a gated manifest if the preflight admits them.
-        "Access-Control-Allow-Headers": `Content-Type, ${PROOF_HEADER}, ${SIGNATURE_HEADER}`,
+        // The proof travels in these headers (new names and the X- names a
+        // 0.2.x client sends), so a browser client can only resolve a gated
+        // manifest if the preflight admits them.
+        "Access-Control-Allow-Headers": `Content-Type, ${PROOF_HEADER_NAMES.join(", ")}`,
         "Access-Control-Max-Age": String(config.cors ? config.cors.maxAgeSeconds : 600),
       },
     });

@@ -184,7 +184,14 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     return finish();
   }
 
+  // The manifest MUST be served as application/json (any parameters allowed).
+  const checkManifestMediaType = (headers: Headers, idPrefix: string) => {
+    const type = (headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    record(`${idPrefix}.media-type`, "The manifest is served as application/json", S.manifest, "MUST", type === "application/json" ? "pass" : "fail", `Content-Type: ${type || "(none)"}`);
+  };
+
   // Manifest validation shared by the public response and the owner's gated one.
+  // `version` is optional (1 when present) and its absence is tolerated.
   const checkManifest = async (body: unknown, idPrefix: string): Promise<PassManifest | null> => {
     const parsed = parseManifest(body);
     if (!parsed.ok) {
@@ -193,7 +200,14 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       return null;
     }
     const platforms = Object.keys(parsed.manifest.formats).join(", ");
-    record(`${idPrefix}.valid`, "The manifest has the required shape (formats, google Save link, updatedAt in seconds)", S.manifest, "MUST", "pass", `formats: ${platforms}`);
+    record(
+      `${idPrefix}.valid`,
+      "The manifest has the required shape (formats, google Save link, updatedAt in seconds)",
+      S.manifest,
+      "MUST",
+      "pass",
+      `formats: ${platforms}; version: ${parsed.manifest.version ?? "(absent, tolerated)"}`,
+    );
     const warnings = parsed.issues.filter((i) => i.level === "warning");
     record(
       `${idPrefix}.lint`,
@@ -248,6 +262,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   if (first.status === 200) {
     report.configuration = "public";
     record("manifest.reachable", "The manifest endpoint answers", S.manifest, "MUST", "pass", "200 without a proof: public configuration");
+    checkManifestMediaType(first.headers, "manifest");
     await checkManifest(first.body, "manifest");
   } else if (first.status === 401) {
     report.configuration = "gated";
@@ -499,6 +514,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       if (r.status === 200) {
         const cc = (r.headers.get("cache-control") ?? "").toLowerCase();
         record(ownerIds[1]![0], ownerIds[1]![1], S.gated, "MUST", /\bno-store\b/.test(cc) ? "pass" : "fail", `Cache-Control: ${cc || "(none)"}`);
+        checkManifestMediaType(r.headers, "gated.manifest");
         await checkManifest(r.body, "gated.manifest");
       } else {
         record(ownerIds[1]![0], ownerIds[1]![1], S.gated, "MUST", "skip", "owner proof was not accepted");

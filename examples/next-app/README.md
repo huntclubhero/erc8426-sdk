@@ -58,7 +58,7 @@ sequenceDiagram
   U->>I: GET challenge?address=0x...
   I->>U: SIWE message (domain, token CAIP-19, acquire, nonce, expiry)
   Note over U: SDK checks the scope, then the wallet signs
-  U->>I: GET /wallet-pass/id + X-Wallet-Pass-Proof/Signature
+  U->>I: GET /wallet-pass/id + Wallet-Pass-Proof/Signature
   I->>C: ownerOf(id) (fresh)
   I->>U: 200 manifest, Cache-Control no-store
 ```

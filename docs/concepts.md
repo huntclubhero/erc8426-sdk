@@ -86,7 +86,7 @@ sequenceDiagram
     CL->>CL: check scope: host, address, chain, token, action, expiry
     CL->>U: sign
     U->>CL: signature
-    CL->>I: GET manifest with X-Wallet-Pass-Proof and X-Wallet-Pass-Signature
+    CL->>I: GET manifest with Wallet-Pass-Proof and Wallet-Pass-Signature
     I->>I: spend nonce, verify every field and signature
     I->>CH: fresh ownerOf (check 2)
     CH->>I: 0xU

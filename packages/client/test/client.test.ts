@@ -160,6 +160,29 @@ describe("public manifest", () => {
     await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "unknown_capability", status: 404 });
   });
 
+  it("sends the proof under the RFC 6648 names and the X- names, so a 0.2.x issuer still resolves the manifest", async () => {
+    const { client, owner, issuer } = setup("gated");
+    const result = await client.getManifest({ contract: CONTRACT, tokenId: 1 }, { signer: owner });
+    expect(result.configuration).toBe("gated");
+    const proved = issuer.requests.find((r) => r.headers.get("wallet-pass-proof") !== null)!;
+    expect(proved).toBeDefined();
+    expect(proved.headers.get("wallet-pass-signature")).toMatch(/^0x/);
+    expect(proved.headers.get("x-wallet-pass-proof")).toBe(proved.headers.get("wallet-pass-proof"));
+    expect(proved.headers.get("x-wallet-pass-signature")).toBe(proved.headers.get("wallet-pass-signature"));
+    // An issuer that reads only the X- names.
+    const legacy = setup("gated", { faults: { legacyHeadersOnly: true } });
+    expect((await legacy.client.getManifest({ contract: CONTRACT, tokenId: 1 }, { signer: legacy.owner })).configuration).toBe("gated");
+  });
+
+  it("tolerates a manifest with no version and reads one that carries it", async () => {
+    const { client } = setup("public");
+    expect((await client.getManifest({ contract: CONTRACT, tokenId: 1 })).manifest.version).toBeUndefined();
+    const versioned = setup("public", { faults: { manifestVersion: 1 } });
+    expect((await versioned.client.getManifest({ contract: CONTRACT, tokenId: 1 })).manifest.version).toBe(1);
+    const broken = setup("public", { faults: { manifestVersion: "1" } });
+    await expect(broken.client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "invalid_manifest" });
+  });
+
   it("reports a 0.2.x issuer's retired code names under the spec's names, keeping the sent string in serverCode", async () => {
     const issuer = fakeIssuer({ contract: CONTRACT, mode: "public", ownerOf: () => null, faults: { legacyCodes: true } });
     const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });
