@@ -88,15 +88,41 @@ All under `basePath` (default `/wallet-pass`). Every response carries `Cache-Con
 
 | Route | Purpose |
 | :- | :- |
-| `GET /:tokenId` | The manifest. Public: served to anyone. Gated: 401 `{ error: "proof_required", challenge }` without a proof, the manifest with a valid `acquire` proof in `X-Wallet-Pass-Proof` / `X-Wallet-Pass-Signature`. |
+| `GET /:tokenId` | The manifest. Public: served to anyone. Gated: 401 `{ error: "proof_required", challenge }` without a proof, the manifest with a valid `acquire` proof in `Wallet-Pass-Proof` / `Wallet-Pass-Signature` (the pre-0.3.0 `X-` names are still read; the new name wins when both are sent). Served as `application/json` with `version: 1`. |
 | `GET /:tokenId/challenge?address=&action=` | A fresh ERC-4361 challenge. `action` defaults to `acquire`. 400 on a missing or invalid address or an unknown action. |
 | `POST /:tokenId/actions/:action` | Signed action. Body `{ message, signature, params? }` (or the proof headers). |
 | `POST /:tokenId/rotate` | Rotate on a signed `rotate` proof from the holder of record (or an account entitled to acquire). Answers `{ ok, rotated }` only, never the manifest: the holder re-adds the new pass with an acquire proof. |
-| `GET /links/:link` | Describe a capability link. No side effects: a confirm page for browsers, JSON otherwise. |
+| `GET /links/:link` | Describe a capability link. No side effects: a confirm page for browsers, JSON otherwise. Every link page answer (and the result page of a form POST) carries `Cache-Control: no-store`, `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: frame-ancestors 'none'` (`LINK_PAGE_HEADERS`); a custom `confirmPage` gets them too, keeping its own CSP directives. |
 | `POST /links/:link` | Perform a capability link's action. |
 | `GET /passes/:link` | Download a pass file from a file provider (Apple `.pkpass`). `HEAD` answers the same headers with no body. |
 
-Status codes follow the spec: 400 malformed or mis-scoped, 401 failed possession or freshness check (always with a `challenge` member), 403 only for a verified proof from a non-entitled account, 404 unknown or rotated link, 503 `read_failed` with `Retry-After` when the chain read could not be taken.
+Refusals carry the `error` codes of the spec's refusal table (Refusal responses), with the listed status. 401s always carry a `challenge` member; 429 and 503 carry `Retry-After`.
+
+| `error` | Status | When | Retry |
+| :- | :- | :- | :- |
+| `invalid_request` | 400 | Malformed request: a bad token id or `address`, a proof header that cannot be decoded, a body that is not JSON | After correcting it |
+| `invalid_message` | 400 | The presented message is not a parseable challenge, or exceeds the size bound | Fresh challenge |
+| `domain_mismatch` | 400 | The challenge names another verifier | Fresh challenge |
+| `binding_mismatch` | 400 | The proof or link does not bind this exact token and action | Fresh challenge |
+| `unknown_action` | 400 | The action is not registered (SDK code, outside the table) | No |
+| `proof_required` | 401 | No control proof was presented | Fresh challenge |
+| `nonce_invalid` | 401 | Unknown or already spent nonce | Fresh challenge |
+| `challenge_expired` | 401 | Expiration Time has passed | Fresh challenge |
+| `not_yet_valid` | 401 | Not Before is in the future (being added to the table in PR #2036) | Fresh challenge |
+| `signature_invalid` | 401 | The signature is not valid for the claimed account | Fresh challenge |
+| `not_owner` | 403 | A verified proof from an account that is not entitled (fresh read). Reserved: nothing else answers 403 | No |
+| `unknown_capability` | 404 | The capability URL, download link, token or route does not resolve, for example after rotation | No |
+| `method_not_allowed` | 405 | Wrong method (SDK code) | No |
+| `insufficient_balance` | 409 | An account the token controls holds less than the action spends (raise it from an action with `ActionError`) | After funding |
+| `rate_limited` | 429 | Too many attempts for this client, token or action | After `Retry-After` |
+| `action_failed`, `internal_error` | 500 | The action threw, or the issuer did (SDK codes) | Later |
+| `read_failed` | 503 | The fresh entitlement read could not be taken | After `Retry-After` |
+
+Until 0.4.0 the client and `isWalletPassErrorCode` also accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
+
+## CORS
+
+Off unless configured. With no `cors` the issuer sends no `Access-Control` headers, so a page on another origin cannot read the manifest, a challenge or a refusal, which is right when the only browser caller is your own site. A browser-based marketplace or wallet on another origin needs `cors: { origins: ["https://market.example"] }` (echoed per request, with `Vary: Origin`) or an explicit `cors: { origins: "*" }`. The preflight admits the two proof headers. Until 0.2.x a wildcard was the silent default.
 
 ## Security model
 
@@ -116,7 +142,8 @@ Status codes follow the spec: 400 malformed or mis-scoped, 401 failed possession
 | Rotate used to take a pass | The rotate route never returns the manifest, never changes the holder of record, and requires the holder of record or an account entitled to acquire, so an owner excluded by an exclusive rental cannot disturb the renter's pass. |
 | Unbounded pre-auth input | Bodies are read with a running byte count and cut at 64 KiB (`MAX_BODY_BYTES`), in the fetch handler and the Node adapter alike; oversized proof headers and token ids are refused before parsing. |
 | A revert read as a burn | Only a nonexistent-token revert (`ERC721NonexistentToken`, or the OpenZeppelin 4 strings) or a zero owner means "no owner". Any other revert (a paused contract) is `read_failed`, never a burn. |
-| Guessable links | 256-bit random link tokens, bound server-side to one token and one action or format. Serials are random. |
+| Guessable links | 256-bit link tokens derived with `linkSecret` from a random seed, bound server-side to one token and one action or format. Serials are random. |
+| A store read yielding live links | The store holds seeds and token digests, never a token: link records are keyed by SHA-256 of the token, and the token is `HMAC(linkSecret, seed)`, computed at render time and on lookup. A dump of the KV is useless without the secret, which lives in the environment, not the store. |
 | Capability link reaching a dangerous action | Config validation refuses capability actions without a documented `bound`, flagged `transfersOrBurns`, or outside the gated configuration. |
 | Prefetching crawlers triggering actions | `GET` on a link never executes or reads; only `POST` does. |
 
@@ -160,11 +187,45 @@ Burns. A burn emits both `Transfer` to the zero address and `PassUpdate`, so eit
 
 ## Stores
 
-The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another.
+The default in-memory stores are for one process only. With more than one instance, the nonce store must be shared or a nonce spent on one instance stays live on another. Since 0.3.0 `createIssuer` refuses the in-memory fallback in production (an `IssuerConfigError` naming the missing stores): pass `stores: kvStores(kv, { chainId, contract })`, or `stores: memoryStores()` to run one instance deliberately. Outside production a store left out falls back to memory with one warning (`onWarning`, default `console.warn`). Say which you are with `environment: "production"` or `"development"`: when set it decides, and `NODE_ENV` is only the fallback when it is left out. A real deployment ran for months with `NODE_ENV` unset, so a guard keyed on it alone protected nothing; when neither is set and `chainId` is a known mainnet (`MAINNET_CHAIN_IDS`: 1, 10, 137, 8453, 42161) the issuer warns once that production mode is undetermined and names the option.
 
-Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood: rate limit `GET /:tokenId/challenge` (per IP, per address) in front of the issuer, since a flood past the cap evicts honest users' pending challenges.
+Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps unconsumed nonces once their retention passes and caps itself at `maxNonces` (default 100000, dropping the oldest), and a KV store expires them by TTL. Neither is a defense against a flood on its own, since a flood past the cap evicts honest users' pending challenges; the built-in rate limiter (next section) is.
 
-`kvStores(kv)` builds all three stores on this interface:
+## Identical repeats
+
+An identical repeat is not a replay. iOS in-app browsers send a GET, then a POST the phone aborts, then the same POST again, on every tap, and proxies retry a timed-out POST the same way. Following the spec revision, the issuer answers a repeat of an identical `POST /links/:link` (same link, same body bytes) or `POST /:tokenId/actions/:action` (same nonce, message, signature and body) that arrives while the first is in flight, or within `repeat.windowSeconds` (default 30) after it completed, with the first request's outcome: the action runs once and both callers get the same status and body (the repeat carries `X-Wallet-Pass-Repeat: true`). Only a presentation that differs is judged on its own: a different body on the same link is a new request, and a different request carrying a spent nonce is still `nonce_invalid`. Every completed outcome is recorded, refusals included, as the reference server does: a repeat of a refused presentation gets the same refusal and never `nonce_invalid`. Rotation wins: a link is resolved before the repeat store is consulted, so one that no longer resolves answers `unknown_capability`, and the key carries the link's binding and holder, so a recorded answer is never served once those changed. Outcomes live in `memoryRepeatStore()` (one process, bounded) by default; pass `repeat: { store: kvRepeatStore(kv) }` so instances share completed outcomes (in-flight sharing stays per process), or `repeat: false` to turn it off.
+
+## Link secret
+
+Capability links and pass download links are not stored. The pass record keeps a random seed per link, the link store is keyed by the SHA-256 digest of the token, and the token in the holder's URL is `HMAC-SHA256(linkSecret, seed)` (43 base64url characters). The issuer derives it again on every render and hashes the presented token before every lookup, so a read of the store yields no usable capability (Security Considerations). Set `linkSecret` to at least 32 bytes (`openssl rand -base64 32`), the same on every instance; rotating it retires every link at once, and the holders re-add their passes. Production refuses to start without it. In development a random one is used with a warning, and every link dies with the process.
+
+## Rate limiting
+
+On by default. The challenge, manifest and capability endpoints each count attempts per client address and path token (`challenge:<client>:<tokenId>`, `manifest:<client>:<tokenId>`, `capability:<client>:<link>`) and answer `429 { "error": "rate_limited" }` with a `Retry-After` header (whole seconds) past the limit. The attempt is counted before any work, so a refused request costs nothing but the count. Defaults: `challenge` 30 per 60 s, `manifest` 60 per 60 s, `capability` (GET and POST `/links/:link`, GET and HEAD `/passes/:link`) 60 per 60 s.
+
+```ts
+import { createIssuer, kvRateLimiter, kvKeyNamespace } from "@erc8426/issuer";
+
+createIssuer({
+  ...config,
+  rateLimit: {
+    challenge: { limit: 10, windowSeconds: 60 },
+    manifest: false,                                   // one family off
+    limiter: kvRateLimiter(kv, { prefix: `${kvKeyNamespace(scope)}rl:` }), // one limit across instances
+    clientKey: (request) => request.headers.get("x-real-ip"),          // what counts as one client
+  },
+});
+createIssuer({ ...config, rateLimit: false });        // off entirely
+```
+
+- `memoryRateLimiter()` (default) keeps an exact sliding window per key in process memory, at most `maxKeys` keys (100000, least recently seen dropped). With several instances each enforces its own share.
+- `kvRateLimiter(kv)` keeps a fixed-window counter per key in the `KeyValueStore`, shared by every instance. With a store that implements the optional `incr` (Redis `INCR` plus `EXPIRE`) the count is exact; without it the counter is read and written back and racing attempts may undercount.
+- `clientKey` defaults to `defaultClientKey`: `CF-Connecting-IP`, `True-Client-IP`, `X-Real-IP`, `Fly-Client-IP`, the first `X-Forwarded-For` hop, then the socket address the Node adapter records (`toNodeHandler` and `expressMiddleware` set it from `req.socket.remoteAddress`, dropping any client-sent value). Behind no proxy `X-Forwarded-For` is client-supplied, so pass a `clientKey` that reads the socket address only.
+- Any object with `hit(key, rule, nowMs)` is a `RateLimiter`.
+
+Why the token is in every key: holders share addresses. A school's Wi-Fi, an office, a stadium, or a carrier's address translation puts many people behind one address, each presenting a different token (a class adding their student cards in the same minute, a venue's ticket holders at the door). A limit keyed by address alone refuses that crowd and does nothing against an attacker who spreads across addresses. Keyed by client and token together, thirty honest holders on one network are thirty keys, and the pattern the limit exists for, many requests for one token from one place, is still bounded. If you supply a `clientKey`, keep it per client; the issuer adds the token.
+
+`kvStores(kv, { chainId, contract, prefix? })` builds all three stores on this interface. Every key is scoped by chain id and lowercased contract (`${prefix}${chainId}:${contract}:pass:${tokenId}`, and `:link:`, `:nonce:` alongside; `prefix` defaults to `erc8426:`), so two collections on one Redis never share a row even when they share token ids. Rows written by 0.2.x (`${prefix}pass:${tokenId}`) are not read; see the 0.3.0 changelog for the one-off rekey.
 
 ```ts
 interface KeyValueStore {
@@ -193,7 +254,7 @@ const kv: KeyValueStore = {
   getDel: (k) => redis.getdel(k), // Redis 6.2+
   del: async (k) => void (await redis.del(k)),
 };
-createIssuer({ ...config, stores: kvStores(kv) });
+createIssuer({ ...config, stores: kvStores(kv, { chainId: config.chainId, contract: config.contract }) });
 ```
 
 ### @upstash/redis (and Vercel KV)
@@ -217,7 +278,7 @@ const kv: KeyValueStore = {
 };
 ```
 
-Cloudflare Workers KV is eventually consistent and has no atomic read and delete, so it must not back the nonce store. Use a Durable Object or Upstash for nonces (`stores: { ...kvStores(workersKv), nonces: kvStores(upstash).nonces }`).
+Cloudflare Workers KV is eventually consistent and has no atomic read and delete, so it must not back the nonce store. Use a Durable Object or Upstash for nonces (`stores: { ...kvStores(workersKv, scope), nonces: kvStores(upstash, scope).nonces }` with `scope = { chainId, contract }`).
 
 ## API
 

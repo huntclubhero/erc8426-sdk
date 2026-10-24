@@ -19,7 +19,7 @@ Only the first two touch the chain. Generation, signing and push are out of scop
 ## The two checks
 
 1. **Proof of control of the owning account.** A signature over a verifier-issued challenge naming the token (chain id, contract, token id), the action, a single-use nonce, an expiration and the verifier's identity, plus the account for contract-account signatures. The verifier checks every field against what it holds, never against request values. The SDK serializes challenges as ERC-4361 (SIWE) messages with the token as a CAIP-19 resource and the action as `urn:wallet-pass:action:<name>`.
-2. **A fresh entitlement read** (`ownerOf`, or a documented extension such as an ERC-4907 renter or a delegate) at request time, against the best view of the safe head. Never cached from issuance or URL minting.
+2. **A fresh entitlement read** (`ownerOf`, or a documented extension such as an ERC-4907 renter or a delegate) at request time, at the newest block the node has (`latest`, per the spec; not `safe` or `finalized`). Never cached from issuance or URL minting.
 
 Check 2 closes the **transfer window**: a sold token stops acting at once, whatever passes are still installed. Check 1 closes **forwarding**: a leaked pass or URL under an unchanged owner. Each challenge field closes its own hole (scope, replay, staleness, cross-verifier reuse). Check 2 is never substitutable.
 
@@ -86,7 +86,7 @@ sequenceDiagram
     CL->>CL: check scope: host, address, chain, token, action, expiry
     CL->>U: sign
     U->>CL: signature
-    CL->>I: GET manifest with X-Wallet-Pass-Proof and X-Wallet-Pass-Signature
+    CL->>I: GET manifest with Wallet-Pass-Proof and Wallet-Pass-Signature
     I->>I: spend nonce, verify every field and signature
     I->>CH: fresh ownerOf (check 2)
     CH->>I: 0xU

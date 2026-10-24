@@ -52,8 +52,11 @@ export function buildChallenge(params: ChallengeParams): string {
   });
 }
 
-/// A parsed challenge. `token` and `action` are null when the message does not
-///  carry them in a recognizable form; a verifier refuses such a message.
+/// A parsed challenge. `token` and `action` are read from the fixed places the
+///  spec gives them (Example challenge: "Each floor field has a fixed place in
+///  the message"): the token is the first resource and the action the second.
+///  Each is null when the resource in its place is not of that form; a
+///  verifier refuses such a message as binding_mismatch.
 export interface ParsedChallenge {
   domain: string;
   address: Address;
@@ -92,8 +95,14 @@ export function parseChallenge(message: string): ParsedChallenge | null {
   }
   if (!parsed.domain || !parsed.address || parsed.chainId === undefined || !parsed.nonce) return null;
   const resources = parsed.resources ?? [];
-  const tokens = resources.map(parseAssetId).filter((t): t is TokenRef => t !== null);
-  const actions = resources.map(parseActionUrn).filter((a): a is string => a !== null);
+  // By position, never by search, as the reference verifier reads them: a
+  // message that also lists the expected action somewhere else is a proof
+  // for whatever sits in the action's place, and a message with the two
+  // swapped binds nothing. Resources past the second are not read here; the
+  // reference tolerates them too (the client refuses to sign such a message,
+  // which is a separate, stricter policy on the signing side).
+  const token = resources[0] !== undefined ? parseAssetId(resources[0]) : null;
+  const action = resources[1] !== undefined ? parseActionUrn(resources[1]) : null;
   return {
     domain: parsed.domain,
     address: getAddress(parsed.address),
@@ -105,9 +114,8 @@ export function parseChallenge(message: string): ParsedChallenge | null {
     expirationTime: parsed.expirationTime,
     notBefore: parsed.notBefore,
     resources,
-    // Exactly one token and one action, or the scope is ambiguous.
-    token: tokens.length === 1 ? tokens[0]! : null,
-    action: actions.length === 1 ? actions[0]! : null,
+    token,
+    action,
   };
 }
 

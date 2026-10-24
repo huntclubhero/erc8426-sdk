@@ -81,6 +81,25 @@ export const DELETE = GET;
 
 When the issuer resolves a manifest it calls `apple.acquisitionUrl({ token, owner, content })` and puts the result under `formats.apple`. When content changes (a `PassUpdate` event, a balance move) it calls `apple.notifyUpdate(...)`, which stores the new content, bumps `Last-Modified`, and pushes every registered device. For an owner's request to reset their links without the issuer, call `apple.rotate(serial, freshContent)`: every existing copy, a leaked one included, refreshes into the superseded card and can no longer register devices, and the owner's new download URL carries the fresh content. (With the issuer, rotation mints a new serial and voids the old one; voided content retires the old serial's token the same way.)
 
+## Featured Actions (iOS 27)
+
+iOS 27 draws up to two **featured actions** beneath the pass face, as cards with an icon and Apple's own localized call to action for the action type, in the order given. Set `featuredActions` on the pass content; each entry is an absolute https `url`, or `link: <key>` naming one of the content's `links`, whose capability URL is filled in at render time and so rotates with the pass. Older iOS ignores the key; Google has no equivalent.
+
+```ts
+render: ({ serial, links }) => ({
+  ...content,
+  links: [{ key: "feed", label: "Feed", url: links.feed }],
+  featuredActions: [
+    { id: "feed", type: "addToBalance", link: "feed" },
+    { id: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" },
+  ],
+}),
+```
+
+Documented types: `membershipBenefits`, `viewOffersRewards`, `place`, `call`, `order`, `shop`, `addToBalance`, `bookAppointment`, `bookCar`, `bookFlight`, `bookStay`, `viewSchedule`, `watchTrailer`, `listenToMusic` (`FeaturedActionType`; any other string passes through). The call to action is Apple's wording for the type, not yours, so pick the type that names what the holder gets. More than two, a duplicate id, a non-https or scheme-less URL, or a `link` the content does not carry is refused at render time. A superseded pass drops every featured action that points at a link, and `supersededContent` carries none.
+
+Security note: a featured action sits on the front of the pass and in every screenshot of it, where a back-field link does not. The spec's on-screen Security Consideration applies to it in full: a capability link shown as a featured action is exactly as forwardable as the pass face, so it should reach only an action with a documented bound, and rotation on the owner's request stays the remedy.
+
 ## Security properties
 
 - **Per-pass authentication tokens.** Every serial gets its own random 256-bit token, compared in constant time. A leaked token exposes one pass, not the collection.

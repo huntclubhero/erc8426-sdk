@@ -1,6 +1,7 @@
-import { FORMAT_APPLE, FORMAT_GOOGLE, GOOGLE_SAVE_URL_PREFIX, METADATA_MIRROR_KEY } from "./constants.js";
+import { FORMAT_APPLE, FORMAT_GOOGLE, GOOGLE_SAVE_URL_PREFIX, MANIFEST_VERSION, METADATA_MIRROR_KEY } from "./constants.js";
 
-/// The pass manifest a `passURI` resolves to (Pass manifest).
+/// The pass manifest a `passURI` resolves to (Pass manifest). It MUST be
+///  served as `Content-Type: application/json`.
 export interface PassManifest {
   /// Platform key to acquisition URL. At least one entry. `apple` and
   ///  `google` are defined by the standard; other keys MAY appear.
@@ -8,6 +9,9 @@ export interface PassManifest {
   /// Unix seconds of the last content change. Content freshness only: it says
   ///  nothing about whether the URLs in `formats` are still valid.
   updatedAt?: number;
+  /// OPTIONAL manifest version; 1 is the only value defined. Issuers built
+  ///  with this SDK emit it; clients tolerate its absence.
+  version?: number;
 }
 
 export type ManifestIssueLevel = "error" | "warning";
@@ -96,9 +100,27 @@ export function parseManifest(value: unknown): ManifestParseResult {
     }
   }
 
+  // version is OPTIONAL: absent is the common case for issuers built before
+  // it was defined, and MUST be tolerated. Present, it is a positive integer;
+  // a value this SDK does not know is a warning, since the manifest shape it
+  // understands is still what it parsed.
+  let version: number | undefined;
+  if (value.version !== undefined) {
+    const v = value.version;
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
+      issues.push({ level: "error", path: "version", message: "version, when present, MUST be a positive integer (1)" });
+    } else {
+      if (v !== MANIFEST_VERSION) {
+        issues.push({ level: "warning", path: "version", message: `manifest version ${v} is newer than this SDK understands (${MANIFEST_VERSION})` });
+      }
+      version = v;
+    }
+  }
+
   if (issues.some((i) => i.level === "error")) return { ok: false, issues };
   const manifest: PassManifest = { formats: out as PassManifest["formats"] };
   if (updatedAt !== undefined) manifest.updatedAt = updatedAt;
+  if (version !== undefined) manifest.version = version;
   return { ok: true, manifest, issues };
 }
 
@@ -107,11 +129,12 @@ function isLocalhost(url: URL): boolean {
 }
 
 /// Build a manifest from the URLs an issuer holds, dropping empty entries.
+///  Carries `version: 1`.
 export function createManifest(formats: PassManifest["formats"], updatedAt?: number | Date): PassManifest {
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(formats)) if (typeof v === "string" && v.length > 0) clean[k] = v;
   if (Object.keys(clean).length === 0) throw new Error("a manifest needs at least one format");
-  const manifest: PassManifest = { formats: clean as PassManifest["formats"] };
+  const manifest: PassManifest = { version: MANIFEST_VERSION, formats: clean as PassManifest["formats"] };
   if (updatedAt !== undefined) {
     manifest.updatedAt = updatedAt instanceof Date ? Math.floor(updatedAt.getTime() / 1000) : Math.floor(updatedAt);
   }

@@ -18,9 +18,9 @@ import {
 } from "@erc8426/core";
 
 import { authorize as runFloor, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
-import { newLinkToken, newSerial, isLinkTokenShape } from "./capability.js";
+import { LinkKeyring, ephemeralLinkSecret, isLinkTokenShape, linkDigest, newLinkSeed, newSerial } from "./capability.js";
 import { publicClientChainReader, type ChainReader, type ReadBlockTag, type ReadContractClient } from "./chain.js";
-import { IssuerConfigError, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
+import { IssuerConfigError, isKnownMainnet, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
 import { checkEntitlement, ownerOnly, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
 import { IssuerError } from "./errors.js";
 import { createRouter } from "./http.js";
@@ -84,8 +84,17 @@ export interface CreateIssuerOptions extends IssuerConfig {
   verifier?: SignatureVerifier;
   /// Default `ownerOnly()`.
   entitlement?: EntitlementPolicy;
-  /// Default in-memory stores (single instance only).
+  /// Nonce, pass record and link stores. Any store left out falls back to
+  ///  the in-memory one, which serves one process and forgets everything on
+  ///  restart. With NODE_ENV=production the fallback is refused at startup
+  ///  (IssuerConfigError): pass `kvStores(kv, { chainId, contract })` for a shared store, or an
+  ///  explicit `memoryStores()` for a deployment that really runs one
+  ///  instance. Outside production the fallback logs one warning through
+  ///  `onWarning` (default console.warn).
   stores?: Partial<IssuerStores>;
+  /// Where a startup warning goes (an in-memory store fallback outside
+  ///  production). Default console.warn.
+  onWarning?(message: string): void;
   /// Clock, epoch milliseconds. Default Date.now.
   now?: () => number;
   /// Failures that must not fail the request that triggered them (a push
@@ -183,6 +192,68 @@ export interface IssuerInternals {
 
 type RotationReason = "transfer" | "claim" | "owner_request";
 
+/// True under NODE_ENV=production. Guarded so the issuer still runs where
+///  there is no `process` (Workers, Deno without Node compatibility). The
+///  `environment` option, when set, overrides this; see resolveEnvironment.
+export function isProductionEnv(): boolean {
+  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+}
+
+/// Fill in any store the options leave out with the in-memory one, refusing
+///  to in production: a nonce spent on one instance would still be live on
+///  another, and every pass record and link would vanish on restart, so a
+///  deployment that reaches production without naming its stores almost
+///  certainly did not mean to. An explicit `stores: memoryStores()` passes,
+///  since every store is then named. Production is `config.environment`
+///  (explicit option first, NODE_ENV as the fallback); when neither says and
+///  the chain is a known mainnet, one warning says the guard is undecided.
+/// The keyring links are derived with. A configured secret is used as is;
+///  without one, production refuses (a store read would otherwise be the
+///  only thing standing between a dump and every live link, and an
+///  ephemeral secret would kill every link on restart) and anything else
+///  gets a random secret and one warning.
+function resolveLinkKeyring(options: CreateIssuerOptions, config: ResolvedIssuerConfig): LinkKeyring {
+  if (config.linkSecret) return new LinkKeyring(config.linkSecret);
+  if (config.environment === "production") {
+    throw new IssuerConfigError(
+      `${options.environment === "production" ? 'environment is "production"' : "NODE_ENV is production"} but no linkSecret was configured: capability and download links are derived from it, so a store read alone yields no link and every instance renders the same links. Set linkSecret to at least 32 bytes ("openssl rand -base64 32"), the same on every instance.`,
+    );
+  }
+  const warn = options.onWarning ?? ((message: string) => console.warn(message));
+  warn(
+    "[erc8426/issuer] no linkSecret configured: using a random one for this process, so every capability and download link stops resolving when it restarts. Production refuses this; set linkSecret to at least 32 bytes, the same on every instance.",
+  );
+  return new LinkKeyring(ephemeralLinkSecret());
+}
+
+function resolveStores(options: CreateIssuerOptions, config: ResolvedIssuerConfig, now: () => number): IssuerStores {
+  const warn = options.onWarning ?? ((message: string) => console.warn(message));
+  if (config.environment === "unknown" && isKnownMainnet(config.chainId)) {
+    warn(
+      `[erc8426/issuer] production mode is undetermined: chain ${config.chainId} is a mainnet but neither the environment option nor NODE_ENV is set, so the production guards (the in-memory store refusal) cannot tell this is real. Set environment: "production" (or "development") in createIssuer.`,
+    );
+  }
+  const given = options.stores ?? {};
+  const missing = (["nonces", "passes", "links"] as const).filter((k) => !given[k]);
+  if (missing.length === 0) return { nonces: given.nonces!, passes: given.passes!, links: given.links! };
+  const names = missing.join(", ");
+  if (config.environment === "production") {
+    const how = options.environment === "production" ? 'environment is "production"' : "NODE_ENV is production";
+    throw new IssuerConfigError(
+      `${how} but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv, { chainId, contract }) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
+    );
+  }
+  warn(
+    `[erc8426/issuer] no ${names} store${missing.length > 1 ? "s" : ""} configured: falling back to the in-memory store${missing.length > 1 ? "s" : ""} (one process, lost on restart). Production refuses this; pass stores: kvStores(kv, { chainId, contract }) or an explicit memoryStores().`,
+  );
+  const defaults = memoryStores({ now });
+  return {
+    nonces: given.nonces ?? defaults.nonces,
+    passes: given.passes ?? defaults.passes,
+    links: given.links ?? defaults.links,
+  };
+}
+
 /// Build an issuer. Validates the configuration up front (IssuerConfigError)
 ///  so a setup the spec forbids never serves a request.
 export function createIssuer(options: CreateIssuerOptions): Issuer {
@@ -209,12 +280,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   if (!chain) throw new IssuerConfigError("pass publicClient or chain: check (2), the fresh entitlement read, needs a chain reader");
   const verifier = options.verifier ?? (options.publicClient ? publicClientSignatureVerifier(options.publicClient) : eoaSignatureVerifier());
   const entitlement = options.entitlement ?? ownerOnly();
-  const defaults = memoryStores({ now });
-  const stores: IssuerStores = {
-    nonces: options.stores?.nonces ?? defaults.nonces,
-    passes: options.stores?.passes ?? defaults.passes,
-    links: options.stores?.links ?? defaults.links,
-  };
+  const stores = resolveStores(options, config, now);
+  const keyring = resolveLinkKeyring(options, config);
   const onError =
     options.onError ?? ((error: unknown, ctx: IssuerErrorContext) => console.error(`[erc8426/issuer] ${ctx.operation} failed`, error));
   const fileProviders = providers.filter(isFileProvider);
@@ -227,28 +294,34 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     `${passUri(tokenId)}/challenge${action === ACQUIRE_ACTION ? "" : `?action=${encodeURIComponent(action)}`}`;
   const linkUrl = (t: string) => `${base}/links/${t}`;
   const downloadUrl = (t: string) => `${base}/passes/${t}`;
-  const linkUrls = (record: PassRecord) => {
+  // The record holds seeds; the URL carries the token derived from each.
+  const linkUrls = async (record: PassRecord) => {
     const out: Record<string, string> = {};
-    for (const [action, t] of Object.entries(record.links)) out[action] = linkUrl(t);
+    for (const [action, seed] of Object.entries(record.links)) out[action] = linkUrl(await keyring.token(seed));
     return out;
   };
+  // The store keys of every link and download the record currently holds.
+  const digestsOf = (record: PassRecord) => Promise.all([...Object.values(record.links), ...Object.values(record.downloads)].map((seed) => keyring.digestOfSeed(seed)));
 
-  // Mint link tokens for whatever the record is missing: every capability
-  // action and every file format. Tokens already present are kept.
+  // Mint links for whatever the record is missing: every capability action
+  // and every file format. A link is a random seed in the record plus a
+  // binding stored under the digest of the token derived from that seed;
+  // the token itself is never written anywhere. Links already present are
+  // kept.
   async function fill(record: PassRecord): Promise<boolean> {
     let changed = false;
     for (const action of config.capabilityActions) {
       if (record.links[action]) continue;
-      const t = newLinkToken();
-      await stores.links.put(t, { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
-      record.links[action] = t;
+      const seed = newLinkSeed();
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
+      record.links[action] = seed;
       changed = true;
     }
     for (const p of fileProviders) {
       if (record.downloads[p.format]) continue;
-      const t = newLinkToken();
-      await stores.links.put(t, { kind: "download", tokenId: record.tokenId, name: p.format, generation: record.generation });
-      record.downloads[p.format] = t;
+      const seed = newLinkSeed();
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "download", tokenId: record.tokenId, name: p.format, generation: record.generation });
+      record.downloads[p.format] = seed;
       changed = true;
     }
     return changed;
@@ -272,7 +345,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       token: token(record.tokenId),
       owner,
       serial: record.serial,
-      links: superseded ? {} : linkUrls(record),
+      links: superseded ? {} : await linkUrls(record),
       superseded: Boolean(superseded),
       ...(superseded ? { supersededReason: superseded } : {}),
       updatedAt: record.updatedAt,
@@ -333,7 +406,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // is written first: from this moment the old tokens resolve to nothing
     // even if deleting them below fails.
     await stores.passes.put(next);
-    await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
+    await stores.links.delete(await digestsOf(record));
     // A new account's claim is a change of hands like an observed transfer;
     // only the owner's own request keeps the holder, and its pass says so.
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, reason === "owner_request" ? "reset" : "transfer", "supersede");
@@ -354,7 +427,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       rotatedAt: nowSeconds(),
     };
     await stores.passes.put(next);
-    await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
+    await stores.links.delete(await digestsOf(record));
     const holder = record.lastIssuedTo;
     if (!holder) return;
     const targets = providers.filter((p) => typeof p.notifyUpdate === "function");
@@ -397,10 +470,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       try {
         tokenId = normalizeTokenId(input.tokenId);
       } catch {
-        throw new IssuerError("invalid_token", `invalid token id: ${String(input.tokenId)}`);
+        throw new IssuerError("invalid_request", `invalid token id: ${String(input.tokenId)}`);
       }
       if (typeof input.account !== "string" || !isAddress(input.account, { strict: false })) {
-        throw new IssuerError("invalid_address", "address must be a valid account address");
+        throw new IssuerError("invalid_request", "address must be a valid account address");
       }
       const action = input.action ?? ACQUIRE_ACTION;
       if (action !== ACQUIRE_ACTION && action !== ROTATE_ACTION && !Object.hasOwn(config.actions, action)) {
@@ -473,7 +546,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const content = await renderContent(record, owner, false);
       const ctx: PassContext = { token: token(record.tokenId), owner, content };
       const entries = await Promise.all(
-        providers.map(async (p) => [p.format, isFileProvider(p) ? downloadUrl(record.downloads[p.format]!) : await p.acquisitionUrl(ctx)] as const),
+        providers.map(
+          async (p) => [p.format, isFileProvider(p) ? downloadUrl(await keyring.token(record.downloads[p.format]!)) : await p.acquisitionUrl(ctx)] as const,
+        ),
       );
       return createManifest(Object.fromEntries(entries) as PassManifest["formats"], record.updatedAt);
     },
@@ -483,14 +558,19 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // A link resolves only while the pass record still lists it as current:
     // rotation rewrites the record first, so a rotated link is dead even if
     // its store entry lingers.
+    // The presented token is hashed before lookup; the raw token is never
+    // compared against anything stored. The record's current seed must
+    // derive to the presented token, so a binding left behind by a racing
+    // rotation resolves to nothing.
     async resolveLink(linkToken, kind) {
       if (!isLinkTokenShape(linkToken)) return null;
-      const binding = await stores.links.get(linkToken);
+      const binding = await stores.links.get(await linkDigest(linkToken));
       if (!binding || binding.kind !== kind) return null;
       const record = await stores.passes.get(binding.tokenId);
       if (!record) return null;
-      const current = kind === "action" ? record.links[binding.name] : record.downloads[binding.name];
-      return current === linkToken ? { binding, record } : null;
+      const seed = kind === "action" ? record.links[binding.name] : record.downloads[binding.name];
+      if (!seed) return null;
+      return (await keyring.token(seed)) === linkToken ? { binding, record } : null;
     },
 
     async onPassUpdate(fromTokenId, toTokenId) {
@@ -500,7 +580,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         from = BigInt(normalizeTokenId(fromTokenId));
         to = toTokenId === undefined ? from : BigInt(normalizeTokenId(toTokenId));
       } catch {
-        throw new IssuerError("invalid_token", "invalid token id in pass update");
+        throw new IssuerError("invalid_request", "invalid token id in pass update");
       }
       if (to < from) throw new IssuerError("invalid_request", "BatchPassUpdate range is inverted: toTokenId < fromTokenId");
       let ids: string[];
@@ -571,7 +651,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     chain,
     route,
     async handler(request) {
-      return (await route(request)) ?? new Response(JSON.stringify({ error: "not_found" }), { status: 404, headers: { "Content-Type": "application/json" } });
+      return (await route(request)) ?? new Response(JSON.stringify({ error: "unknown_capability" }), { status: 404, headers: { "Content-Type": "application/json" } });
     },
     passUri,
     challengeUri,
@@ -602,7 +682,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     onPassUpdate: internals.onPassUpdate,
     async capabilityLinksFor(tokenId) {
       const record = await stores.passes.get(normalizeTokenId(tokenId));
-      return record ? linkUrls(record) : {};
+      return record ? await linkUrls(record) : {};
     },
   };
 }

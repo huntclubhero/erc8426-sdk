@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, ContractFunctionZeroDataError } from "viem";
-import { WalletPassError, isWalletPassErrorCode } from "@erc8426/core";
+import { WalletPassError, canonicalErrorCode, isWalletPassErrorCode } from "@erc8426/core";
 
 /// Where a refusal came from. `server` is an issuer response; `chain` is a
 ///  contract read (a revert, or an RPC that could not answer); `client` is
@@ -78,9 +78,12 @@ export function errorFromResponse(status: number, headers: Headers, body: unknow
 
   let code: WalletPassError["code"];
   if (status === 403) code = "not_owner";
-  else if (isWalletPassErrorCode(bodyCode)) code = bodyCode;
+  // A 0.2.x issuer still sends the retired names (malformed_proof, not_found,
+  // ...): they are reported under the spec's name, and the string the issuer
+  // sent survives in serverCode.
+  else if (isWalletPassErrorCode(bodyCode)) code = canonicalErrorCode(bodyCode);
   else if (status === 503) code = "read_failed";
-  else if (status === 404) code = "not_found";
+  else if (status === 404) code = "unknown_capability";
   // A code outside the core set (an integrator's ActionError such as a 429
   // cooldown or a 409) is still an answer from the issuer, never "network":
   // that code is kept for a fetch that failed or timed out. The issuer's own
@@ -108,7 +111,7 @@ export function errorFromResponse(status: number, headers: Headers, body: unknow
 
 /// Map a failed contract read to a typed error. A revert is the chain's
 ///  answer: `passURI`, `tokenURI` and `ownerOf` revert for a token that does
-///  not exist or was burned, so it becomes `not_found`. Empty return data
+///  not exist or was burned, so it becomes `unknown_capability`. Empty return data
 ///  means no contract (or one without the function) at the address:
 ///  `unsupported`. Anything else is an RPC that could not answer, which is
 ///  retryable `network`, never a verdict on the token.
@@ -120,7 +123,7 @@ export function errorFromChainRead(error: unknown, what: string): WalletPassClie
     return new WalletPassClientError("unsupported", `${what}: the address has no contract answering it`, { source: "chain" });
   }
   if (find(ContractFunctionRevertedError)) {
-    return new WalletPassClientError("not_found", `${what} reverted: the token does not exist or was burned`, { source: "chain" });
+    return new WalletPassClientError("unknown_capability", `${what} reverted: the token does not exist or was burned`, { source: "chain" });
   }
   return new WalletPassClientError("network", `${what} could not be read: ${detail}`, { source: "chain", retryable: true });
 }

@@ -3,7 +3,7 @@ import { appleFormatProvider } from "@erc8426/apple";
 
 import { makeTestCerts, TINY_PNG, unzip } from "../../packages/apple/test/helpers.js";
 import { googleProvider } from "../e2e/harness.js";
-import { BASE, TOKEN_ID, buildHarness, issuePassTo, newSigner, signChallenge } from "../../packages/issuer/test/helpers.js";
+import { BASE, TOKEN_ID, buildHarness, issuePassTo, linkTokenFor, newSigner, signChallenge } from "../../packages/issuer/test/helpers.js";
 
 const ROTATE = `/wallet-pass/${TOKEN_ID}/rotate`;
 const PASS_TYPE = "pass.example.audit";
@@ -23,7 +23,7 @@ describe("AUDIT wallets: owner-requested rotation (the remedy for a leaked link)
 
     // The owner downloads the pass; a copy leaks (AirDrop, backup, email).
     const record = (await h.issuer.stores.passes.get(TOKEN_ID))!;
-    const dl = await h.get(`/wallet-pass/passes/${record.downloads.apple}`);
+    const dl = await h.get(`/wallet-pass/passes/${await linkTokenFor(record.downloads.apple!)}`);
     expect(dl.status).toBe(200);
     const leaked = JSON.parse(unzip(new Uint8Array(await dl.arrayBuffer()))["pass.json"]!.toString("utf8")) as {
       serialNumber: string;

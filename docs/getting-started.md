@@ -115,7 +115,7 @@ export const issuer = createIssuer({
   contract: "0xYourCollection",
   mode: "gated",
   publicClient,
-  stores: kvStores(kv),               // shared store with atomic getDel for nonces
+  stores: kvStores(kv, { chainId: 8453, contract: "0xYourCollection" }), // shared store with atomic getDel for nonces; keys scoped per collection
   providers: [apple, google],
   render: ({ token, serial, links }) => ({
     serial,

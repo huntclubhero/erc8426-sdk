@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { getAddress } from "viem";
-import { kvStores, memoryKv, memoryStores, type IssuerStores, type KeyValueStore, type NonceRecord } from "@erc8426/issuer";
+import { kvKeyNamespace, kvStores, linkDigest, memoryKv, memoryStores, type IssuerStores, type KeyValueStore, type NonceRecord } from "@erc8426/issuer";
 
-import { buildHarness, createClock, issuePassTo, newSigner, TOKEN_ID } from "./helpers.js";
+import { CONTRACT, buildHarness, createClock, issuePassTo, newSigner, TOKEN_ID } from "./helpers.js";
+
+/// The harness issuer's collection: chain 1, CONTRACT.
+const SCOPE = { chainId: 1, contract: CONTRACT };
+const NS = `erc8426:1:${CONTRACT.toLowerCase()}:`;
 
 const record = (): NonceRecord => ({ account: getAddress(newSigner().address), tokenId: "1", action: "acquire", expiresAt: 0 });
 
@@ -70,37 +74,84 @@ function nonceSuite(name: string, make: (now: () => number) => IssuerStores) {
 }
 
 nonceSuite("memory", (now) => memoryStores({ now }));
-nonceSuite("kv", (now) => kvStores(memoryKv({ now })));
+nonceSuite("kv", (now) => kvStores(memoryKv({ now }), SCOPE));
 
 describe("kvStores", () => {
   it("consumes nonces with one atomic getDel, never a get then del", async () => {
     const kv = asyncKv();
-    const s = kvStores(kv);
+    const s = kvStores(kv, SCOPE);
     await s.nonces.issue("n", record(), 600);
     await s.nonces.consume("n");
-    expect(kv.calls).toEqual([`set erc8426:nonce:n {"ttlSeconds":600,"onlyIfAbsent":true}`, "getDel erc8426:nonce:n"]);
+    expect(kv.calls).toEqual([`set ${NS}nonce:n {"ttlSeconds":600,"onlyIfAbsent":true}`, `getDel ${NS}nonce:n`]);
+  });
+
+  it("scopes every key by chain id and lowercased contract: prefix, chain, contract, kind, id", async () => {
+    expect(kvKeyNamespace(SCOPE)).toBe(NS);
+    expect(kvKeyNamespace({ ...SCOPE, prefix: "staging:" })).toBe(`staging:1:${CONTRACT.toLowerCase()}:`);
+    // Checksum casing of the configured address never splits a collection.
+    expect(kvKeyNamespace({ chainId: 1, contract: CONTRACT.toLowerCase() })).toBe(NS);
+    expect(kvKeyNamespace({ chainId: 1, contract: CONTRACT.toUpperCase().replace("0X", "0x") })).toBe(NS);
+    expect(() => kvKeyNamespace({ chainId: 0, contract: CONTRACT })).toThrow(/chainId/);
+    expect(() => kvKeyNamespace({ chainId: 1, contract: "nope" })).toThrow(/contract/);
+    const kv = asyncKv();
+    const s = kvStores(kv, SCOPE);
+    await s.passes.put({ tokenId: "7", serial: "s", generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: 1, rotatedAt: 1 });
+    await s.links.put("t", { kind: "action", tokenId: "7", name: "feed", generation: 0 });
+    await s.links.delete(["t"]);
+    expect(kv.calls).toEqual([`set ${NS}pass:7 {}`, `set ${NS}link:t {}`, `del ${NS}link:t`]);
+  });
+
+  it("keeps two collections on different chains (and two contracts on one chain) apart on one KV", async () => {
+    const kv = memoryKv();
+    const a = kvStores(kv, { chainId: 1, contract: CONTRACT });
+    const b = kvStores(kv, { chainId: 8453, contract: CONTRACT });
+    const c = kvStores(kv, { chainId: 1, contract: newSigner().address });
+    const row = (serial: string) => ({ tokenId: "7", serial, generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: 1, rotatedAt: 1 });
+    await a.passes.put(row("a"));
+    await b.passes.put(row("b"));
+    await c.passes.put(row("c"));
+    expect((await a.passes.get("7"))!.serial).toBe("a");
+    expect((await b.passes.get("7"))!.serial).toBe("b");
+    expect((await c.passes.get("7"))!.serial).toBe("c");
+    // Links and nonces too: the same token string is three different rows.
+    await a.links.put("t", { kind: "action", tokenId: "7", name: "feed", generation: 0 });
+    expect(await b.links.get("t")).toBeNull();
+    await b.nonces.issue("n", record(), 60);
+    expect(await a.nonces.consume("n")).toBeNull();
+    expect(await b.nonces.consume("n")).not.toBeNull();
+    // Deleting a's link leaves b's alone.
+    await b.links.put("t", { kind: "action", tokenId: "7", name: "water", generation: 0 });
+    await a.links.delete(["t"]);
+    expect(await a.links.get("t")).toBeNull();
+    expect((await b.links.get("t"))!.name).toBe("water");
+  });
+
+  it("does not read rows written under the 0.2.x key shape", async () => {
+    const kv = memoryKv();
+    await kv.set("erc8426:pass:7", JSON.stringify({ tokenId: "7", serial: "old", generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: 1, rotatedAt: 1 }));
+    expect(await kvStores(kv, SCOPE).passes.get("7")).toBeNull();
   });
 
   it("stays single-use across interleaving callers on a remote store", async () => {
-    const s = kvStores(asyncKv());
+    const s = kvStores(asyncKv(), SCOPE);
     await s.nonces.issue("n", record(), 60);
     const results = await Promise.all(Array.from({ length: 8 }, () => s.nonces.consume("n")));
     expect(results.filter((r) => r !== null)).toHaveLength(1);
   });
 
   it("refuses to overwrite a live nonce", async () => {
-    const s = kvStores(memoryKv());
+    const s = kvStores(memoryKv(), SCOPE);
     await s.nonces.issue("dup", record(), 60);
     await expect(s.nonces.issue("dup", record(), 60)).rejects.toThrow(/collision/);
   });
 
   it("round trips pass records and link bindings under the prefix", async () => {
     const kv = memoryKv();
-    const s = kvStores(kv, { prefix: "col1:" });
+    const s = kvStores(kv, { ...SCOPE, prefix: "col1:" });
     await s.passes.put({ tokenId: "7", serial: "s", generation: 2, lastIssuedTo: null, links: { feed: "t" }, downloads: {}, updatedAt: 1, rotatedAt: 1 });
     expect((await s.passes.get("7"))!.links).toEqual({ feed: "t" });
     await s.links.put("t", { kind: "action", tokenId: "7", name: "feed", generation: 2 });
-    expect(await kv.get("col1:link:t")).not.toBeNull();
+    expect(await kv.get(`col1:1:${CONTRACT.toLowerCase()}:link:t`)).not.toBeNull();
     await s.links.delete(["t"]);
     expect(await s.links.get("t")).toBeNull();
   });
@@ -122,23 +173,24 @@ describe("kvStores", () => {
       },
       del: (k) => inner.del(k),
     };
-    const s = kvStores(parsing);
+    const s = kvStores(parsing, SCOPE);
     const r = record();
     await s.nonces.issue("n", r, 60);
     expect(await s.nonces.consume("n")).toEqual(r);
     expect(await s.nonces.consume("n")).toBeNull();
-    const h = buildHarness({ stores: kvStores(parsing) });
+    const h = buildHarness({ stores: kvStores(parsing, SCOPE) });
     const owner = newSigner();
     const links = await issuePassTo(h, owner);
     expect((await h.post(links.feed!)).status).toBe(200);
   });
 
   it("drives a full issuer: claim, capability link, rotation", async () => {
-    const h = buildHarness({ stores: kvStores(asyncKv()) });
+    const h = buildHarness({ stores: kvStores(asyncKv(), SCOPE) });
     const owner = newSigner();
     const links = await issuePassTo(h, owner);
     expect((await h.post(links.feed!)).status).toBe(200);
     await h.issuer.onTransfer(TOKEN_ID, owner.address, newSigner().address);
+    h.clock.advance(31_000); // past the repeat window: a new request, not the holder's phone asking again
     expect((await h.post(links.feed!)).status).toBe(404);
   });
 });
@@ -165,7 +217,7 @@ describe("pass records", () => {
     // Simulate a lost race: the binding survives but the record moved on.
     const rec = (await h.issuer.stores.passes.get(TOKEN_ID))!;
     await h.issuer.stores.passes.put({ ...rec, links: { ...rec.links, feed: "somethingelse" } });
-    expect(await h.issuer.stores.links.get(token)).not.toBeNull();
+    expect(await h.issuer.stores.links.get(await linkDigest(token))).not.toBeNull();
     expect((await h.post(links.feed!)).status).toBe(404);
   });
 });

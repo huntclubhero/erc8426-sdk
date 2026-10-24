@@ -12,7 +12,7 @@ git clone --depth 1 --branch v1.16.2 https://github.com/foundry-rs/forge-std pac
 pnpm test:contracts
 ```
 
-You need Node 20 or newer, pnpm 10, and [Foundry](https://book.getfoundry.sh) for the contracts and the end-to-end suite.
+You need Node 22 or newer (the `engines` field of every package says so; Node 24 works too), pnpm 10, and [Foundry](https://book.getfoundry.sh) for the contracts and the end-to-end suite.
 
 ## Ground rules
 

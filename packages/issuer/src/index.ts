@@ -1,6 +1,7 @@
 export {
   createIssuer,
   isFileProvider,
+  isProductionEnv,
   type CreateIssuerOptions,
   type Issuer,
   type IssuedChallenge,
@@ -11,8 +12,14 @@ export {
 } from "./issuer.js";
 export { isPassFileProvider, type PassDeliveryProvider, type PassFile, type PassFileProvider } from "@erc8426/core";
 export {
+  DEFAULT_RATE_LIMITS,
+  DEFAULT_REPEAT_WINDOW_SECONDS,
   IssuerConfigError,
+  MAINNET_CHAIN_IDS,
+  isKnownMainnet,
   resolveConfig,
+  resolveEnvironment,
+  type IssuerEnvironment,
   type ActionContext,
   type ActionDefinition,
   type CapabilityConfig,
@@ -20,15 +27,43 @@ export {
   type IssuerConfig,
   type IssuerMode,
   type LinkPageContext,
+  type RateLimitConfig,
+  type RepeatConfig,
   type ResolvedIssuerConfig,
+  type ResolvedRateLimitConfig,
+  type ResolvedRepeatConfig,
 } from "./config.js";
+export {
+  RepeatCoalescer,
+  kvRepeatStore,
+  memoryRepeatStore,
+  sha256Hex,
+  type KvRepeatStoreOptions,
+  type MemoryRepeatStoreOptions,
+  type RecordedOutcome,
+  type RepeatStore,
+} from "./repeat.js";
+export {
+  REMOTE_ADDRESS_HEADER,
+  defaultClientKey,
+  kvRateLimiter,
+  memoryRateLimiter,
+  unlimited,
+  type KvRateLimiterOptions,
+  type MemoryRateLimiterOptions,
+  type RateLimitDecision,
+  type RateLimitRule,
+  type RateLimiter,
+} from "./rateLimit.js";
 export { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 export {
+  kvKeyNamespace,
   kvStores,
   memoryKv,
   memoryStores,
   type IssuerStores,
   type KeyValueStore,
+  type KvStoresOptions,
   type KvSetOptions,
   type LinkBinding,
   type LinkStore,
@@ -69,7 +104,17 @@ export {
 } from "./signature.js";
 export { MAX_BODY_BYTES } from "./http.js";
 export { authorize, type AuthorizeDeps, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
-export { defaultConfirmPage, newLinkToken, newSerial } from "./capability.js";
+export {
+  LINK_PAGE_HEADERS,
+  LinkKeyring,
+  defaultConfirmPage,
+  ephemeralLinkSecret,
+  linkDigest,
+  newLinkSeed,
+  newLinkToken,
+  newSerial,
+  withLinkPageHeaders,
+} from "./capability.js";
 export { watchPassUpdates, watchTransfers, type WatchEventClient, type WatchOptions } from "./watcher.js";
 export {
   expressMiddleware,

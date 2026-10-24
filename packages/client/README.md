@@ -9,12 +9,12 @@ npm install @erc8426/client @erc8426/core viem
 ## What it does for you
 
 - **Discovery.** `supportsWalletPass` runs the full ERC-165 detection procedure for `0xef5f1e71` and answers `false` (never throws) for contracts without ERC-165.
-- **Both configurations.** A manifest served without a proof is the public configuration. A `401 proof_required` is the gated configuration: the client fetches the acquire challenge, has your signer sign it, and retries with the `X-Wallet-Pass-Proof` and `X-Wallet-Pass-Signature` headers.
+- **Both configurations.** A manifest served without a proof is the public configuration. A `401 proof_required` is the gated configuration: the client fetches the acquire challenge, has your signer sign it, and retries with the `Wallet-Pass-Proof` and `Wallet-Pass-Signature` headers (and, for this release, the pre-0.3.0 `X-` names beside them, so a 0.2.x issuer still answers; a later minor stops sending those).
 - **Protection for the signer.** Before a challenge reaches the signer, the client checks it is scoped to what the user asked for. The challenge must be served from the same origin as the endpoint the proof will be sent to, and its SIWE domain must be exactly that endpoint's host (including a non-default port), so a signature meant for one verifier is never handed to another. The address must be the signer, the chain id the token's chain, and the resources exactly two in order: the CAIP-19 token, then the action URN (an extra resource such as a ReCap is refused). The expiration must be in the future and not too far away. The statement line is free text and is not relied on. Anything else is refused with `source: "client"` and nothing is signed.
 - **Safe URLs.** Everything the client fetches came from a contract or an issuer, so it fetches only https (or http on a loopback host), and it never returns an acquisition URL for navigation unless it is https (or http on localhost). `javascript:`, `data:` and non-local `http:` are refused.
 - **No caching.** The spec says clients MUST NOT durably cache acquisition URLs and SHOULD fetch the manifest at the moment of the add-to-wallet action. Every call re-reads `passURI` and refetches the manifest.
 - **Typed errors.** `403` is always `not_owner` (the spec reserves it for a verified proof from an account that is not entitled). `503` is `read_failed` with `retryable: true` and `retryAfterSeconds` from `Retry-After`. Other refusals keep the issuer's `error` code when it is a core code; an issuer code outside the core set (an integrator's cooldown, `invalid_params`) becomes `action_refused` for a 4xx or `server_error` for a 5xx, with the issuer's string in `serverCode`. `network` means only a fetch that failed or timed out.
-- **Typed chain reads.** A `passURI` or `tokenURI` revert (a token that does not exist or was burned) is `not_found` with `source: "chain"`; an address with no contract is `unsupported`; an RPC that could not answer is `network` with `retryable: true`. No raw viem error escapes.
+- **Typed chain reads.** A `passURI` or `tokenURI` revert (a token that does not exist or was burned) is `unknown_capability` with `source: "chain"`; an address with no contract is `unsupported`; an RPC that could not answer is `network` with `retryable: true`. No raw viem error escapes.
 - **Freshness events.** `PassUpdate` and `BatchPassUpdate` (inclusive range) come through one callback shape.
 
 ## Quick start
@@ -118,7 +118,7 @@ These match the `@erc8426/issuer` routes. Query parameters are always added with
 
 ## Issuer notes (CORS)
 
-The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `X-Wallet-Pass-Proof` and `X-Wallet-Pass-Signature`, so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers: X-Wallet-Pass-Proof, X-Wallet-Pass-Signature`.
+The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `Wallet-Pass-Proof` and `Wallet-Pass-Signature` (plus the `X-` names for this release), so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers` naming them (`PROOF_HEADER_NAMES` from `@erc8426/core` is the list). An `@erc8426/issuer` sends no CORS headers unless configured (`cors: { origins: [...] }` or an explicit `"*"`), so a browser client on another origin needs the issuer to name it.
 
 ## API
 

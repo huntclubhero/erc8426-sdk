@@ -1,6 +1,6 @@
-import { X509Certificate } from "node:crypto";
+import { X509Certificate, createPrivateKey } from "node:crypto";
 
-import type { BarcodeFormat, ImageSource, PassContent, PassField, PassLink, PassStyle } from "@erc8426/core";
+import { MAX_FEATURED_ACTIONS, type BarcodeFormat, type FeaturedAction, type ImageSource, type PassContent, type PassField, type PassLink, type PassStyle } from "@erc8426/core";
 import { PKPass } from "passkit-generator";
 
 import { resolveImage, type ImageFetchOptions } from "./images.js";
@@ -38,6 +38,9 @@ export interface PassJsonOptions {
 
 export interface BuildPkpassOptions extends PassJsonOptions {
   certificates: AppleCertificates;
+  /// The clock the signer certificate's validity period is checked against.
+  ///  Default: the current time. For tests.
+  now?: Date;
   /// Images used when the content does not supply a slot, typically the
   ///  collection icon and logo. Apple refuses to open a pass without an icon.
   images?: PassContent["images"];
@@ -119,6 +122,48 @@ const POSTER_MAX_FOOTER = 1;
 ///  with the full field set, so iOS 26 and earlier render the legacy layout.
 ///  Wallet prefers the poster dictionary when it knows it. Needs
 ///  passkit-generator 3.6 or later at signing time: 3.5 strips the key.
+/// The top-level `featuredActions` array for pass.json, or undefined when
+///  the content carries none. Up to two; each URL absolute https (a
+///  capability link is https, and a scheme-less value such as Apple's own
+///  "www.example.com/offers" example would be ambiguous); a `link` reference
+///  resolves to the URL of the content's link with that key, at render time,
+///  so it rotates with the pass. On voided (superseded) content the entries
+///  that point at links are dropped: the old pass must not keep offering
+///  the retired capability on its face.
+export function featuredActionsFor(content: PassContent): Array<{ identifier: string; type: string; url: string }> | undefined {
+  const actions = content.featuredActions;
+  if (!actions || actions.length === 0) return undefined;
+  if (actions.length > MAX_FEATURED_ACTIONS) {
+    throw new Error(`Apple Wallet shows at most ${MAX_FEATURED_ACTIONS} featured actions; ${actions.length} given`);
+  }
+  const ids = new Set<string>();
+  const out: Array<{ identifier: string; type: string; url: string }> = [];
+  for (const a of actions as FeaturedAction[]) {
+    if (typeof a.id !== "string" || a.id === "") throw new Error("a featured action needs a non-empty id");
+    if (ids.has(a.id)) throw new Error(`duplicate featured action id "${a.id}"`);
+    ids.add(a.id);
+    if (typeof a.type !== "string" || a.type === "") throw new Error(`featured action "${a.id}" needs a type (for example "membershipBenefits")`);
+    let url: string;
+    if (a.link !== undefined) {
+      if (content.voided) continue;
+      const link = (content.links ?? []).find((l) => l.key === a.link);
+      if (!link) throw new Error(`featured action "${a.id}" references link "${a.link}", which the content does not carry`);
+      url = link.url;
+    } else {
+      url = a.url as string;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`featured action "${a.id}" url must be an absolute https URL, got "${String(url)}"`);
+    }
+    if (parsed.protocol !== "https:") throw new Error(`featured action "${a.id}" url must be https, got "${url}"`);
+    out.push({ identifier: a.id, type: a.type, url });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<string, unknown> {
   const style = content.style ?? "generic";
   if (content.footer?.length && style !== "posterGeneric") {
@@ -184,6 +229,8 @@ export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<
   if (relevant) json.relevantDate = passDate(relevant);
   if (content.expiresAt) json.expirationDate = passDate(content.expiresAt);
   if (content.voided) json.voided = true;
+  const featured = featuredActionsFor(content);
+  if (featured) json.featuredActions = featured;
   if (content.locations?.length) {
     // Apple honours at most ten locations per pass.
     json.locations = content.locations.slice(0, 10).map((l) => ({
@@ -285,18 +332,32 @@ function pem(value: string | Uint8Array): string | Buffer {
   return typeof value === "string" ? value : Buffer.from(value);
 }
 
-/// Refuse a signer certificate that was not issued for this pass. An Apple Pass
-///  Type ID certificate carries the pass type identifier as the subject's UID
-///  (OID 0.9.2342.19200300.100.1.1) and the team identifier as its OU. A pass
-///  signed with a certificate for another type or team is accepted by every
-///  signing library and then installs nowhere, with no error anyone sees.
-///  Apple's own Pass Builder compares exactly these two attributes
-///  (PassCertificate.validateAttributes) but only when asked; passkit-generator
-///  never does. A certificate without a UID (a bare development certificate)
-///  carries nothing to compare and passes through.
+/// What else `validateSignerCertificate` checks when given it.
+export interface SignerCertificateCheck {
+  /// The private key that will sign. Checked to be the certificate's own:
+  ///  a bundle signed with another key is accepted by the signing library
+  ///  and refused by every device.
+  signerKey?: string | Uint8Array;
+  signerKeyPassphrase?: string;
+  /// The clock the validity period is checked against. Default: now.
+  now?: Date;
+}
+
+/// Refuse a signer certificate that cannot produce an installable pass. An
+///  Apple Pass Type ID certificate carries the pass type identifier as the
+///  subject's UID (OID 0.9.2342.19200300.100.1.1) and the team identifier as
+///  its OU; a pass signed with a certificate for another type or team, with
+///  an expired or not yet valid certificate, or with a key that is not the
+///  certificate's own, is accepted by every signing library and then installs
+///  nowhere, with no error anyone sees. Apple's own Pass Builder compares the
+///  two subject attributes (PassCertificate.validateAttributes) but only when
+///  asked; passkit-generator never does. A certificate with no UID at all is
+///  not a Pass Type ID certificate (a TLS or development certificate handed
+///  over by mistake) and is refused outright.
 export function validateSignerCertificate(
   signerCert: string | Uint8Array,
   opts: Pick<PassJsonOptions, "passTypeIdentifier" | "teamIdentifier">,
+  check: SignerCertificateCheck = {},
 ): void {
   const cert = new X509Certificate(pem(signerCert));
   const attrs = new Map<string, string>();
@@ -306,11 +367,41 @@ export function validateSignerCertificate(
   }
   const uid = attrs.get("UID");
   const ou = attrs.get("OU");
-  if (uid !== undefined && uid !== opts.passTypeIdentifier) {
+  if (uid === undefined) {
+    throw new Error(
+      `signer certificate has no subject UID, so it is not a Pass Type ID certificate (its subject is "${cert.subject.replace(/\n/g, ", ")}"): a pass it signs would never install`,
+    );
+  }
+  if (uid !== opts.passTypeIdentifier) {
     throw new Error(`signer certificate is for pass type "${uid}", not "${opts.passTypeIdentifier}": a pass it signs would never install`);
   }
   if (ou !== undefined && ou !== opts.teamIdentifier) {
     throw new Error(`signer certificate belongs to team "${ou}", not "${opts.teamIdentifier}": a pass it signs would never install`);
+  }
+  const now = check.now ?? new Date();
+  const validFrom = new Date(cert.validFrom);
+  const validTo = new Date(cert.validTo);
+  if (Number.isNaN(validFrom.getTime()) || Number.isNaN(validTo.getTime())) {
+    throw new Error(`signer certificate has an unreadable validity period ("${cert.validFrom}" to "${cert.validTo}")`);
+  }
+  if (now.getTime() < validFrom.getTime()) {
+    throw new Error(`signer certificate is not valid until ${validFrom.toISOString()} (now ${now.toISOString()}): a pass it signs would never install`);
+  }
+  if (now.getTime() > validTo.getTime()) {
+    throw new Error(
+      `signer certificate expired on ${validTo.toISOString()} (now ${now.toISOString()}): renew the Pass Type ID certificate in the Apple Developer portal; a pass it signs would never install`,
+    );
+  }
+  if (check.signerKey !== undefined) {
+    let key: ReturnType<typeof createPrivateKey>;
+    try {
+      key = createPrivateKey({ key: pem(check.signerKey), ...(check.signerKeyPassphrase !== undefined ? { passphrase: check.signerKeyPassphrase } : {}) });
+    } catch (e) {
+      throw new Error(`signer key could not be read${check.signerKeyPassphrase === undefined ? " (is it encrypted? pass signerKeyPassphrase)" : ""}: ${(e as Error).message}`);
+    }
+    if (!cert.checkPrivateKey(key)) {
+      throw new Error("signer key is not the private key of the signer certificate: a pass signed with it would never install");
+    }
   }
 }
 
@@ -318,7 +409,11 @@ export function validateSignerCertificate(
 ///  `Content-Type: application/vnd.apple.pkpass`.
 export async function buildPkpass(content: PassContent, options: BuildPkpassOptions): Promise<Uint8Array> {
   const c = options.certificates;
-  validateSignerCertificate(c.signerCert, options);
+  validateSignerCertificate(c.signerCert, options, {
+    signerKey: c.signerKey,
+    ...(c.signerKeyPassphrase !== undefined ? { signerKeyPassphrase: c.signerKeyPassphrase } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
   const images = await passImages(content, options.images, options.imageFetch);
   const files: Record<string, Buffer> = {
     "pass.json": Buffer.from(JSON.stringify(toPassJson(content, options))),

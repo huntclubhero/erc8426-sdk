@@ -1,6 +1,9 @@
 import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
+import { defaultClientKey, memoryRateLimiter, unlimited, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+import type { RepeatStore } from "./repeat.js";
+
 /// The two configurations the standard defines under Acquisition URLs.
 ///
 ///  - "public": the manifest is served to anyone. Its acquisition URLs are one
@@ -80,13 +83,94 @@ export interface CapabilityConfig {
   confirmPage?: (ctx: LinkPageContext) => Response | Promise<Response>;
 }
 
+/// Rate limits on the anonymous surface. Each endpoint family has one rule
+///  (at most `limit` attempts per `windowSeconds`), keyed by client address
+///  plus the token in the path, so one client cannot exhaust an endpoint for
+///  everyone and one token's traffic cannot hide another's. Over the limit
+///  the issuer answers 429 `{ "error": "rate_limited" }` with `Retry-After`.
+export interface RateLimitConfig {
+  /// Where counts live. Default `memoryRateLimiter()` (exact sliding window,
+  ///  one process). Pass `kvRateLimiter(kv)` for one limit across instances,
+  ///  or any `RateLimiter`.
+  limiter?: RateLimiter;
+  /// GET /:tokenId/challenge, keyed by client and token. Default 30 per 60 s.
+  ///  Every request mints a nonce and a store write. `false` disables.
+  challenge?: RateLimitRule | false;
+  /// GET /:tokenId (the manifest), keyed by client and token. Default 60 per
+  ///  60 s. A gated request costs a signature check and a chain read.
+  manifest?: RateLimitRule | false;
+  /// GET and POST /links/:link and GET /passes/:link, keyed by client and
+  ///  link. Default 60 per 60 s. A POST costs a chain read and an action.
+  capability?: RateLimitRule | false;
+  /// The client identity a request is counted under. Default
+  ///  `defaultClientKey` (proxy headers, then the socket address the Node
+  ///  adapter recorded). Return null to count every unknown client together.
+  clientKey?: (request: Request) => string | null;
+}
+
+export interface ResolvedRateLimitConfig {
+  limiter: RateLimiter;
+  challenge: RateLimitRule | false;
+  manifest: RateLimitRule | false;
+  capability: RateLimitRule | false;
+  clientKey: (request: Request) => string | null;
+}
+
+/// Identical repeats answered with the first outcome (see repeat.ts). iOS
+///  in-app browsers resend a POST the phone aborted, so without this every
+///  tap on a pass link could run an action twice or meet `nonce_invalid`.
+export interface RepeatConfig {
+  /// How long after a request completes an identical repeat still gets its
+  ///  outcome. Default 30 seconds.
+  windowSeconds?: number;
+  /// Where outcomes live. Default `memoryRepeatStore()` (one process). Pass
+  ///  `kvRepeatStore(kv)` so instances share completed outcomes.
+  store?: RepeatStore;
+}
+
+export interface ResolvedRepeatConfig {
+  windowSeconds: number;
+  /// Absent means the in-memory store, built by the issuer on its own clock.
+  store?: RepeatStore;
+}
+
 export interface CorsConfig {
   /// "*" or an explicit allowlist of origins (scheme://host[:port]).
   origins: "*" | string[];
   maxAgeSeconds?: number;
 }
 
+/// Chains the issuer treats as mainnets when deciding whether to warn that
+///  production mode is undetermined: Ethereum, Optimism, Polygon, Base,
+///  Arbitrum One. Kept short on purpose; any other chain id is neither
+///  assumed production nor test.
+export const MAINNET_CHAIN_IDS: readonly number[] = [1, 10, 137, 8453, 42161];
+
+export function isKnownMainnet(chainId: number): boolean {
+  return MAINNET_CHAIN_IDS.includes(chainId);
+}
+
+export type IssuerEnvironment = "production" | "development";
+
 export interface IssuerConfig {
+  /// Whether this issuer is the real thing. "production" refuses every
+  ///  setup that only works for one process or one session (today: the
+  ///  in-memory store fallback); "development" allows them with a warning.
+  ///  When set it decides; when left out, NODE_ENV=production means
+  ///  production and any other NODE_ENV means development. When neither is
+  ///  set and `chainId` is a known mainnet (MAINNET_CHAIN_IDS) the issuer
+  ///  warns once that production mode is undetermined, because a guard keyed
+  ///  on a variable nobody set protects nothing. Set it explicitly.
+  environment?: IssuerEnvironment;
+  /// Secret the capability and download link tokens are derived from (HMAC
+  ///  over a random seed kept in the pass record), so that a read of the
+  ///  store alone yields no usable link: the store holds seeds and token
+  ///  digests, never a token. At least 32 bytes (`openssl rand -base64 32`),
+  ///  the same on every instance, and rotated only when every link should
+  ///  die at once. REQUIRED in production. Left out in development, the
+  ///  issuer makes a random one and warns: links then stop resolving when
+  ///  the process restarts.
+  linkSecret?: string | Uint8Array;
   /// Verifier identity: the SIWE `domain` every challenge names and every
   ///  proof is checked against, for example "issuer.example". An authority,
   ///  with no scheme or path.
@@ -117,16 +201,39 @@ export interface IssuerConfig {
   /// Pass-reachable actions, keyed by action name.
   actions?: Record<string, ActionDefinition>;
   capability?: CapabilityConfig;
-  /// CORS for browser clients. Default { origins: "*" }: no cookies are
-  ///  involved (proofs travel in headers), so a wildcard is safe. `false`
-  ///  disables CORS headers entirely.
+  /// CORS for browser clients: a marketplace or wallet web app that fetches
+  ///  the manifest and resolves a gated one from its own origin. Default:
+  ///  none. With no `cors` the issuer sends no Access-Control headers and a
+  ///  browser on another origin cannot read any response, which is what a
+  ///  deployment whose only browser caller is its own site wants. To serve
+  ///  browser clients on other origins, name them (`{ origins: [...] }`) or
+  ///  say `{ origins: "*" }` explicitly. Until 0.3.0 the default was `"*"`,
+  ///  which made every manifest, including a gated one resolved with a
+  ///  stolen proof, readable cross-origin by any page; no cookies are
+  ///  involved, so a wildcard is not a credential leak, but it is a decision
+  ///  the operator should make rather than inherit. `false` is the same as
+  ///  leaving it out and is kept for explicitness.
   cors?: CorsConfig | false;
   /// Largest BatchPassUpdate range walked id by id. Wider ranges are served
   ///  from the pass store's index when it has one. Default 10000.
   maxBatchRange?: number;
+  /// Rate limits on the challenge, manifest and capability endpoints. On by
+  ///  default with an in-process limiter and the defaults in
+  ///  `RateLimitConfig`; `false` turns limiting off entirely.
+  rateLimit?: RateLimitConfig | false;
+  /// Answer an identical repeat of a POST (same link or nonce, same bytes)
+  ///  with the first request's outcome instead of running it again or
+  ///  refusing it. On by default with a 30 second window; `false` turns it
+  ///  off, so every presentation is judged on its own.
+  repeat?: RepeatConfig | false;
 }
 
 export interface ResolvedIssuerConfig {
+  /// The explicit option, or what NODE_ENV implied, or "unknown" when
+  ///  neither was set.
+  environment: IssuerEnvironment | "unknown";
+  /// The configured link secret as bytes, or null when none was given.
+  linkSecret: Uint8Array | null;
   domain: string;
   baseUrl: string;
   basePath: string;
@@ -144,6 +251,8 @@ export interface ResolvedIssuerConfig {
   capability: CapabilityConfig;
   cors: CorsConfig | false;
   maxBatchRange: number;
+  rateLimit: ResolvedRateLimitConfig;
+  repeat: ResolvedRepeatConfig | false;
 }
 
 /// Thrown by `createIssuer` for a configuration the spec does not allow or
@@ -165,7 +274,32 @@ function positiveInt(name: string, value: number | undefined, fallback: number):
 
 /// Validate a configuration and fill defaults. Every refusal here is a rule
 ///  of the standard or a setup that would fail at the first request.
+/// The environment the issuer runs in: the explicit option wins; NODE_ENV is
+///  only the fallback when it is unset. Guarded so the issuer still runs
+///  where there is no `process`.
+export function resolveEnvironment(explicit: IssuerEnvironment | undefined): IssuerEnvironment | "unknown" {
+  if (explicit !== undefined) {
+    if (explicit !== "production" && explicit !== "development") {
+      throw new IssuerConfigError(`environment must be "production" or "development", got "${String(explicit)}"`);
+    }
+    return explicit;
+  }
+  const nodeEnv = typeof process !== "undefined" ? process.env?.NODE_ENV : undefined;
+  if (nodeEnv === undefined || nodeEnv === "") return "unknown";
+  return nodeEnv === "production" ? "production" : "development";
+}
+
 export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
+  const environment = resolveEnvironment(config.environment);
+  let linkSecret: Uint8Array | null = null;
+  if (config.linkSecret !== undefined) {
+    if (typeof config.linkSecret === "string") linkSecret = new TextEncoder().encode(config.linkSecret);
+    else if (config.linkSecret instanceof Uint8Array) linkSecret = config.linkSecret;
+    else throw new IssuerConfigError("linkSecret must be a string or a Uint8Array");
+    if (linkSecret.byteLength < 32) {
+      throw new IssuerConfigError(`linkSecret must be at least 32 bytes (got ${linkSecret.byteLength}); generate one with "openssl rand -base64 32"`);
+    }
+  }
   if (typeof config.domain !== "string" || !DOMAIN_RE.test(config.domain)) {
     throw new IssuerConfigError(
       `domain must be a bare authority such as "issuer.example" or "localhost:8787" (no scheme, no path), got "${String(config.domain)}"`,
@@ -218,6 +352,8 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
   }
   const retryAfterSeconds = positiveInt("retryAfterSeconds", config.retryAfterSeconds, 5);
   const maxBatchRange = positiveInt("maxBatchRange", config.maxBatchRange, 10_000);
+  const rateLimit = resolveRateLimit(config.rateLimit);
+  const repeat = resolveRepeat(config.repeat);
 
   const capability: CapabilityConfig = config.capability ?? { enabled: false };
   if (capability.enabled && config.mode !== "gated") {
@@ -257,15 +393,25 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     capabilityActions.push(name);
   }
 
-  let cors: CorsConfig | false = config.cors === undefined ? { origins: "*" } : config.cors;
+  // No CORS unless asked for: a wildcard has to be written down.
+  let cors: CorsConfig | false = config.cors === undefined ? false : config.cors;
   if (cors !== false) {
     if (cors.origins !== "*" && !Array.isArray(cors.origins)) {
       throw new IssuerConfigError('cors.origins must be "*" or an array of origins');
+    }
+    if (Array.isArray(cors.origins)) {
+      for (const o of cors.origins) {
+        if (typeof o !== "string" || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
+          throw new IssuerConfigError(`cors.origins entries must be origins (scheme://host[:port]) with no path, got "${String(o)}"`);
+        }
+      }
     }
     cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
   }
 
   return {
+    environment,
+    linkSecret,
     domain: config.domain,
     baseUrl,
     basePath,
@@ -281,5 +427,47 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     capability,
     cors,
     maxBatchRange,
+    rateLimit,
+    repeat,
+  };
+}
+
+export const DEFAULT_REPEAT_WINDOW_SECONDS = 30;
+
+function resolveRepeat(config: RepeatConfig | false | undefined): ResolvedRepeatConfig | false {
+  if (config === false) return false;
+  const c = config ?? {};
+  if (c.store !== undefined && (typeof c.store.get !== "function" || typeof c.store.put !== "function")) {
+    throw new IssuerConfigError("repeat.store must implement get() and put()");
+  }
+  return { windowSeconds: positiveInt("repeat.windowSeconds", c.windowSeconds, DEFAULT_REPEAT_WINDOW_SECONDS), ...(c.store ? { store: c.store } : {}) };
+}
+
+export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability", RateLimitRule>> = {
+  challenge: { limit: 30, windowSeconds: 60 },
+  manifest: { limit: 60, windowSeconds: 60 },
+  capability: { limit: 60, windowSeconds: 60 },
+};
+
+function rule(name: string, value: RateLimitRule | false | undefined, fallback: RateLimitRule): RateLimitRule | false {
+  if (value === false) return false;
+  if (value === undefined) return fallback;
+  if (typeof value !== "object" || value === null) throw new IssuerConfigError(`rateLimit.${name} must be { limit, windowSeconds } or false`);
+  return { limit: positiveInt(`rateLimit.${name}.limit`, value.limit, fallback.limit), windowSeconds: positiveInt(`rateLimit.${name}.windowSeconds`, value.windowSeconds, fallback.windowSeconds) };
+}
+
+function resolveRateLimit(config: RateLimitConfig | false | undefined): ResolvedRateLimitConfig {
+  if (config === false) {
+    return { limiter: unlimited, challenge: false, manifest: false, capability: false, clientKey: defaultClientKey };
+  }
+  const c = config ?? {};
+  if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
+  if (c.clientKey !== undefined && typeof c.clientKey !== "function") throw new IssuerConfigError("rateLimit.clientKey must be a function");
+  return {
+    limiter: c.limiter ?? memoryRateLimiter(),
+    challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
+    manifest: rule("manifest", c.manifest, DEFAULT_RATE_LIMITS.manifest),
+    capability: rule("capability", c.capability, DEFAULT_RATE_LIMITS.capability),
+    clientKey: c.clientKey ?? defaultClientKey,
   };
 }

@@ -189,7 +189,7 @@ describe("audit B: no SSRF through a redirect", () => {
       let url = String(input);
       for (let followed = 0; ; followed += 1) {
         seen.push(url);
-        const res = routes[url.split("?")[0]!]?.() ?? Response.json({ error: "not_found" }, { status: 404 });
+        const res = routes[url.split("?")[0]!]?.() ?? Response.json({ error: "unknown_capability" }, { status: 404 });
         const location = res.headers.get("location");
         if (init.redirect === "manual" || location === null || followed >= 20) return res;
         url = new URL(location, url).toString();

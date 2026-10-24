@@ -174,6 +174,14 @@ export function fakeChain(opts: { chainId?: number; contracts: Record<string, Fa
 export interface IssuerFaults {
   /// Answer a garbage proof with 403 (reserved for not-entitled accounts).
   garbageProof403?: boolean;
+  /// Answer with the 0.2.x code names (malformed_proof, invalid_address, not_found).
+  legacyCodes?: boolean;
+  /// Serve the manifest as text/plain.
+  manifestAsText?: boolean;
+  /// Put this `version` in the manifest (absent by default, as a pre-0.3.0 issuer serves it).
+  manifestVersion?: unknown;
+  /// Read only the pre-0.3.0 X- proof header names, as a 0.2.x issuer does.
+  legacyHeadersOnly?: boolean;
   /// Put acquisition URLs in the 401 body.
   leakUrlsIn401?: boolean;
   /// Issue the same nonce every time.
@@ -230,12 +238,24 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
   let rotation = 0;
 
   const manifestFor = (tokenId: string) => ({
+    ...(faults.manifestVersion !== undefined ? { version: faults.manifestVersion } : {}),
     formats: {
       apple: `${base}/files/${tokenId}-${rotation}.pkpass`,
       google: faults.badGoogleLink ? "https://example.com/not-google" : `https://pay.google.com/gp/v/save/jwt${tokenId}r${rotation}`,
     },
     updatedAt: 1754500000,
   });
+  const manifestHeaders = (): Record<string, string> => ({ "cache-control": "no-store", ...(faults.manifestAsText ? { "content-type": "text/plain" } : {}) });
+  // A 0.2.x issuer knows only the X- names.
+  const proofFrom = (headers: Headers) => {
+    if (!faults.legacyHeadersOnly) return readProofHeaders(headers);
+    const legacy = new Headers();
+    for (const name of ["x-wallet-pass-proof", "x-wallet-pass-signature"]) {
+      const v = headers.get(name);
+      if (v !== null) legacy.set(name, v);
+    }
+    return readProofHeaders(legacy);
+  };
 
   const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -271,7 +291,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
     const req = new Request(input, init);
     const url = new URL(req.url);
     requests.push({ method: req.method, url: req.url, headers: req.headers });
-    if (url.origin !== new URL(base).origin) return json(404, { error: "not_found" });
+    if (url.origin !== new URL(base).origin) return json(404, { error: "unknown_capability" });
     const path = url.pathname;
     let m: RegExpExecArray | null;
 
@@ -293,7 +313,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
           account = getAddress("0x000000000000000000000000000000000000dEaD");
         } else account = getAddress(address);
       } catch {
-        return json(400, { error: "invalid_address" });
+        return json(400, { error: faults.legacyCodes ? "invalid_address" : "invalid_request" });
       }
       const nonce = faults.staticNonce ? "staticnonce1234" : generateNonce();
       nonces.add(nonce);
@@ -313,17 +333,17 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
 
     if ((m = /^\/pass\/([0-9]+)$/.exec(path)) && req.method === "GET") {
       const tokenId = m[1]!;
-      if (opts.ownerOf(tokenId) === null) return json(404, { error: "not_found" });
-      if (opts.mode === "public" || faults.noGate) return json(200, manifestFor(tokenId), { "cache-control": "no-store" });
+      if (opts.ownerOf(tokenId) === null) return json(404, { error: faults.legacyCodes ? "not_found" : "unknown_capability" });
+      if (opts.mode === "public" || faults.noGate) return json(200, manifestFor(tokenId), manifestHeaders());
       const challenge = `${base}/pass/${tokenId}/challenge`;
-      const proof = readProofHeaders(req.headers);
+      const proof = proofFrom(req.headers);
       if (proof.kind === "absent") {
         const body: Record<string, unknown> = { error: "proof_required", challenge };
         if (faults.leakUrlsIn401) body.formats = manifestFor(tokenId).formats;
         return json(401, body);
       }
       if (proof.kind === "malformed") {
-        return json(faults.garbageProof403 ? 403 : 400, { error: "malformed_proof" });
+        return json(faults.garbageProof403 ? 403 : 400, { error: faults.legacyCodes ? "malformed_proof" : "invalid_request" });
       }
       const result = await verify(proof.proof.message, proof.proof.signature, tokenId, "acquire");
       if (!result.ok) {
@@ -331,7 +351,9 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
         return json(status, status === 401 ? { error: result.error, challenge } : { error: result.error }, status === 503 ? { "retry-after": "5" } : {});
       }
       rotation += 1;
-      return json(200, manifestFor(tokenId), faults.noStore ? {} : { "cache-control": "no-store" });
+      const gatedHeaders = manifestHeaders();
+      if (faults.noStore) delete gatedHeaders["cache-control"];
+      return json(200, manifestFor(tokenId), gatedHeaders);
     }
 
     if ((m = /^\/pass\/([0-9]+)\/actions\/([A-Za-z0-9._-]+)$/.exec(path)) && req.method === "POST") {
@@ -358,7 +380,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
       return json(200, { ok: true, rotated: true, ...manifestFor(tokenId) }, { "cache-control": "no-store" });
     }
 
-    return json(404, { error: "not_found" });
+    return json(404, { error: "unknown_capability" });
   };
 
   return {

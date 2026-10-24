@@ -4,6 +4,14 @@ import { TOKEN_ID, buildHarness, claim, issuePassTo, newSigner, proof, signChall
 
 const ROTATE = `/wallet-pass/${TOKEN_ID}/rotate`;
 
+/// Every capability link page, HTML or JSON, carries these.
+function expectLinkPageHeaders(res: Response) {
+  expect(res.headers.get("cache-control")).toBe("no-store");
+  expect(res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+  expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+}
+
 describe("capability links (The capability configuration)", () => {
   it("performs the bound action for the holder the link was issued to, with no signature", async () => {
     const h = buildHarness();
@@ -55,7 +63,7 @@ describe("capability links (The capability configuration)", () => {
     expect(await h.issuer.onTransfer(TOKEN_ID, seller.address, buyer.address)).toBe(true);
     const dead = await h.post(links.feed!);
     expect(dead.status).toBe(404);
-    expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
+    expect(((await dead.json()) as { error: string }).error).toBe("unknown_capability");
     // Links minted at the transfer are issued to no one until the buyer
     // claims: 404, since no verified account was refused.
     const minted = new URL((await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!).pathname;
@@ -91,7 +99,7 @@ describe("capability links (The capability configuration)", () => {
     const reads = h.chain.reads;
     const res = await h.get(links.water!);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("no-store");
+    expectLinkPageHeaders(res);
     expect(await res.json()).toEqual({
       tokenId: TOKEN_ID,
       action: "water",
@@ -102,7 +110,9 @@ describe("capability links (The capability configuration)", () => {
     });
     expect(h.executed).toHaveLength(0);
     expect(h.chain.reads).toBe(reads);
-    expect((await h.get("/wallet-pass/links/not-a-capability")).status).toBe(404);
+    const dead = await h.get("/wallet-pass/links/not-a-capability");
+    expect(dead.status).toBe(404);
+    expectLinkPageHeaders(dead);
   });
 
   it("serves browsers an inert confirm page whose form POST performs the action", async () => {
@@ -110,8 +120,10 @@ describe("capability links (The capability configuration)", () => {
     const links = await issuePassTo(h, newSigner());
     const page = await h.get(links.feed!, { Accept: "text/html" });
     expect(page.headers.get("content-type")).toContain("text/html");
+    expectLinkPageHeaders(page);
     const html = await page.text();
     expect(html).toContain('method="post"');
+    expect(html).toContain('<meta name="robots" content="noindex">');
     expect(h.executed).toHaveLength(0);
     const submitted = await h.issuer.handler(
       new Request(`https://issuer.example${links.feed}`, {
@@ -121,16 +133,50 @@ describe("capability links (The capability configuration)", () => {
       }),
     );
     expect(submitted.status).toBe(200);
+    expectLinkPageHeaders(submitted);
     expect(await submitted.text()).toContain("Done");
     expect(h.executed).toHaveLength(1);
+    // The result page of a refused POST carries them too.
+    const refused = await h.issuer.handler(
+      new Request(`https://issuer.example${links.feed}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html" },
+        body: "action=water",
+      }),
+    );
+    expect(refused.status).toBe(400);
+    expectLinkPageHeaders(refused);
   });
 
-  it("uses a custom confirm page when configured", async () => {
+  it("uses a custom confirm page when configured, and adds the link page headers to it", async () => {
     const h = buildHarness({
       capability: { enabled: true, confirmPage: (ctx) => new Response(`confirm ${ctx.action}`, { headers: { "Content-Type": "text/plain" } }) },
     });
     const links = await issuePassTo(h, newSigner());
-    expect(await (await h.get(links.feed!)).text()).toBe("confirm feed");
+    const res = await h.get(links.feed!);
+    expect(await res.text()).toBe("confirm feed");
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expectLinkPageHeaders(res);
+  });
+
+  it("keeps a custom confirm page's own Content-Security-Policy and adds frame-ancestors to it", async () => {
+    const withCsp = buildHarness({
+      capability: {
+        enabled: true,
+        confirmPage: () => new Response("x", { headers: { "Content-Security-Policy": "default-src 'self';", "Referrer-Policy": "origin" } }),
+      },
+    });
+    let links = await issuePassTo(withCsp, newSigner());
+    let res = await withCsp.get(links.feed!);
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'self'; frame-ancestors 'none'");
+    // Referrer-Policy is not negotiable: a capability URL must never leak as a Referer.
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    const own = buildHarness({
+      capability: { enabled: true, confirmPage: () => new Response("x", { headers: { "Content-Security-Policy": "frame-ancestors 'self'" } }) },
+    });
+    links = await issuePassTo(own, newSigner());
+    res = await own.get(links.feed!);
+    expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
   });
 
   it("lets a forwarded link act under an unchanged owner: the residual the spec discloses", async () => {
@@ -143,6 +189,9 @@ describe("capability links (The capability configuration)", () => {
     // limits what repetition can do, and rotation on the owner's request is
     // the remedy (next test).
     expect((await h.post(links.feed!)).status).toBe(200);
+    // Past the repeat window, so this is a second request and not the
+    // owner's own phone asking again (repeat.test.ts covers that).
+    h.clock.advance(31_000);
     const forwarded = await h.post(links.feed!);
     expect(forwarded.status).toBe(200);
     expect(h.executed).toHaveLength(2);

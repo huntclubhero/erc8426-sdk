@@ -36,6 +36,40 @@ export interface PassLink {
   url: string;
 }
 
+/// Apple's documented Featured Action types (iOS 27, WWDC26 session 209 and
+///  the Wallet Passes "Defining the metadata" article). Wallet draws each
+///  action as a card beneath the pass face with an icon and its own
+///  localized call to action for the type, so pick the type that names what
+///  the holder gets. Any other string is passed through.
+export type FeaturedActionType =
+  | "membershipBenefits"
+  | "viewOffersRewards"
+  | "place"
+  | "call"
+  | "order"
+  | "shop"
+  | "addToBalance"
+  | "bookAppointment"
+  | "bookCar"
+  | "bookFlight"
+  | "bookStay"
+  | "viewSchedule"
+  | "watchTrailer"
+  | "listenToMusic";
+
+/// One Featured Action (Apple Wallet, iOS 27; older iOS and Google ignore
+///  it). Either a fixed absolute https `url`, or `link`: the `key` of one of
+///  the content's `links`, whose URL is filled in at render time so a
+///  capability link rotates with the pass.
+export type FeaturedAction = {
+  /// Unique among the pass's featured actions (pass.json `identifier`).
+  id: string;
+  type: FeaturedActionType | (string & {});
+} & ({ url: string; link?: undefined } | { link: string; url?: undefined });
+
+/// Apple shows at most two featured actions.
+export const MAX_FEATURED_ACTIONS = 2;
+
 export type BarcodeFormat = "qr" | "pdf417" | "aztec" | "code128";
 
 /// The layout family. Each maps to the nearest native style on each platform:
@@ -102,6 +136,12 @@ export interface PassContent {
   /// Action links and deep links. Apple renders them as back fields with
   ///  detected links; Google renders a links module.
   links?: PassLink[];
+  /// Apple Wallet only (iOS 27): up to two actions drawn beneath the pass
+  ///  face, each an absolute https URL or a reference to one of `links` by
+  ///  key. On the front of the pass and in every screenshot, so what the
+  ///  on-screen Security Consideration says of links applies here doubly.
+  ///  A superseded pass drops the ones that point at links.
+  featuredActions?: FeaturedAction[];
   barcode?: { format: BarcodeFormat; message: string; altText?: string };
   /// When set in the past or `voided` is true, the pass presents as expired,
   ///  which is how an issuer marks a previous owner's pass as superseded.

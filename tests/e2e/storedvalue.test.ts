@@ -69,6 +69,10 @@ beforeAll(async () => {
     chainId: chain.publicClient.chain!.id,
     contract: card.address,
     mode: "gated",
+    // This suite re-presents byte-identical requests on purpose (bounded
+    // repetition, refusals after a rotation); repeat semantics are covered
+    // in packages/issuer/test/repeat.test.ts.
+    repeat: false,
     publicClient: chain.publicClient,
     providers: [googleProvider(server.baseUrl).provider],
     capability: { enabled: true },

@@ -89,6 +89,10 @@ beforeAll(async () => {
     chainId: chain.publicClient.chain!.id,
     contract: petPass.address,
     mode: "gated",
+    // This suite re-presents byte-identical requests on purpose (bounded
+    // repetition, refusals after a rotation); repeat semantics are covered
+    // in packages/issuer/test/repeat.test.ts.
+    repeat: false,
     publicClient: chain.publicClient,
     providers: [apple, google.provider],
     capability: { enabled: true },
@@ -270,7 +274,7 @@ describe("transfer", () => {
 
     const dead = await post(ownerLinks.feed!);
     expect(dead.status).toBe(404);
-    expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
+    expect(((await dead.json()) as { error: string }).error).toBe("unknown_capability");
 
     const old = (await client.getManifest(token(id), { signer: owner.account }).catch((e: unknown) => e)) as WalletPassClientError;
     expect(old.status).toBe(403);

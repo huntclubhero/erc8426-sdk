@@ -1,3 +1,4 @@
+import { getAddress, isAddress } from "viem";
 import type { Address } from "viem";
 
 /// Storage seams. Every store is async so the same issuer runs on one
@@ -37,10 +38,12 @@ export interface PassRecord {
   ///  and after an observed transfer. A proven claim by any other account is
   ///  that account's first claim (Gated acquisition).
   lastIssuedTo: Address | null;
-  /// Capability action name to its current link token.
+  /// Capability action name to the SEED of its current link. The token in
+  ///  the holder's URL is derived from the seed with `linkSecret` and is
+  ///  never stored, so a read of this record yields no link.
   links: Record<string, string>;
-  /// Format key to its current download token, for providers the issuer
-  ///  serves pass files for.
+  /// Format key to the seed of its current download link, for providers the
+  ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
   /// Unix seconds of the last content change (the manifest's `updatedAt`).
   updatedAt: number;
@@ -56,9 +59,11 @@ export interface PassStore {
   tokenIds?(): Promise<string[]>;
 }
 
-/// What a link token resolves to. `authorize` never trusts this alone: the
-///  pass record must still list the token as current, so an orphaned entry
-///  (for example from two racing rotations) resolves to nothing.
+/// What a link resolves to. Stored under the SHA-256 digest of the token
+///  (`linkDigest`), never under the token, so a dump of the link store is a
+///  list of hashes. `authorize` never trusts this alone: the pass record's
+///  seed must still derive to the presented token, so an orphaned entry (for
+///  example from two racing rotations) resolves to nothing.
 export interface LinkBinding {
   kind: "action" | "download";
   tokenId: string;
@@ -67,10 +72,11 @@ export interface LinkBinding {
   generation: number;
 }
 
+/// Keyed by link digest (lowercase hex SHA-256 of the token), not by token.
 export interface LinkStore {
-  get(linkToken: string): Promise<LinkBinding | null>;
-  put(linkToken: string, binding: LinkBinding): Promise<void>;
-  delete(linkTokens: string[]): Promise<void>;
+  get(linkDigest: string): Promise<LinkBinding | null>;
+  put(linkDigest: string, binding: LinkBinding): Promise<void>;
+  delete(linkDigests: string[]): Promise<void>;
 }
 
 export interface IssuerStores {
@@ -180,16 +186,49 @@ export interface KeyValueStore {
   /// Atomically read and delete. Null when the key does not exist.
   getDel(key: string): Promise<string | null>;
   del(key: string): Promise<void>;
+  /// OPTIONAL. Atomically add one to an integer counter, creating it at 1
+  ///  with the given expiry (Redis INCR, then EXPIRE on first create), and
+  ///  return the new value. `kvRateLimiter` uses it for an exact count
+  ///  across instances; without it the limiter reads and writes the counter
+  ///  back and may undercount racing attempts.
+  incr?(key: string, ttlSeconds: number): Promise<number>;
 }
 
-/// Build all three stores on a key-value store. Keys are namespaced under
-///  `prefix` (default "erc8426:"); give each collection its own prefix when
-///  one Redis serves several.
-export function kvStores(kv: KeyValueStore, options: { prefix?: string } = {}): IssuerStores {
-  const prefix = options.prefix ?? "erc8426:";
-  const nonceKey = (n: string) => `${prefix}nonce:${n}`;
-  const passKey = (t: string) => `${prefix}pass:${t}`;
-  const linkKey = (l: string) => `${prefix}link:${l}`;
+export interface KvStoresOptions {
+  /// The chain the collection lives on. Part of every key.
+  chainId: number;
+  /// The collection's contract address. Part of every key, lowercased.
+  contract: string;
+  /// Literal key prefix. Default "erc8426:".
+  prefix?: string;
+}
+
+/// Build the namespace every key of a collection lives under:
+///  `${prefix}${chainId}:${contract}:`, with the contract lowercased so the
+///  checksum casing of the configured address never splits one collection
+///  into two namespaces.
+export function kvKeyNamespace(options: KvStoresOptions): string {
+  if (!Number.isSafeInteger(options.chainId) || options.chainId <= 0) throw new Error(`kvStores: chainId must be a positive integer, got ${String(options.chainId)}`);
+  if (typeof options.contract !== "string" || !isAddress(options.contract, { strict: false })) {
+    throw new Error(`kvStores: contract must be an address, got "${String(options.contract)}"`);
+  }
+  return `${options.prefix ?? "erc8426:"}${options.chainId}:${getAddress(options.contract).toLowerCase()}:`;
+}
+
+/// Build all three stores on a key-value store. Every key carries the chain
+///  id and contract address, `${prefix}${chainId}:${contract}:pass:${tokenId}`
+///  (and `...:link:${token}`, `...:nonce:${nonce}`), so two collections on one
+///  Redis never share a row even when they share token ids, and a collection
+///  redeployed on another chain starts clean. `prefix` (default "erc8426:")
+///  is a further literal namespace, for example per environment.
+///
+///  Rows written by 0.2.x live under the old shape `${prefix}pass:${tokenId}`
+///  and are not read; see the 0.3.0 changelog for the one-off rekey.
+export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerStores {
+  const ns = kvKeyNamespace(options);
+  const nonceKey = (n: string) => `${ns}nonce:${n}`;
+  const passKey = (t: string) => `${ns}pass:${t}`;
+  const linkKey = (l: string) => `${ns}link:${l}`;
   // A client that parses JSON on read (@upstash/redis does by default, as
   // does Vercel KV) hands back the object rather than the string we wrote.
   // Accept both, so a shim written either way works.
@@ -273,6 +312,13 @@ export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & 
     },
     async del(key) {
       map.delete(key);
+    },
+    async incr(key, ttlSeconds) {
+      sweep();
+      const e = live(key);
+      const next = (e ? Number(e.value) : 0) + 1;
+      map.set(key, { value: String(next), expiresAt: e ? e.expiresAt : now() + ttlSeconds * 1000 });
+      return next;
     },
     size() {
       return map.size;

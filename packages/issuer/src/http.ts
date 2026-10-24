@@ -1,18 +1,20 @@
 import { isAddress, isAddressEqual, type Address, type Hex } from "viem";
 import {
   ACQUIRE_ACTION,
-  PROOF_HEADER,
+  PROOF_HEADER_NAMES,
   ROTATE_ACTION,
-  SIGNATURE_HEADER,
   normalizeTokenId,
+  parseChallenge,
   readProofHeaders,
   type AuthError,
   type ControlProof,
   type PassFileProvider,
 } from "@erc8426/core";
 
-import { defaultConfirmPage, resultPage } from "./capability.js";
+import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
+import type { RateLimitRule } from "./rateLimit.js";
+import { RepeatCoalescer, memoryRepeatStore, sha256Hex } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
 
@@ -37,10 +39,6 @@ export const MAX_BODY_BYTES = 64 * 1024;
 /// Largest proof header accepted, in characters. A SIWE challenge is well
 ///  under 2 KiB; base64url adds a third.
 const MAX_PROOF_HEADER_CHARS = 8 * 1024;
-const UINT256_LIMIT = 1n << 256n;
-/// uint256 max has 78 decimal digits; anything longer is not a token id and
-///  is refused before BigInt parses it.
-const MAX_TOKEN_ID_CHARS = 78;
 
 type Json = Record<string, unknown>;
 
@@ -55,11 +53,11 @@ function wantsHtml(request: Request): boolean {
   return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
+/// A path segment as a token id, or null. normalizeTokenId refuses anything
+///  outside uint256 (and an over-long string before parsing it).
 function parseTokenId(segment: string): string | null {
-  if (segment.length > MAX_TOKEN_ID_CHARS) return null;
   try {
-    const id = normalizeTokenId(segment);
-    return BigInt(id) < UINT256_LIMIT ? id : null;
+    return normalizeTokenId(segment);
   } catch {
     return null;
   }
@@ -101,6 +99,11 @@ async function readText(request: Request): Promise<string | null> {
 async function readBody(request: Request): Promise<Json | null> {
   const text = await readText(request);
   if (text === null) return null;
+  return parseBodyText(request, text);
+}
+
+/// The body text as a JSON object (or a form), or null when it is neither.
+function parseBodyText(request: Request, text: string): Json | null {
   if (text.trim() === "") return {};
   if ((request.headers.get("Content-Type") ?? "").includes("application/x-www-form-urlencoded")) {
     return Object.fromEntries(new URLSearchParams(text));
@@ -115,10 +118,11 @@ async function readBody(request: Request): Promise<Json | null> {
 
 type ProofRead = { kind: "absent" } | { kind: "malformed" } | { kind: "present"; proof: ControlProof };
 
-/// A proof from the two headers (the Gated acquisition transport), or, for
-///  POST routes, from a JSON body `{ message, signature }`.
+/// A proof from the proof headers (the Gated acquisition transport, under
+///  the RFC 6648 names or the X- names), or, for POST routes, from a JSON
+///  body `{ message, signature }`.
 function proofHeadersTooLarge(headers: Headers): boolean {
-  return (headers.get(PROOF_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS || (headers.get(SIGNATURE_HEADER)?.length ?? 0) > MAX_PROOF_HEADER_CHARS;
+  return PROOF_HEADER_NAMES.some((name) => (headers.get(name)?.length ?? 0) > MAX_PROOF_HEADER_CHARS);
 }
 
 function readProof(request: Request, body: Json | null): ProofRead {
@@ -135,6 +139,17 @@ function readProof(request: Request, body: Json | null): ProofRead {
 
 export function createRouter(x: IssuerInternals): (request: Request) => Promise<Response | null> {
   const { config } = x;
+  // Identical repeats of a POST get the first outcome (repeat.ts). The key
+  // covers the link or nonce and a hash of every byte that matters, so only
+  // a presentation that differs from the first is a new request (or, on the
+  // nonce path, a replay).
+  const repeats = config.repeat ? new RepeatCoalescer(config.repeat.store ?? memoryRepeatStore({ now: x.now }), config.repeat.windowSeconds) : null;
+  async function coalesce(key: string | null, run: () => Promise<Response>): Promise<Response> {
+    if (!repeats || key === null) return run();
+    const { response, repeated } = await repeats.run(key, run);
+    if (repeated) response.headers.set("X-Wallet-Pass-Repeat", "true");
+    return response;
+  }
 
   function error(code: IssuerErrorCode, extra: Json = {}): Response {
     const status = statusForIssuerError(code);
@@ -171,12 +186,26 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       headers: {
         ...cors,
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        // The proof travels in these two headers, so a browser client can only
-        // resolve a gated manifest if the preflight admits them.
-        "Access-Control-Allow-Headers": `Content-Type, ${PROOF_HEADER}, ${SIGNATURE_HEADER}`,
+        // The proof travels in these headers (new names and the X- names a
+        // 0.2.x client sends), so a browser client can only resolve a gated
+        // manifest if the preflight admits them.
+        "Access-Control-Allow-Headers": `Content-Type, ${PROOF_HEADER_NAMES.join(", ")}`,
         "Access-Control-Max-Age": String(config.cors ? config.cors.maxAgeSeconds : 600),
       },
     });
+  }
+
+  // Count one attempt for `family` under the client and the path token, and
+  // answer 429 rate_limited with Retry-After when it is over the limit. The
+  // attempt is counted before any work, so a refused request costs the
+  // issuer nothing but the count. Null when the request may proceed.
+  async function throttle(request: Request, family: "challenge" | "manifest" | "capability", pathToken: string): Promise<Response | null> {
+    const rule: RateLimitRule | false = config.rateLimit[family];
+    if (rule === false) return null;
+    const client = config.rateLimit.clientKey(request) ?? "unknown";
+    const decision = await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, x.now());
+    if (decision.allowed) return null;
+    return json(429, { error: "rate_limited", message: `too many ${family} requests; retry after ${decision.retryAfterSeconds} s` }, { "Retry-After": String(decision.retryAfterSeconds) });
   }
 
   function methodNotAllowed(allow: string): Response {
@@ -228,18 +257,18 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       } catch {
         return error("read_failed");
       }
-      if (owner === null) return error("not_found", { message: "token does not exist" });
+      if (owner === null) return error("unknown_capability", { message: "token does not exist" });
       const record = await x.recordIssuance(tokenId, owner);
       return json(200, await x.buildManifest(record, owner));
     }
 
     // Gated configuration.
     const challenge = x.challengeUri(tokenId);
-    if (proofHeadersTooLarge(request.headers)) return error("malformed_proof", { message: "proof header too large" });
+    if (proofHeadersTooLarge(request.headers)) return error("invalid_request", { message: "proof header too large" });
     const proof = readProofHeaders(request.headers);
     // No proof: 401, the challenge URI, and no acquisition URLs.
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge });
-    if (proof.kind === "malformed") return error("malformed_proof", { message: `proof headers could not be decoded (${proof.reason})` });
+    if (proof.kind === "malformed") return error("invalid_request", { message: `proof headers could not be decoded (${proof.reason})` });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
@@ -255,7 +284,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function challenge(url: URL, tokenId: string): Promise<Response> {
     const address = url.searchParams.get("address");
     if (!address || !isAddress(address, { strict: false })) {
-      return error("invalid_address", { message: "the address query parameter must be a valid account address" });
+      return error("invalid_request", { message: "the address query parameter must be a valid account address" });
     }
     try {
       return json(200, await x.issueChallenge({ tokenId, account: address, action: url.searchParams.get("action") ?? ACQUIRE_ACTION }));
@@ -271,15 +300,25 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // can never be spent here, and a rotate proof only on the rotate route.
     const def = Object.hasOwn(config.actions, action) ? config.actions[action] : undefined;
     if (!def) return error("unknown_action", { message: `unknown action: ${action}` });
-    const body = await readBody(request);
+    const text = await readText(request);
+    if (text === null) return error("invalid_request", { message: "body must be a JSON object" });
+    const body = parseBodyText(request, text);
     if (body === null) return error("invalid_request", { message: "body must be a JSON object" });
     const challengeUri = x.challengeUri(tokenId, action);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("malformed_proof");
-    const result = await x.authorize({ ...proof.proof, tokenId, action });
-    if (!result.ok) return refuse(result.error, challengeUri);
-    return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
+    // Keyed by the nonce and every byte of the presentation: an identical
+    // repeat (the phone resending an aborted POST) gets the first outcome
+    // instead of nonce_invalid; a different request carrying the same nonce
+    // keys differently and is refused by the floor as the replay it is.
+    const nonce = parseChallenge(proof.proof.message)?.nonce ?? "-";
+    const key = `nonce:${tokenId}:${action}:${nonce}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
+    return coalesce(key, async () => {
+      const result = await x.authorize({ ...proof.proof, tokenId, action });
+      if (!result.ok) return refuse(result.error, challengeUri);
+      return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+    });
   }
 
   // POST {base}/:tokenId/rotate
@@ -289,7 +328,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const challengeUri = x.challengeUri(tokenId, ROTATE_ACTION);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("malformed_proof");
+    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
     // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
     if (!result.ok) return refuse(result.error, challengeUri);
@@ -327,9 +366,11 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
   // GET {base}/links/:link. Side-effect free: no read, no execution, no
   // state change. Devices, previewers and crawlers prefetch pass links.
+  // Every answer, page or JSON, built in or custom, carries the link page
+  // headers (no-store, noindex, no-referrer, frame-ancestors 'none').
   async function describeLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("link_invalid");
+    if (!resolved) return withLinkPageHeaders(error("unknown_capability"));
     const { binding, def } = resolved;
     const ctx: LinkPageContext = {
       token: x.token(binding.tokenId),
@@ -339,52 +380,66 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       postUrl: x.linkUrl(linkToken),
       request,
     };
-    if (config.capability.confirmPage) return config.capability.confirmPage(ctx);
-    if (wantsHtml(request)) return defaultConfirmPage(ctx);
-    return json(200, {
-      tokenId: binding.tokenId,
-      action: binding.name,
-      description: def.description,
-      bound: def.bound,
-      method: "POST",
-      executed: false,
-    });
+    if (config.capability.confirmPage) return withLinkPageHeaders(await config.capability.confirmPage(ctx));
+    if (wantsHtml(request)) return withLinkPageHeaders(defaultConfirmPage(ctx));
+    return withLinkPageHeaders(
+      json(200, {
+        tokenId: binding.tokenId,
+        action: binding.name,
+        description: def.description,
+        bound: def.bound,
+        method: "POST",
+        executed: false,
+      }),
+    );
   }
 
   // POST {base}/links/:link. The capability URL stands in for check (1);
   // check (2), the fresh entitlement read of the holder the link was issued
   // to, runs unconditionally.
   async function followLink(request: Request, linkToken: string): Promise<Response> {
+    const text = await readText(request);
+    if (text === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
+    // Rotation wins: the link is resolved first (side-effect free), and one
+    // that no longer resolves is refused before the repeat store is
+    // consulted. The key carries the link, its binding and the holder it is
+    // issued to, plus a hash of the body, so a recorded answer is never
+    // served once the binding changed, and the phone resending an aborted
+    // POST runs the action once and gets one answer twice. A body that
+    // differs is a new request.
     const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("link_invalid");
+    if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
-    const body = await readBody(request);
-    if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
-    // The link decides the action. A request naming another is refused, as
-    // a proof for action A is refused for action B.
-    if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
-    const holder = record.lastIssuedTo;
-    // A link minted since a transfer and not yet issued to anyone authorizes
-    // no one. It is not a verified non-entitled account, so not a 403.
-    if (!holder) return error("link_invalid");
-    let entitled;
-    try {
-      entitled = await x.entitled(binding.tokenId, holder, binding.name);
-    } catch {
-      return error("read_failed");
-    }
-    // A sold token behind a still-live link stops acting here, before any
-    // rotation catches up. What this does NOT close is forwarding under an
-    // unchanged owner: the residual the capability configuration discloses.
-    if (!entitled.entitled) return error("not_owner");
-    return execute(def, {
-      tokenId: binding.tokenId,
-      action: binding.name,
-      account: holder,
-      via: entitled.via,
-      path: "capability",
-      params: body.params,
-      request,
+    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${record.lastIssuedTo ?? "-"}:${await sha256Hex(text)}`;
+    return coalesce(key, async () => {
+      const body = parseBodyText(request, text);
+      if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
+      // The link decides the action. A request naming another is refused, as
+      // a proof for action A is refused for action B.
+      if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
+      const holder = record.lastIssuedTo;
+      // A link minted since a transfer and not yet issued to anyone authorizes
+      // no one. It is not a verified non-entitled account, so not a 403.
+      if (!holder) return error("unknown_capability");
+      let entitled;
+      try {
+        entitled = await x.entitled(binding.tokenId, holder, binding.name);
+      } catch {
+        return error("read_failed");
+      }
+      // A sold token behind a still-live link stops acting here, before any
+      // rotation catches up. What this does NOT close is forwarding under an
+      // unchanged owner: the residual the capability configuration discloses.
+      if (!entitled.entitled) return error("not_owner");
+      return execute(def, {
+        tokenId: binding.tokenId,
+        action: binding.name,
+        account: holder,
+        via: entitled.via,
+        path: "capability",
+        params: body.params,
+        request,
+      });
     });
   }
 
@@ -392,10 +447,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // capability URL, re-checked against a fresh entitlement read.
   async function download(linkToken: string): Promise<Response> {
     const resolved = await x.resolveLink(linkToken, "download");
-    if (!resolved || !resolved.record.lastIssuedTo) return error("link_invalid");
+    if (!resolved || !resolved.record.lastIssuedTo) return error("unknown_capability");
     const { binding, record } = resolved;
     const provider = x.providers.find((p) => p.format === binding.name) as PassFileProvider | undefined;
-    if (!provider || typeof provider.passFile !== "function") return error("link_invalid");
+    if (!provider || typeof provider.passFile !== "function") return error("unknown_capability");
     const holder = record.lastIssuedTo!;
     let entitled;
     try {
@@ -419,39 +474,42 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const page = resultPage(response.ok, message, response.status);
     const retry = response.headers.get("Retry-After");
     if (retry) page.headers.set("Retry-After", retry);
-    page.headers.set("Cache-Control", "no-store");
-    return page;
+    return withLinkPageHeaders(page);
   }
 
   async function dispatch(request: Request, url: URL, segments: string[]): Promise<Response> {
     const method = request.method.toUpperCase();
     const [first, second, third] = segments;
-    if (first === undefined) return error("not_found");
+    if (first === undefined) return error("unknown_capability");
 
     if (first === "links" && segments.length === 2) {
+      if (method !== "GET" && method !== "POST") return methodNotAllowed("GET, POST, OPTIONS");
+      const limited = await throttle(request, "capability", second!);
+      if (limited) return method === "POST" ? asHtml(request, limited) : withLinkPageHeaders(limited);
       if (method === "GET") return describeLink(request, second!);
-      if (method === "POST") return asHtml(request, await followLink(request, second!));
-      return methodNotAllowed("GET, POST, OPTIONS");
+      return asHtml(request, await followLink(request, second!));
     }
     if (first === "passes" && segments.length === 2) {
       // HEAD lets a client (or the conformance suite) check the pkpass media
       // type before downloading; it runs the same checks as GET.
+      if (method !== "GET" && method !== "HEAD") return methodNotAllowed("GET, HEAD, OPTIONS");
+      const limited = await throttle(request, "capability", second!);
+      if (limited) return method === "HEAD" ? new Response(null, { status: limited.status, headers: limited.headers }) : limited;
       if (method === "GET") return download(second!);
-      if (method === "HEAD") {
-        const res = await download(second!);
-        return new Response(null, { status: res.status, headers: res.headers });
-      }
-      return methodNotAllowed("GET, HEAD, OPTIONS");
+      const res = await download(second!);
+      return new Response(null, { status: res.status, headers: res.headers });
     }
 
     const tokenId = parseTokenId(first);
-    if (tokenId === null) return error("invalid_token", { message: `invalid token id: ${first}` });
+    if (tokenId === null) return error("invalid_request", { message: `invalid token id: ${first}` });
 
     if (segments.length === 1) {
-      return method === "GET" ? manifest(request, tokenId) : methodNotAllowed("GET, OPTIONS");
+      if (method !== "GET") return methodNotAllowed("GET, OPTIONS");
+      return (await throttle(request, "manifest", tokenId)) ?? manifest(request, tokenId);
     }
     if (segments.length === 2 && second === "challenge") {
-      return method === "GET" ? challenge(url, tokenId) : methodNotAllowed("GET, OPTIONS");
+      if (method !== "GET") return methodNotAllowed("GET, OPTIONS");
+      return (await throttle(request, "challenge", tokenId)) ?? challenge(url, tokenId);
     }
     if (segments.length === 2 && second === "rotate") {
       return method === "POST" ? rotate(request, tokenId) : methodNotAllowed("POST, OPTIONS");
@@ -459,7 +517,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (segments.length === 3 && second === "actions") {
       return method === "POST" ? signedAction(request, tokenId, third!) : methodNotAllowed("POST, OPTIONS");
     }
-    return error("not_found");
+    return error("unknown_capability");
   }
 
   return async function route(request: Request): Promise<Response | null> {

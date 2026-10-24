@@ -1,8 +1,11 @@
 {
   "name": "@erc8426/react",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "React hooks and an Add to Wallet button for ERC-8426 wallet passes",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -53,6 +53,7 @@ describe("conformant implementations", () => {
     expect(byId(r, "contract.interface-id").status).toBe("pass");
     expect(byId(r, "contract.passuri-nonexistent").status).toBe("pass");
     expect(byId(r, "manifest.valid").status).toBe("pass");
+    expect(byId(r, "manifest.media-type").status).toBe("pass");
     expect(byId(r, "manifest.apple-media-type").status).toBe("pass");
   });
 
@@ -76,6 +77,7 @@ describe("conformant implementations", () => {
       "gated.no-store",
       "gated.replay-refused",
       "gated.manifest.valid",
+      "gated.manifest.media-type",
       "mirror.gated-no-urls",
     ]) {
       expect(byId(r, id).status, id).toBe("pass");
@@ -112,6 +114,7 @@ describe("broken implementations are caught", () => {
     ["a challenge for another token", { wrongTokenInChallenge: true }, "challenge.token-resource", true],
     ["an already expired challenge", { expiredChallenge: true }, "challenge.expiration", true],
     ["the apple pass served with the wrong media type", { wrongPkpassType: true }, "gated.manifest.apple-media-type", true],
+    ["the manifest served as text", { manifestAsText: true }, "gated.manifest.media-type", true],
     ["a verifier domain unrelated to the serving host", { wrongDomain: "elsewhere.example" }, "challenge.domain-host", false],
   ])("%s", async (_name, faults, id, isMust) => {
     const { run, ownerKey } = world({ mode: "gated", faults });

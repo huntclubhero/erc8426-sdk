@@ -29,7 +29,8 @@ Each check has a stable id, the spec section it enforces, and its level.
 | `contract.passuri` | MUST | Contract interface | `passURI(tokenId)` returns a URI |
 | `contract.passuri-nonexistent` | MUST | Contract interface | `passURI` reverts for a nonexistent token |
 | `manifest.reachable` | MUST | Pass manifest | the endpoint answers 200 (public) or 401 (gated) |
-| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, `google` is a Save link, `updatedAt` integer seconds |
+| `manifest.media-type` | MUST | Pass manifest | the manifest is served as `application/json` |
+| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, `google` is a Save link, `updatedAt` integer seconds; `version` optional (1) |
 | `manifest.lint` | SHOULD | Pass manifest | https URLs, `updatedAt` not in milliseconds |
 | `manifest.apple-media-type` | MUST | Pass manifest | the `apple` URL is served as `application/vnd.apple.pkpass` |
 | `manifest.apple-reachable` | SHOULD | Pass manifest | reported only when the `apple` URL cannot be fetched |

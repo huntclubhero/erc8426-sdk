@@ -17,8 +17,24 @@ export const ACQUIRE_ACTION = "acquire" as const;
 export const ROTATE_ACTION = "rotate" as const;
 
 /// Headers a client sends to resolve a gated manifest (Gated acquisition).
-export const PROOF_HEADER = "X-Wallet-Pass-Proof" as const;
-export const SIGNATURE_HEADER = "X-Wallet-Pass-Signature" as const;
+///  Named without the X- prefix per RFC 6648 (ethereum/ERCs PR #2036). The
+///  X- names of earlier drafts are still read by issuers, and `proofHeaders`
+///  still sends them beside the new ones for this release, so a 0.3.0 client
+///  resolves a 0.2.x issuer's manifest; a later minor stops sending them.
+export const PROOF_HEADER = "Wallet-Pass-Proof" as const;
+export const SIGNATURE_HEADER = "Wallet-Pass-Signature" as const;
+/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
+///  alongside the new names until a later minor drops them.
+export const LEGACY_PROOF_HEADER = "X-Wallet-Pass-Proof" as const;
+/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
+///  alongside the new names until a later minor drops them.
+export const LEGACY_SIGNATURE_HEADER = "X-Wallet-Pass-Signature" as const;
+/// Every header name that may carry a proof, in the order an issuer reads
+///  them (the new name wins when both are present). For CORS allow lists.
+export const PROOF_HEADER_NAMES = [PROOF_HEADER, SIGNATURE_HEADER, LEGACY_PROOF_HEADER, LEGACY_SIGNATURE_HEADER] as const;
+
+/// The manifest's optional `version` member. 1 is the only value defined.
+export const MANIFEST_VERSION = 1 as const;
 
 /// Media type an `apple` acquisition URL MUST be served with.
 export const PKPASS_MEDIA_TYPE = "application/vnd.apple.pkpass" as const;

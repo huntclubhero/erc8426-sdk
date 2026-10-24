@@ -17,7 +17,10 @@ async function primed(h: Harness, action = "feed") {
 
 /// Issue a nonce the way the challenge endpoint would, for a message the
 ///  test builds itself (to put fields the endpoint would never issue).
-async function forged(h: Harness, overrides: { chainId?: number; contract?: string; domain?: string; tokenId?: string; action?: string; notBefore?: Date }) {
+async function forged(
+  h: Harness,
+  overrides: { chainId?: number; contract?: string; domain?: string; tokenId?: string; action?: string; notBefore?: Date; resources?: string[] },
+) {
   const account = newSigner();
   h.chain.setOwner(TOKEN_ID, account.address);
   const nonce = generateNonce();
@@ -36,6 +39,7 @@ async function forged(h: Harness, overrides: { chainId?: number; contract?: stri
     expirationTime: new Date(now + 300_000),
   });
   if (overrides.notBefore) message = message.replace("\nResources:", `\nNot Before: ${overrides.notBefore.toISOString()}\nResources:`);
+  if (overrides.resources) message = message.replace(/\nResources:[\s\S]*$/, `\nResources:\n${overrides.resources.map((r) => `- ${r}`).join("\n")}`);
   return { account, message, signature: await account.signMessage({ message }) };
 }
 
@@ -82,7 +86,7 @@ describe("challenge endpoint", () => {
     const h = buildHarness();
     const missing = await h.get("/wallet-pass/412/challenge");
     expect(missing.status).toBe(400);
-    expect(((await missing.json()) as { error: string }).error).toBe("invalid_address");
+    expect(((await missing.json()) as { error: string }).error).toBe("invalid_request");
     expect((await h.get("/wallet-pass/412/challenge?address=not-an-address")).status).toBe(400);
   });
 
@@ -93,11 +97,11 @@ describe("challenge endpoint", () => {
     expect(((await res.json()) as { error: string }).error).toBe("unknown_action");
   });
 
-  it("refuses an invalid token id with 400 invalid_token", async () => {
+  it("refuses an invalid token id with 400 invalid_request", async () => {
     const h = buildHarness();
     const res = await h.get(`/wallet-pass/abc/challenge?address=${newSigner().address}`);
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("invalid_token");
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
   });
 });
 
@@ -133,9 +137,21 @@ describe("signed action (the two-check floor)", () => {
     const h = buildHarness();
     const { message, signature } = await primed(h);
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(200);
-    const replay = await h.post(ACTION_PATH("feed"), { message, signature });
+    // A byte-identical repeat inside the repeat window is the phone asking
+    // again: it gets the first outcome and runs nothing (repeat.test.ts).
+    const identical = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(identical.status).toBe(200);
+    expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    expect(h.executed).toHaveLength(1);
+    // Any presentation that differs is a replay and finds the nonce spent.
+    const replay = await h.post(ACTION_PATH("feed"), { message, signature, params: { again: true } });
     expect(replay.status).toBe(401);
     expect(((await replay.json()) as { error: string }).error).toBe("nonce_invalid");
+    // And so is the identical one once the window has passed.
+    h.clock.advance(31_000);
+    const late = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(late.status).toBe(401);
+    expect(((await late.json()) as { error: string }).error).toBe("nonce_invalid");
     expect(h.executed).toHaveLength(1);
   });
 
@@ -145,8 +161,18 @@ describe("signed action (the two-check floor)", () => {
     h.chain.failing = true;
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(503);
     h.chain.failing = false;
-    const retry = await h.post(ACTION_PATH("feed"), { message, signature });
+    // A byte-identical repeat inside the repeat window gets that request's
+    // outcome again (repeat.test.ts); any other presentation, and the
+    // identical one once the window has passed, finds the nonce spent.
+    const identical = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(identical.status).toBe(503);
+    expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    const retry = await h.post(ACTION_PATH("feed"), { message, signature, params: { retry: true } });
     expect(((await retry.json()) as { error: string }).error).toBe("nonce_invalid");
+    h.clock.advance(31_000);
+    const late = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(((await late.json()) as { error: string }).error).toBe("nonce_invalid");
+    expect(h.executed).toHaveLength(0);
   });
 
   it("the expiration makes a leaked proof go stale", async () => {
@@ -190,6 +216,34 @@ describe("signed action (the two-check floor)", () => {
     const res = await h.post(ACTION_PATH("feed", "999"), { message, signature });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+  });
+
+  it("reads the token and action by position: a message with the two resources swapped binds nothing", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: ["urn:wallet-pass:action:feed", asset] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+    expect(h.executed).toHaveLength(0);
+  });
+
+  it("binds the action in the second place, not one listed further down", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: [asset, "urn:wallet-pass:action:water", "urn:wallet-pass:action:feed"] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("binding_mismatch");
+  });
+
+  it("tolerates a resource after the token and the action, as the reference verifier does", async () => {
+    const h = buildHarness();
+    const asset = `eip155:1/erc721:${CONTRACT}/${TOKEN_ID}`;
+    const { message, signature } = await forged(h, { resources: [asset, "urn:wallet-pass:action:feed", "https://issuer.example/terms"] });
+    const res = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(res.status).toBe(200);
+    expect(h.executed).toHaveLength(1);
   });
 
   it("refuses a proof scoped to a chain the verifier does not serve", async () => {
@@ -247,7 +301,7 @@ describe("signed action (the two-check floor)", () => {
     const notHex = await primed(h);
     const bad = await h.post(ACTION_PATH("feed"), { message: notHex.message, signature: "nothex" });
     expect(bad.status).toBe(400);
-    expect(((await bad.json()) as { error: string }).error).toBe("malformed_proof");
+    expect(((await bad.json()) as { error: string }).error).toBe("invalid_request");
   });
 
   it("the fresh read closes the transfer window: a token sold after the challenge stops acting", async () => {

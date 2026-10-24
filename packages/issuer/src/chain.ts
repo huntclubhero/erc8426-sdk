@@ -33,13 +33,15 @@ export interface ChainReader {
 
 /// Which block the reads are taken against.
 ///
-///  The spec says implementations SHOULD read "against their best view of the
-///  latest safe chain head". "safe" protects against a reorganization undoing
-///  the transfer a read relied on, at the cost of a lag (minutes on L1)
-///  during which a buyer is not yet seen as owner and a seller still is.
-///  "latest" makes that window as small as the node allows and is the
-///  default here because most issuers serve L2s whose safe head trails by
-///  long intervals; choose "safe" when a reorg would cost more than the lag.
+///  The spec says a Pass Issuer SHOULD take the fresh read at the newest
+///  block its node has (the "latest" block tag) and SHOULD NOT take it at
+///  "safe" or "finalized": those lag the head by a fixed delay (minutes on
+///  L1, longer on rollups) during which a buyer is not yet seen as owner
+///  and a seller still is, on every transfer. "latest" is the default and
+///  the conforming choice; it is exposed to a reorganization deeper than
+///  the action's own confirmation, which the spec's Rationale accepts as
+///  the smaller risk. "safe" and "finalized" remain selectable for an
+///  issuer that documents why it departs from the spec.
 export type ReadBlockTag = "latest" | "safe" | "finalized";
 
 /// The part of a viem PublicClient the reader uses. Typed structurally so

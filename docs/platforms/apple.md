@@ -48,12 +48,16 @@ Keep `basePath` outside the issuer's `/wallet-pass` so the two route trees never
 - **Countdowns: use relative dates.** A date field with `isRelative` redraws on the device between pushes. (Not in `PassContent` today; render the absolute time as text or extend the mapping.)
 - **Links need anchors.** Apple only auto-detects bare URLs; labelled links go in `attributedValue` as `<a href>` with `&` escaped. The builder does this for `links`.
 - **Images are PNG** and ship at @1x, @2x and @3x for sharpness. Strip art that worked in production: 375x144, 750x288, 1125x432. Icon: 29, 58, 87.
-- **The certificate expires.** Pass Type ID certificates must be renewed; when one lapses, new passes fail to sign and pushes stop. Put the date on a calendar.
+- **The certificate expires.** Pass Type ID certificates must be renewed; when one lapses, new passes fail to sign and pushes stop. Put the date on a calendar. `buildPkpass` refuses to sign with an expired or not yet valid certificate, with one that has no subject UID (not a Pass Type ID certificate), with one issued for another pass type or team, or with a key that is not the certificate's own, so the failure is an error at signing time rather than a pass that installs nowhere.
 - **Superseded passes keep their old token.** A retired token may refresh (and receives the voided rendering) and unregister its own device, but can never register a new one. Never embed the current token in a pass served to a retired token.
 - **Each retired token remembers why.** The record keeps a reason per retired token (`retiredReasons`, `transfer` or `reset`), so a seller's old pass reads "Transferred" and the same owner's pre-reset pass reads "Links reset" even on one serial. Records written before 0.1.1 have no reasons and render the generic wording. A custom `supersede(content, reason)` receives the reason.
 - **Log route is unauthenticated** by Apple's design. The handler caps entries and strips control characters; do not widen it.
 - **At the device cap, registration answers 403.** A pass keeps at most `MAX_REGISTRATIONS_PER_PASS` (10) live devices; the eleventh device's registration gets 403, a status outside the 200/201/401 Apple documents for this call. The pass still installs on that device, it just never updates (no push, no refresh) until a slot frees: a device unregisters, or the owner's token rotates (which supersedes the whole set). Nobody is ever evicted. A custom store MUST implement `supersede()`; without it a forwarded copy that filled the slots keeps them across every rotation and the owner is locked out.
 - **Persistent store.** `MemoryApplePassStore` is for tests. On serverless each instance has its own memory, so registrations vanish. Implement `ApplePassStore` over Postgres or Redis; records carry `PassContent`, whose `Date` and `Uint8Array` values need serializing.
+
+## Featured Actions (iOS 27)
+
+`featuredActions` on the pass content puts up to two action cards beneath the pass face, each a fixed https URL or a reference to one of the pass's links by key (filled in at render time, so it rotates with the pass). See the package README, "Featured Actions (iOS 27)", including the note that a featured action is in every screenshot of the pass.
 
 ## Lock-screen notifications
 

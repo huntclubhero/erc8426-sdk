@@ -24,7 +24,7 @@ describe("public configuration", () => {
     const h = buildHarness({ mode: "public" });
     const res = await h.get(MANIFEST);
     expect(res.status).toBe(404);
-    expect(((await res.json()) as { error: string }).error).toBe("not_found");
+    expect(((await res.json()) as { error: string }).error).toBe("unknown_capability");
   });
 
   it("answers a failed owner read 503 with Retry-After", async () => {
@@ -78,7 +78,7 @@ describe("gated acquisition", () => {
     const h = buildHarness();
     const partial = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": encodeBase64Url("x") });
     expect(partial.status).toBe(400);
-    expect(((await partial.json()) as { error: string }).error).toBe("malformed_proof");
+    expect(((await partial.json()) as { error: string }).error).toBe("invalid_request");
     const notHex = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": encodeBase64Url("x"), "X-Wallet-Pass-Signature": "nothex" });
     expect(notHex.status).toBe(400);
     const badEncoding = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": "***", "X-Wallet-Pass-Signature": "0x00" });
@@ -160,7 +160,7 @@ describe("gated acquisition", () => {
 
     const dead = await h.get(s1.body.formats.apple);
     expect(dead.status).toBe(404);
-    expect(((await dead.json()) as { error: string }).error).toBe("link_invalid");
+    expect(((await dead.json()) as { error: string }).error).toBe("unknown_capability");
     expect((await h.get(b1.body.formats.apple)).status).toBe(200);
 
     // Rotation retires URLs; it is not a content change.
@@ -224,12 +224,12 @@ describe("gated acquisition", () => {
     expect((await h.get(body.formats.apple)).status).toBe(503);
   });
 
-  it("answers an invalid token id 400 invalid_token", async () => {
+  it("answers an invalid token id 400 invalid_request", async () => {
     const h = buildHarness();
     for (const bad of ["abc", "-1", "1.5", (1n << 256n).toString()]) {
       const res = await h.get(`/wallet-pass/${bad}`);
       expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toBe("invalid_token");
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
     }
   });
 

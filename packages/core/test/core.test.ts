@@ -2,13 +2,25 @@ import { describe, expect, it } from "vitest";
 import { toFunctionSelector } from "viem";
 
 import {
+  CANONICAL_WALLET_PASS_ERROR_CODES,
+  LEGACY_PROOF_HEADER,
+  LEGACY_SIGNATURE_HEADER,
+  MANIFEST_VERSION,
+  MAX_TOKEN_ID,
+  PROOF_HEADER,
+  PROOF_HEADER_NAMES,
+  SIGNATURE_HEADER,
+  WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
   actionUrn,
   assetId,
   buildChallenge,
+  canonicalErrorCode,
   createManifest,
   decodeBase64Url,
   encodeBase64Url,
+  isDeprecatedWalletPassErrorCode,
+  isWalletPassErrorCode,
   normalizeTokenId,
   parseActionUrn,
   parseAssetId,
@@ -19,6 +31,7 @@ import {
   readProofHeaders,
   statusForError,
   tokenRef,
+  type WalletPassErrorCode,
 } from "@erc8426/core";
 
 // The literals of the spec's worked example (Example challenge).
@@ -58,6 +71,32 @@ describe("caip", () => {
     expect(() => normalizeTokenId("-1")).toThrow();
     expect(() => normalizeTokenId(2 ** 60)).toThrow();
   });
+  it("accepts every uint256 and nothing past it", () => {
+    const max = 2n ** 256n - 1n;
+    expect(MAX_TOKEN_ID).toBe(max);
+    expect(normalizeTokenId(max)).toBe(max.toString());
+    expect(normalizeTokenId(max.toString())).toBe(max.toString());
+    expect(normalizeTokenId(`000${max.toString()}`)).toBe(max.toString());
+    expect(normalizeTokenId(0)).toBe("0");
+    expect(normalizeTokenId("0")).toBe("0");
+    expect(() => normalizeTokenId(2n ** 256n)).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId((2n ** 256n).toString())).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId("1".repeat(79))).toThrow(/exceeds uint256/);
+    expect(() => normalizeTokenId("9".repeat(400))).toThrow(/exceeds uint256/);
+    expect(() => tokenRef(1, EXAMPLE_CONTRACT, 2n ** 256n)).toThrow(/exceeds uint256/);
+    expect(parseAssetId(`eip155:1/erc721:${EXAMPLE_CONTRACT}/${(2n ** 256n).toString()}`)).toBeNull();
+  });
+  it("refuses negative and non-integer ids in every input type", () => {
+    expect(() => normalizeTokenId(-1)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(-1n)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(1.5)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("1.5")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("1e3")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("0x10")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId("")).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(Number.NaN)).toThrow(/invalid token id/);
+    expect(() => normalizeTokenId(Number.POSITIVE_INFINITY)).toThrow(/invalid token id/);
+  });
   it("round-trips action URNs and rejects junk", () => {
     expect(actionUrn("feed")).toBe("urn:wallet-pass:action:feed");
     expect(parseActionUrn("urn:wallet-pass:action:feed")).toBe("feed");
@@ -91,9 +130,44 @@ describe("challenge", () => {
     expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
     expect(parsed.action).toBe("feed");
   });
-  it("treats two token resources as ambiguous", () => {
-    const doubled = SPEC_EXAMPLE + "\n- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/413";
-    expect(parseChallenge(doubled)!.token).toBeNull();
+  it("reads the token and the action by position: first resource, second resource", () => {
+    // Swapped: the action URN sits where the token belongs and vice versa,
+    // so neither is read. A verifier refuses this as binding_mismatch.
+    const swapped = SPEC_EXAMPLE.replace(
+      "- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412\n- urn:wallet-pass:action:feed",
+      "- urn:wallet-pass:action:feed\n- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412",
+    );
+    expect(swapped).not.toBe(SPEC_EXAMPLE);
+    const parsed = parseChallenge(swapped)!;
+    expect(parsed.token).toBeNull();
+    expect(parsed.action).toBeNull();
+    expect(parsed.resources).toHaveLength(2);
+  });
+  it("binds whatever sits in the action's place, not an action listed elsewhere", () => {
+    // A second token in the action's place: the token still comes from the
+    // first resource, and the action is null even though a URN follows.
+    const shifted = SPEC_EXAMPLE.replace(
+      "- urn:wallet-pass:action:feed",
+      "- eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/413\n- urn:wallet-pass:action:feed",
+    );
+    const parsed = parseChallenge(shifted)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBeNull();
+  });
+  it("tolerates resources after the second, as the reference verifier does", () => {
+    const extra = SPEC_EXAMPLE + "\n- https://issuer.example/terms";
+    const parsed = parseChallenge(extra)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBe("feed");
+    expect(parsed.resources).toHaveLength(3);
+  });
+  it("carries no token or action when the message has fewer than two resources", () => {
+    const none = SPEC_EXAMPLE.replace(/\nResources:[\s\S]*$/, "");
+    expect(parseChallenge(none)!.token).toBeNull();
+    const one = SPEC_EXAMPLE.replace("\n- urn:wallet-pass:action:feed", "");
+    const parsed = parseChallenge(one)!;
+    expect(parsed.token).toEqual(tokenRef(1, EXAMPLE_CONTRACT, 412));
+    expect(parsed.action).toBeNull();
   });
   it("returns null for text that is not a challenge", () => {
     expect(parseChallenge("hello")).toBeNull();
@@ -132,9 +206,22 @@ describe("manifest", () => {
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });
     expect(ms.ok && ms.issues.some((i) => i.level === "warning")).toBe(true);
   });
+  it("carries an optional integer version, tolerating its absence", () => {
+    expect(parseManifest(good)).toMatchObject({ ok: true, manifest: { formats: good.formats } });
+    expect((parseManifest(good) as { manifest: { version?: number } }).manifest.version).toBeUndefined();
+    const v1 = parseManifest({ ...good, version: 1 });
+    expect(v1.ok && v1.manifest.version).toBe(1);
+    expect(v1.issues).toEqual([]);
+    for (const bad of ["1", 0, -1, 1.5, null, {}]) expect(parseManifest({ ...good, version: bad }).ok, String(bad)).toBe(false);
+    const newer = parseManifest({ ...good, version: 2 });
+    expect(newer.ok).toBe(true);
+    expect(newer.issues.some((i) => i.level === "warning" && i.path === "version")).toBe(true);
+    expect(MANIFEST_VERSION).toBe(1);
+  });
   it("creates manifests and reads the metadata mirror", () => {
     const m = createManifest({ apple: "https://a.example/p.pkpass", google: "" }, new Date(1754500000000));
-    expect(m).toEqual({ formats: { apple: "https://a.example/p.pkpass" }, updatedAt: 1754500000 });
+    expect(m).toEqual({ version: 1, formats: { apple: "https://a.example/p.pkpass" }, updatedAt: 1754500000 });
+    expect(parseManifest(m)).toMatchObject({ ok: true, issues: [] });
     expect(readMetadataMirror({ name: "x" })).toBeNull();
     expect(readMetadataMirror({ wallet_pass: good })?.ok).toBe(true);
   });
@@ -146,8 +233,37 @@ describe("proof headers", () => {
     const read = readProofHeaders(headers);
     expect(read).toEqual({ kind: "present", proof: { message: SPEC_EXAMPLE, signature: "0xabcd" } });
     expect(readProofHeaders({})).toEqual({ kind: "absent" });
+    expect(readProofHeaders({ "wallet-pass-signature": "0xab" }).kind).toBe("malformed");
     expect(readProofHeaders({ "x-wallet-pass-signature": "0xab" }).kind).toBe("malformed");
-    expect(readProofHeaders({ "x-wallet-pass-proof": "e30", "x-wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
+    expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
+  });
+  it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
+    expect(PROOF_HEADER).toBe("Wallet-Pass-Proof");
+    expect(SIGNATURE_HEADER).toBe("Wallet-Pass-Signature");
+    expect(LEGACY_PROOF_HEADER).toBe("X-Wallet-Pass-Proof");
+    expect(LEGACY_SIGNATURE_HEADER).toBe("X-Wallet-Pass-Signature");
+    const sent = proofHeaders({ message: "m", signature: "0xabcd" });
+    expect(sent).toEqual({
+      "Wallet-Pass-Proof": encodeBase64Url("m"),
+      "Wallet-Pass-Signature": "0xabcd",
+      "X-Wallet-Pass-Proof": encodeBase64Url("m"),
+      "X-Wallet-Pass-Signature": "0xabcd",
+    });
+    expect(Object.keys(proofHeaders({ message: "m", signature: "0xabcd" }, { legacy: false }))).toEqual(["Wallet-Pass-Proof", "Wallet-Pass-Signature"]);
+    expect([...PROOF_HEADER_NAMES]).toEqual(["Wallet-Pass-Proof", "Wallet-Pass-Signature", "X-Wallet-Pass-Proof", "X-Wallet-Pass-Signature"]);
+  });
+  it("reads a proof under either name set, and the new name wins when both are present", () => {
+    const enc = encodeBase64Url("new");
+    const old = encodeBase64Url("old");
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
+    expect(readProofHeaders({ "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "old", signature: "0x02" } });
+    expect(
+      readProofHeaders(new Headers({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })),
+    ).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
+    // The new name wins per header: garbage under it is not rescued by a good X- value.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": "!!", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "malformed", reason: "encoding" });
+    // Mixed names still make one proof.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x02" } });
   });
   it("encodes base64url without padding and survives unicode", () => {
     const s = "café \u{1F43E}";
@@ -159,8 +275,50 @@ describe("proof headers", () => {
 
 describe("statuses", () => {
   it("reserves 403 for the entitlement refusal alone", () => {
-    const codes = ["invalid_message", "domain_mismatch", "nonce_invalid", "challenge_expired", "not_yet_valid", "binding_mismatch", "signature_invalid", "not_owner", "read_failed", "proof_required", "malformed_proof", "invalid_address", "invalid_token", "unknown_action", "link_invalid", "not_found"] as const;
-    expect(codes.filter((c) => statusForError(c) === 403)).toEqual(["not_owner"]);
+    expect(WALLET_PASS_ERROR_CODES.filter((c) => statusForError(c) === 403)).toEqual(["not_owner"]);
     expect(statusForError("read_failed")).toBe(503);
+  });
+
+  it("maps every code to the status of the spec's refusal table", () => {
+    const table: Record<string, number> = {
+      invalid_request: 400,
+      invalid_message: 400,
+      domain_mismatch: 400,
+      binding_mismatch: 400,
+      proof_required: 401,
+      nonce_invalid: 401,
+      challenge_expired: 401,
+      signature_invalid: 401,
+      not_owner: 403,
+      unknown_capability: 404,
+      insufficient_balance: 409,
+      rate_limited: 429,
+      read_failed: 503,
+    };
+    for (const [code, status] of Object.entries(table)) expect(statusForError(code as WalletPassErrorCode), code).toBe(status);
+    // Pending addition to the table (PR #2036): a Not Before in the future is a failed freshness check.
+    expect(statusForError("not_yet_valid")).toBe(401);
+    for (const code of Object.keys(table)) expect(CANONICAL_WALLET_PASS_ERROR_CODES).toContain(code);
+  });
+
+  it("accepts the 0.2.x names as deprecated aliases of the spec's codes", () => {
+    const aliases: Record<string, [string, number]> = {
+      malformed_proof: ["invalid_request", 400],
+      invalid_address: ["invalid_request", 400],
+      invalid_token: ["invalid_request", 400],
+      link_invalid: ["unknown_capability", 404],
+      not_found: ["unknown_capability", 404],
+    };
+    for (const [old, [canonical, status]] of Object.entries(aliases)) {
+      expect(isWalletPassErrorCode(old)).toBe(true);
+      expect(isDeprecatedWalletPassErrorCode(old)).toBe(true);
+      expect(canonicalErrorCode(old as WalletPassErrorCode)).toBe(canonical);
+      expect(statusForError(old as WalletPassErrorCode)).toBe(status);
+      // The SDK never emits them.
+      expect(CANONICAL_WALLET_PASS_ERROR_CODES).not.toContain(old);
+    }
+    expect(isDeprecatedWalletPassErrorCode("not_owner")).toBe(false);
+    expect(canonicalErrorCode("not_owner")).toBe("not_owner");
+    expect(isWalletPassErrorCode("made_up")).toBe(false);
   });
 });

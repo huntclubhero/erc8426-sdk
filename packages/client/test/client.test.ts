@@ -153,11 +153,48 @@ describe("public manifest", () => {
     expect(m.result?.ok).toBe(true);
   });
 
-  it("maps a missing token to not_found", async () => {
+  it("maps a missing token to unknown_capability", async () => {
     const issuer = fakeIssuer({ contract: CONTRACT, mode: "public", ownerOf: () => null });
     const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });
     const client = createWalletPassClient({ publicClient: chain.client, fetch: issuer.fetch });
-    await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "not_found", status: 404 });
+    await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "unknown_capability", status: 404 });
+  });
+
+  it("sends the proof under the RFC 6648 names and the X- names, so a 0.2.x issuer still resolves the manifest", async () => {
+    const { client, owner, issuer } = setup("gated");
+    const result = await client.getManifest({ contract: CONTRACT, tokenId: 1 }, { signer: owner });
+    expect(result.configuration).toBe("gated");
+    const proved = issuer.requests.find((r) => r.headers.get("wallet-pass-proof") !== null)!;
+    expect(proved).toBeDefined();
+    expect(proved.headers.get("wallet-pass-signature")).toMatch(/^0x/);
+    expect(proved.headers.get("x-wallet-pass-proof")).toBe(proved.headers.get("wallet-pass-proof"));
+    expect(proved.headers.get("x-wallet-pass-signature")).toBe(proved.headers.get("wallet-pass-signature"));
+    // An issuer that reads only the X- names.
+    const legacy = setup("gated", { faults: { legacyHeadersOnly: true } });
+    expect((await legacy.client.getManifest({ contract: CONTRACT, tokenId: 1 }, { signer: legacy.owner })).configuration).toBe("gated");
+  });
+
+  it("tolerates a manifest with no version and reads one that carries it", async () => {
+    const { client } = setup("public");
+    expect((await client.getManifest({ contract: CONTRACT, tokenId: 1 })).manifest.version).toBeUndefined();
+    const versioned = setup("public", { faults: { manifestVersion: 1 } });
+    expect((await versioned.client.getManifest({ contract: CONTRACT, tokenId: 1 })).manifest.version).toBe(1);
+    const broken = setup("public", { faults: { manifestVersion: "1" } });
+    await expect(broken.client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "invalid_manifest" });
+  });
+
+  it("reports a 0.2.x issuer's retired code names under the spec's names, keeping the sent string in serverCode", async () => {
+    const issuer = fakeIssuer({ contract: CONTRACT, mode: "public", ownerOf: () => null, faults: { legacyCodes: true } });
+    const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });
+    const client = createWalletPassClient({ publicClient: chain.client, fetch: issuer.fetch });
+    await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "unknown_capability", status: 404, serverCode: "not_found" });
+    const malformed = errorFromResponse(400, new Headers(), { error: "malformed_proof" });
+    expect(malformed).toMatchObject({ code: "invalid_request", status: 400, serverCode: "malformed_proof" });
+    expect(errorFromResponse(400, new Headers(), { error: "invalid_address" })).toMatchObject({ code: "invalid_request", serverCode: "invalid_address" });
+    expect(errorFromResponse(404, new Headers(), { error: "link_invalid" })).toMatchObject({ code: "unknown_capability", serverCode: "link_invalid" });
+    // New codes pass through, with Retry-After honoured on a 429.
+    expect(errorFromResponse(429, new Headers({ "retry-after": "7" }), { error: "rate_limited" })).toMatchObject({ code: "rate_limited", retryable: true, retryAfterSeconds: 7 });
+    expect(errorFromResponse(409, new Headers(), { error: "insufficient_balance" })).toMatchObject({ code: "insufficient_balance", retryable: false });
   });
 
   it("wraps network failures as retryable", async () => {
@@ -351,15 +388,15 @@ describe("honest codes for issuer answers outside the core set", () => {
 });
 
 describe("chain reads", () => {
-  it("a passURI revert (nonexistent or burned token) is a typed not_found from the chain", async () => {
+  it("a passURI revert (nonexistent or burned token) is a typed unknown_capability from the chain", async () => {
     const chain = fakeChain({ contracts: { [CONTRACT]: { interfaces: [WALLET_PASS_INTERFACE_ID] } } });
     const client = createWalletPassClient({ publicClient: chain.client });
     const e = await client.getManifest({ contract: CONTRACT, tokenId: 99 }).catch((x: unknown) => x);
     expect(e).toBeInstanceOf(WalletPassClientError);
-    expect(e).toMatchObject({ code: "not_found", source: "chain", retryable: false });
-    await expect(client.getPassURI({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
-    await expect(client.issuerDisplay({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
-    await expect(client.readMetadataMirror({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "not_found" });
+    expect(e).toMatchObject({ code: "unknown_capability", source: "chain", retryable: false });
+    await expect(client.getPassURI({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "unknown_capability" });
+    await expect(client.issuerDisplay({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "unknown_capability" });
+    await expect(client.readMetadataMirror({ contract: CONTRACT, tokenId: 99 })).rejects.toMatchObject({ code: "unknown_capability" });
   });
 
   it("an address with no contract is unsupported", async () => {

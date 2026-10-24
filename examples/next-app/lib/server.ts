@@ -271,7 +271,10 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
     contract: config.contract,
     mode: "gated",
     publicClient,
-    ...(redis ? { stores: kvStores(upstashKv(redis), { prefix: `${prefix}issuer:` }) } : {}),
+    // Links are derived from this secret (0.3.0): set ISSUER_LINK_SECRET
+    // (32+ bytes, the same on every instance) before deploying as production.
+    ...(process.env.ISSUER_LINK_SECRET ? { linkSecret: process.env.ISSUER_LINK_SECRET } : {}),
+    ...(redis ? { stores: kvStores(upstashKv(redis), { chainId: config.chainId, contract: config.contract, prefix: `${prefix}issuer:` }) } : {}),
     providers,
     render,
     capability: { enabled: true },
