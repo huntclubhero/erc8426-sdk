@@ -46,20 +46,43 @@ function readHeader(headers: HeaderSource, name: string): string | undefined {
 
 export type ReadProofResult =
   | { kind: "absent" }
-  | { kind: "malformed"; reason: "encoding" | "signature" | "partial" }
+  | {
+      kind: "malformed";
+      /// `mixed`: a proof under one name form and a signature under the other,
+      ///  with no complete pair (refuse as invalid_request). `partial` is no
+      ///  longer returned: a lone header is `absent`, as the spec treats
+      ///  anything short of a complete pair as a missing proof.
+      reason: "encoding" | "signature" | "mixed" | "partial";
+    }
   | { kind: "present"; proof: ControlProof };
 
-/// Read a control proof from request headers. `absent` means no proof header
-///  was sent under either name (answer 401 proof_required); `malformed` means
-///  the proof cannot be decoded (answer 400); `present` still has to pass the
-///  floor. Each of the two values is read from its RFC 6648 name first and
-///  from its X- name only when the new name is not there, so when a client
-///  sends both the new name wins.
+/// Read a control proof from request headers. Each name form is a pair: both
+///  RFC 6648 names (`Wallet-Pass-Proof`, `Wallet-Pass-Signature`) or both X-
+///  names. A complete unprefixed pair wins when both complete pairs are sent;
+///  a complete X- pair is used otherwise. A proof under one form with a
+///  signature under the other, and no complete pair, is `malformed` with
+///  reason `mixed` (answer 400 invalid_request); the two are never stitched
+///  together. Anything else short of a complete pair, a lone header included,
+///  is `absent` (answer 401 proof_required). `malformed` also covers a proof
+///  that cannot be decoded; `present` still has to pass the floor.
 export function readProofHeaders(headers: HeaderSource): ReadProofResult {
-  const encoded = readHeader(headers, PROOF_HEADER) ?? readHeader(headers, LEGACY_PROOF_HEADER);
-  const signature = readHeader(headers, SIGNATURE_HEADER) ?? readHeader(headers, LEGACY_SIGNATURE_HEADER);
-  if (encoded === undefined && signature === undefined) return { kind: "absent" };
-  if (encoded === undefined || signature === undefined) return { kind: "malformed", reason: "partial" };
+  const proofNew = readHeader(headers, PROOF_HEADER) || undefined;
+  const signatureNew = readHeader(headers, SIGNATURE_HEADER) || undefined;
+  const proofLegacy = readHeader(headers, LEGACY_PROOF_HEADER) || undefined;
+  const signatureLegacy = readHeader(headers, LEGACY_SIGNATURE_HEADER) || undefined;
+  let encoded: string;
+  let signature: string;
+  if (proofNew && signatureNew) {
+    encoded = proofNew;
+    signature = signatureNew;
+  } else if (proofLegacy && signatureLegacy) {
+    encoded = proofLegacy;
+    signature = signatureLegacy;
+  } else if ((proofNew || signatureNew) && (proofLegacy || signatureLegacy)) {
+    return { kind: "malformed", reason: "mixed" };
+  } else {
+    return { kind: "absent" };
+  }
   if (!/^0x[0-9a-fA-F]+$/.test(signature) || signature.length % 2 !== 0) {
     return { kind: "malformed", reason: "signature" };
   }

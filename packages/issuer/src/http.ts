@@ -298,7 +298,13 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const proof = readProofHeaders(request.headers);
     // No proof: 401, the challenge URI, and no acquisition URLs.
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge });
-    if (proof.kind === "malformed") return error("invalid_request", { message: `proof headers could not be decoded (${proof.reason})` });
+    if (proof.kind === "malformed") {
+      const message =
+        proof.reason === "mixed"
+          ? "the proof headers mix the Wallet-Pass and X-Wallet-Pass name forms; send one complete pair"
+          : `proof headers could not be decoded (${proof.reason})`;
+      return error("invalid_request", { message });
+    }
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });

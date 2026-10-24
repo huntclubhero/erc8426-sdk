@@ -76,9 +76,15 @@ describe("gated acquisition", () => {
 
   it("refuses a malformed proof with 400", async () => {
     const h = buildHarness();
-    const partial = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": encodeBase64Url("x") });
-    expect(partial.status).toBe(400);
-    expect(((await partial.json()) as { error: string }).error).toBe("invalid_request");
+    // A lone header is short of a complete pair: a missing proof, answered
+    // like no proof at all.
+    const lone = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": encodeBase64Url("x") });
+    expect(lone.status).toBe(401);
+    expect((await lone.json()) as { error: string }).toMatchObject({ error: "proof_required", challenge: expect.any(String) });
+    // A proof under one name form and a signature under the other is refused.
+    const mixed = await h.get(MANIFEST, { "Wallet-Pass-Proof": encodeBase64Url("x"), "X-Wallet-Pass-Signature": "0x00" });
+    expect(mixed.status).toBe(400);
+    expect((await mixed.json()) as { error: string }).toMatchObject({ error: "invalid_request", message: expect.stringMatching(/mix/) });
     const notHex = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": encodeBase64Url("x"), "X-Wallet-Pass-Signature": "nothex" });
     expect(notHex.status).toBe(400);
     const badEncoding = await h.get(MANIFEST, { "X-Wallet-Pass-Proof": "***", "X-Wallet-Pass-Signature": "0x00" });

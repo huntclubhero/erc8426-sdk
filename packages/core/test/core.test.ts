@@ -237,8 +237,10 @@ describe("proof headers", () => {
     const read = readProofHeaders(headers);
     expect(read).toEqual({ kind: "present", proof: { message: SPEC_EXAMPLE, signature: "0xabcd" } });
     expect(readProofHeaders({})).toEqual({ kind: "absent" });
-    expect(readProofHeaders({ "wallet-pass-signature": "0xab" }).kind).toBe("malformed");
-    expect(readProofHeaders({ "x-wallet-pass-signature": "0xab" }).kind).toBe("malformed");
+    // A lone header is short of a complete pair: a missing proof, as the spec says.
+    expect(readProofHeaders({ "wallet-pass-signature": "0xab" })).toEqual({ kind: "absent" });
+    expect(readProofHeaders({ "x-wallet-pass-signature": "0xab" })).toEqual({ kind: "absent" });
+    expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "" })).toEqual({ kind: "absent" });
     expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
   });
   it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
@@ -264,16 +266,38 @@ describe("proof headers", () => {
     expect(
       readProofHeaders(new Headers({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })),
     ).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
-    // The new name wins per header: garbage under it is not rescued by a good X- value.
-    expect(readProofHeaders({ "Wallet-Pass-Proof": "!!", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "malformed", reason: "encoding" });
-    // Mixed names still make one proof.
-    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x02" } });
+    // Each name form is a pair: a stray unprefixed header beside a complete X- pair
+    // does not make an unprefixed pair, so the X- pair is used.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": "!!", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "present", proof: { message: "old", signature: "0x02" } });
+    // A complete unprefixed pair wins even when the X- pair is garbage.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x01", "X-Wallet-Pass-Proof": "!!", "X-Wallet-Pass-Signature": "zz" })).toEqual({ kind: "present", proof: { message: "new", signature: "0x01" } });
+    // Garbage inside the pair that is used is still malformed.
+    expect(readProofHeaders({ "Wallet-Pass-Proof": "!!", "Wallet-Pass-Signature": "0x01", "X-Wallet-Pass-Proof": old, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "malformed", reason: "encoding" });
+  });
+  it("refuses a mixed pair instead of stitching it together", () => {
+    const enc = encodeBase64Url("new");
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "X-Wallet-Pass-Signature": "0x02" })).toEqual({ kind: "malformed", reason: "mixed" });
+    expect(readProofHeaders(new Headers({ "X-Wallet-Pass-Proof": enc, "Wallet-Pass-Signature": "0x02" }))).toEqual({ kind: "malformed", reason: "mixed" });
+    expect(readProofHeaders({ "Wallet-Pass-Proof": enc, "X-Wallet-Pass-Proof": enc })).toEqual({ kind: "malformed", reason: "mixed" });
   });
   it("encodes base64url without padding and survives unicode", () => {
     const s = "café \u{1F43E}";
     const enc = encodeBase64Url(s);
     expect(enc).not.toMatch(/[+/=]/);
     expect(decodeBase64Url(enc)).toBe(s);
+  });
+  it("decodes correctly padded base64url identically, and refuses misplaced padding", () => {
+    for (const s of ["a", "ab", "abc", "abcd", "café \u{1F43E}", SPEC_EXAMPLE]) {
+      const enc = encodeBase64Url(s);
+      const padded = enc + "=".repeat((4 - (enc.length % 4)) % 4);
+      expect(decodeBase64Url(padded)).toBe(s);
+      expect(readProofHeaders({ "Wallet-Pass-Proof": padded, "Wallet-Pass-Signature": "0x01" })).toEqual({ kind: "present", proof: { message: s, signature: "0x01" } });
+    }
+    expect(decodeBase64Url("YQ==")).toBe("a");
+    expect(decodeBase64Url("YWI=")).toBe("ab");
+    for (const bad of ["YQ=", "YQ===", "Y=Q=", "=YQ", "YWJj=", "YWI==", "YQ==YQ==", "Y+8=", "Y/8="]) {
+      expect(() => decodeBase64Url(bad), bad).toThrow();
+    }
   });
 });
 
