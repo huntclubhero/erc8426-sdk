@@ -102,18 +102,6 @@ export async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/// Whether an outcome is worth replaying: only a success. A success had a
-///  side effect (the action ran, the nonce was spent), and the repeat is the
-///  phone asking again for the answer it never saw. A refusal had none, so a
-///  repeat is judged afresh: cheaply, and against state that may have moved
-///  on (a claim since the 404, a funded account since the 409, a chain that
-///  answers since the 503). On the nonce path a re-judged repeat of a
-///  refused presentation meets nonce_invalid, since the failed attempt
-///  spent the nonce.
-export function isReplayableOutcome(status: number): boolean {
-  return status >= 200 && status < 300;
-}
-
 export async function toOutcome(response: Response): Promise<RecordedOutcome> {
   const headers: Record<string, string> = {};
   response.headers.forEach((value, name) => {
@@ -142,8 +130,13 @@ export class RepeatCoalescer {
     const recorded = await this.store.get(key);
     if (recorded) return { response: fromOutcome(recorded), repeated: true };
     const promise = (async () => {
+      // Every completed outcome is recorded, refusals included, as the
+      // reference server does: the repeat gets THAT request's answer, so a
+      // refused presentation repeats its refusal and never turns into
+      // nonce_invalid. State that moved on (a rotation, a claim) changes
+      // the key on the capability path, so a stale answer is never served.
       const outcome = await toOutcome(await execute());
-      if (isReplayableOutcome(outcome.status)) await this.store.put(key, outcome, this.windowSeconds);
+      await this.store.put(key, outcome, this.windowSeconds);
       return outcome;
     })();
     this.inflight.set(key, promise);

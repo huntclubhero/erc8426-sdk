@@ -400,14 +400,18 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function followLink(request: Request, linkToken: string): Promise<Response> {
     const text = await readText(request);
     if (text === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
-    // Keyed by the link and a hash of the body: the phone resending an
-    // aborted POST runs the action once and gets one answer twice. A body
-    // that differs is a new request.
-    const key = `link:${linkToken}:${await sha256Hex(text)}`;
+    // Rotation wins: the link is resolved first (side-effect free), and one
+    // that no longer resolves is refused before the repeat store is
+    // consulted. The key carries the link, its binding and the holder it is
+    // issued to, plus a hash of the body, so a recorded answer is never
+    // served once the binding changed, and the phone resending an aborted
+    // POST runs the action once and gets one answer twice. A body that
+    // differs is a new request.
+    const resolved = await resolveActionLink(linkToken);
+    if (!resolved) return error("unknown_capability");
+    const { binding, record, def } = resolved;
+    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${record.lastIssuedTo ?? "-"}:${await sha256Hex(text)}`;
     return coalesce(key, async () => {
-      const resolved = await resolveActionLink(linkToken);
-      if (!resolved) return error("unknown_capability");
-      const { binding, record, def } = resolved;
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
       // The link decides the action. A request naming another is refused, as

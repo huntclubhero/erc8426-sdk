@@ -115,35 +115,64 @@ describe("identical repeats on POST /links/:link", () => {
     expect(h.executed).toHaveLength(4);
   });
 
-  it("replays only a success; a refusal is judged afresh against current state", async () => {
+  it("repeats a refusal too: the identical repeat gets that request's outcome, whatever it was", async () => {
+    const h = limited();
+    const owner = newSigner();
+    const links = await issuePassTo(h, owner);
+    // binding_mismatch, repeated as binding_mismatch.
+    const wrong = JSON.stringify({ action: "water" });
+    const refused = await postRaw(h, links.feed!, wrong);
+    expect(refused.status).toBe(400);
+    const again = await postRaw(h, links.feed!, wrong);
+    await same(refused, again);
+    expect(again.headers.get("x-wallet-pass-repeat")).toBe("true");
+    // not_owner (a sold token behind a live link), repeated as not_owner.
+    h.chain.setOwner(TOKEN_ID, newSigner().address);
+    const body = JSON.stringify({ action: "feed" });
+    const sold = await postRaw(h, links.feed!, body);
+    expect(sold.status).toBe(403);
+    const soldAgain = await postRaw(h, links.feed!, body);
+    await same(sold, soldAgain);
+    expect(soldAgain.headers.get("x-wallet-pass-repeat")).toBe("true");
+    // Even a 503: the repeat is the same request asking again, so it gets
+    // the same answer inside the window, and a fresh read after it.
+    h.chain.setOwner(TOKEN_ID, owner.address);
+    h.chain.failing = true;
+    const other = JSON.stringify({ action: "feed", params: { n: 2 } });
+    expect((await postRaw(h, links.feed!, other)).status).toBe(503);
+    h.chain.failing = false;
+    expect((await postRaw(h, links.feed!, other)).status).toBe(503);
+    h.clock.advance(31_000);
+    expect((await postRaw(h, links.feed!, other)).status).toBe(200);
+    expect(h.executed).toHaveLength(1);
+  });
+
+  it("rotation wins: a link that no longer resolves is refused before the repeat store is consulted, and a changed binding is a new key", async () => {
     const h = limited();
     const seller = newSigner();
     const buyer = newSigner();
     const links = await issuePassTo(h, seller);
-    // A failed read is retryable: the repeat runs again and succeeds once the chain answers.
-    h.chain.failing = true;
     const body = JSON.stringify({ action: "feed" });
-    expect((await postRaw(h, links.feed!, body)).status).toBe(503);
-    h.chain.failing = false;
-    const retried = await postRaw(h, links.feed!, body);
-    expect(retried.status).toBe(200);
-    expect(retried.headers.get("x-wallet-pass-repeat")).toBeNull();
-    // A refusal that state can change: the buyer taps the new link before
-    // claiming (404), then claims; the identical tap now succeeds.
+    expect((await postRaw(h, links.feed!, body)).status).toBe(200);
+    // Rotated on an observed transfer: the recorded 200 is not served.
     h.chain.setOwner(TOKEN_ID, buyer.address);
     await h.issuer.onTransfer(TOKEN_ID, seller.address, buyer.address);
+    const dead = await postRaw(h, links.feed!, body);
+    expect(dead.status).toBe(404);
+    expect(dead.headers.get("x-wallet-pass-repeat")).toBeNull();
+    // The buyer taps the new link before claiming (404, recorded), then
+    // claims: the holder is part of the key, so the identical tap is a new
+    // request and succeeds.
     const minted = new URL((await h.issuer.capabilityLinksFor(TOKEN_ID)).feed!).pathname;
     expect((await postRaw(h, minted, body)).status).toBe(404);
+    const repeat404 = await postRaw(h, minted, body);
+    expect(repeat404.status).toBe(404);
+    expect(repeat404.headers.get("x-wallet-pass-repeat")).toBe("true");
     const p = await signChallenge(h, buyer);
     expect((await h.get(`/wallet-pass/${TOKEN_ID}`, { "Wallet-Pass-Proof": encodeBase64Url(p.message), "Wallet-Pass-Signature": p.signature })).status).toBe(200);
     const after = await postRaw(h, minted, body);
     expect(after.status).toBe(200);
     expect(after.headers.get("x-wallet-pass-repeat")).toBeNull();
-    // The seller's old link, replayed inside the window, still answers with
-    // the recorded success and runs nothing: the action already happened.
-    const stale = await postRaw(h, links.feed!, body);
-    expect(stale.status).toBe(200);
-    expect(stale.headers.get("x-wallet-pass-repeat")).toBe("true");
     expect(h.executed).toHaveLength(2);
   });
 
@@ -235,16 +264,27 @@ describe("identical repeats on POST /:tokenId/actions/:action", () => {
     expect(h.executed).toHaveLength(1);
   });
 
-  it("a repeat of a refused presentation is judged afresh and finds the nonce spent", async () => {
+  it("a repeat of a refused presentation gets the same refusal, never nonce_invalid", async () => {
     const h = buildHarness();
     const { message } = await proofFor(h);
     const body = JSON.stringify({ message, signature: `0x${"ab".repeat(65)}` });
     const first = await postRaw(h, ACTION_PATH("levelUp"), body);
     expect(first.status).toBe(401);
-    expect(((await first.json()) as { error: string }).error).toBe("signature_invalid");
+    expect(((await first.clone().json()) as { error: string }).error).toBe("signature_invalid");
     const again = await postRaw(h, ACTION_PATH("levelUp"), body);
-    expect(again.status).toBe(401);
-    expect(((await again.json()) as { error: string }).error).toBe("nonce_invalid");
-    expect(again.headers.get("x-wallet-pass-repeat")).toBeNull();
+    await same(first, again);
+    expect(again.headers.get("x-wallet-pass-repeat")).toBe("true");
+    // A verified proof from a non-entitled account repeats as 403, as the reference asserts.
+    const stranger = newSigner();
+    const p = await signChallenge(h, stranger, TOKEN_ID, "levelUp");
+    const refused = await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify(p));
+    expect(refused.status).toBe(403);
+    const refusedAgain = await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify(p));
+    await same(refused, refusedAgain);
+    expect(((await refusedAgain.json()) as { error: string }).error).toBe("not_owner");
+    // Past the window the nonce is simply spent.
+    h.clock.advance(31_000);
+    const late = await postRaw(h, ACTION_PATH("levelUp"), body);
+    expect(((await late.json()) as { error: string }).error).toBe("nonce_invalid");
   });
 });

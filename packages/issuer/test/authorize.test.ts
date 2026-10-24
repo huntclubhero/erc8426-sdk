@@ -161,8 +161,18 @@ describe("signed action (the two-check floor)", () => {
     h.chain.failing = true;
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(503);
     h.chain.failing = false;
-    const retry = await h.post(ACTION_PATH("feed"), { message, signature });
+    // A byte-identical repeat inside the repeat window gets that request's
+    // outcome again (repeat.test.ts); any other presentation, and the
+    // identical one once the window has passed, finds the nonce spent.
+    const identical = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(identical.status).toBe(503);
+    expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    const retry = await h.post(ACTION_PATH("feed"), { message, signature, params: { retry: true } });
     expect(((await retry.json()) as { error: string }).error).toBe("nonce_invalid");
+    h.clock.advance(31_000);
+    const late = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(((await late.json()) as { error: string }).error).toBe("nonce_invalid");
+    expect(h.executed).toHaveLength(0);
   });
 
   it("the expiration makes a leaked proof go stale", async () => {
