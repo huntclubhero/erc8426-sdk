@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 /// indexer.
 export async function GET(request: Request): Promise<Response> {
   const owner = new URL(request.url).searchParams.get("owner");
-  if (!owner || !isAddress(owner)) return json({ error: "invalid_address" }, { status: 400 });
+  if (!owner || !isAddress(owner)) return json({ error: "invalid_request", message: "owner must be an address" }, { status: 400 });
   const rt = await getRuntime().catch((e: Error) => e);
   if (rt instanceof Error) return json({ error: "internal_error", message: rt.message }, { status: 500 });
 
