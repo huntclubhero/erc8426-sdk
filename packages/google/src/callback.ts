@@ -70,14 +70,34 @@ export type CallbackRefusal =
   | "message_expired" // expTimeMillis has passed
   | "nonce_replayed"; // this nonce was already accepted
 
-export type CallbackVerification = { ok: true; event: CallbackEvent } | { ok: false; reason: CallbackRefusal; detail?: string };
+export type CallbackVerification =
+  | {
+      ok: true;
+      event: CallbackEvent;
+      /// Give the nonce back. The nonce is claimed when the message verifies,
+      ///  BEFORE the caller handles the event (so a redelivery that races the
+      ///  first delivery is not handled twice); a caller whose handling then
+      ///  fails calls this so Google's redelivery is handled, not answered
+      ///  nonce_replayed. No-op without a nonce store, or with one that has
+      ///  no `del`.
+      release: () => Promise<void>;
+    }
+  | { ok: false; reason: CallbackRefusal; detail?: string };
 
 /// Where accepted nonces are remembered for deduplication. Structurally a
-///  subset of `@erc8426/issuer`'s `KeyValueStore` (Redis SET NX EX), so the
-///  same store serves both; `set` returns false when the key already exists.
+///  subset of `@erc8426/issuer`'s `KeyValueStore` (Redis SET NX EX, DEL), so
+///  the same store serves both; `set` returns false when the key already
+///  exists. `del` lets a claim be released when handling the event failed;
+///  without it a failed delivery is lost until Google's next redelivery
+///  after the window.
 export interface CallbackNonceStore {
   set(key: string, value: string, options: { ttlSeconds: number; onlyIfAbsent: true }): Promise<boolean>;
+  del?(key: string): Promise<void>;
 }
+
+/// Largest callback body read by `callbackHandler`. A signed callback is
+///  about two kilobytes; anything far past that is not one.
+export const MAX_CALLBACK_BODY_BYTES = 16 * 1024;
 
 /// An in-process nonce store, for one instance.
 export function memoryCallbackNonceStore(options: { now?: () => number; maxEntries?: number } = {}): CallbackNonceStore {
@@ -97,6 +117,9 @@ export function memoryCallbackNonceStore(options: { now?: () => number; maxEntri
       }
       return true;
     },
+    async del(key) {
+      seen.delete(key);
+    },
   };
 }
 
@@ -108,8 +131,15 @@ export interface CallbackVerifierOptions {
   fetchKeys?: () => Promise<GoogleRootKeys>;
   fetch?: typeof fetch;
   /// How long a fetched key set is reused when the response names no
-  ///  max-age. Default 3600.
+  ///  max-age. Default 3600. When no cached root key signs a message's
+  ///  intermediate key, the set is refetched early (at most once per
+  ///  `keyRefreshFloorSeconds`) before the message is refused, so a root
+  ///  key Google rotated in is picked up at once rather than after the
+  ///  cache expires.
   keyCacheSeconds?: number;
+  /// Shortest interval between early refetches forced by an unverifiable
+  ///  intermediate key. Default 60.
+  keyRefreshFloorSeconds?: number;
   /// Clock, epoch milliseconds. Default Date.now.
   now?: () => number;
   /// Remember accepted nonces until the message would have expired, so a
@@ -192,13 +222,22 @@ export function createCallbackVerifier(options: CallbackVerifierOptions): Callba
   const warn = options.onWarning ?? ((m: string) => console.warn(m));
   const fetchKeys = options.fetchKeys ?? defaultKeyFetcher(options.fetch ?? ((input, init) => globalThis.fetch(input, init)));
   const keyCacheMs = (options.keyCacheSeconds ?? 3600) * 1000;
+  const refreshFloorMs = (options.keyRefreshFloorSeconds ?? 60) * 1000;
 
   // The root key set, fetched once and reused until its max-age (or the
-  // configured TTL) passes. Concurrent callers share one fetch.
+  // configured TTL) passes. Concurrent callers share one fetch. `force`
+  // refetches early (a message signed by a root key the cache has not seen),
+  // at most once per refreshFloorMs so a flood of unverifiable messages
+  // cannot turn into a flood of fetches.
   let cached: { keys: KeyObject[]; expiresAt: number } | null = null;
   let pending: Promise<KeyObject[]> | null = null;
-  async function rootKeys(): Promise<KeyObject[]> {
-    if (cached && now() < cached.expiresAt) return cached.keys;
+  let lastForcedAt = Number.NEGATIVE_INFINITY;
+  async function rootKeys(force = false): Promise<KeyObject[]> {
+    if (!force && cached && now() < cached.expiresAt) return cached.keys;
+    if (force) {
+      if (cached && now() - lastForcedAt < refreshFloorMs) return cached.keys;
+      lastForcedAt = now();
+    }
     pending ??= (async () => {
       try {
         const set = await fetchKeys();
@@ -206,7 +245,8 @@ export function createCallbackVerifier(options: CallbackVerifierOptions): Callba
         const keys: KeyObject[] = [];
         for (const k of set.keys) {
           if (k.protocolVersion !== CALLBACK_PROTOCOL_VERSION) continue;
-          if (Number(k.keyExpiration) <= t) continue;
+          const exp = Number(k.keyExpiration);
+          if (!Number.isFinite(exp) || exp <= t) continue;
           const key = publicKeyFrom(k.keyValue);
           if (key) keys.push(key);
         }
@@ -258,9 +298,18 @@ export function createCallbackVerifier(options: CallbackVerifierOptions): Callba
 
       // The intermediate key: signed by a root key over (sender, protocol, signedKey).
       const signedKeyBytes = toSignedString(GOOGLE_PAY_PASSES_SENDER_ID, CALLBACK_PROTOCOL_VERSION, body.intermediateSigningKey.signedKey);
-      const intermediateSigned = roots.some((root) =>
-        body.intermediateSigningKey.signatures.some((sig) => typeof sig === "string" && verifies(root, signedKeyBytes, sig)),
-      );
+      const signedByAny = (keys: KeyObject[]) =>
+        keys.some((root) => body.intermediateSigningKey.signatures.some((sig) => typeof sig === "string" && verifies(root, signedKeyBytes, sig)));
+      let intermediateSigned = signedByAny(roots);
+      if (!intermediateSigned) {
+        // A root key rotated in since the cache filled: refetch once (rate
+        // capped) and look again before refusing.
+        try {
+          intermediateSigned = signedByAny(await rootKeys(true));
+        } catch {
+          // The cached set stands; the refusal below is the answer.
+        }
+      }
       if (!intermediateSigned) return { ok: false, reason: "intermediate_key_unverified" };
       let signedKey: { keyValue?: unknown; keyExpiration?: unknown };
       try {
@@ -269,7 +318,9 @@ export function createCallbackVerifier(options: CallbackVerifierOptions): Callba
         return { ok: false, reason: "intermediate_key_unverified", detail: "signedKey is not JSON" };
       }
       if (typeof signedKey.keyValue !== "string") return { ok: false, reason: "intermediate_key_unverified", detail: "signedKey has no keyValue" };
-      if (Number(signedKey.keyExpiration) <= now()) return { ok: false, reason: "intermediate_key_expired" };
+      const keyExpiration = typeof signedKey.keyExpiration === "string" || typeof signedKey.keyExpiration === "number" ? Number(signedKey.keyExpiration) : Number.NaN;
+      if (!Number.isFinite(keyExpiration)) return { ok: false, reason: "intermediate_key_unverified", detail: "signedKey has no keyExpiration" };
+      if (keyExpiration <= now()) return { ok: false, reason: "intermediate_key_expired" };
       const intermediate = publicKeyFrom(signedKey.keyValue);
       if (!intermediate) return { ok: false, reason: "intermediate_key_unverified", detail: "keyValue is not a P-256 public key" };
 
@@ -293,28 +344,63 @@ export function createCallbackVerifier(options: CallbackVerifierOptions): Callba
       if (eventType !== "save" && eventType !== "del") return { ok: false, reason: "message_invalid", detail: `eventType ${String(eventType)}` };
       if (expTimeMillis <= now()) return { ok: false, reason: "message_expired" };
 
+      let release: () => Promise<void> = async () => undefined;
       if (options.nonceStore) {
+        const store = options.nonceStore;
+        const key = `erc8426:google:callback:${options.issuerId}:${nonce}`;
         const ttlSeconds = Math.max(1, Math.ceil((expTimeMillis - now()) / 1000));
-        const fresh = await options.nonceStore.set(`erc8426:google:callback:${options.issuerId}:${nonce}`, "1", { ttlSeconds, onlyIfAbsent: true });
+        const fresh = await store.set(key, "1", { ttlSeconds, onlyIfAbsent: true });
         if (!fresh) return { ok: false, reason: "nonce_replayed" };
+        if (typeof store.del === "function") release = () => store.del!(key);
       }
 
-      return { ok: true, event: { classId, objectId, eventType, expTimeMillis, nonce, raw } };
+      return { ok: true, event: { classId, objectId, eventType, expTimeMillis, nonce, raw }, release };
     },
   };
+}
+
+/// Read at most `max` bytes of the body; null when it is larger.
+async function readBodyCapped(request: Request, max: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > max) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    joined.set(c, offset);
+    offset += c.byteLength;
+  }
+  return new TextDecoder().decode(joined);
 }
 
 /// A WHATWG fetch handler for the callback URL: verifies the POST, hands the
 ///  event to `onEvent`, and answers 200 (Google retries anything else for a
 ///  while, so a refusal that would never pass answers 4xx, and a transient
-///  one, no keys or a thrown handler, answers 503). Mount it on the path
-///  named in the class's `callbackOptions.url`; serve it through
-///  `toNodeHandler` from `@erc8426/issuer` on Node.
+///  one, no keys or a thrown handler, answers 503). A handler that throws
+///  releases the nonce claim first, so the redelivery is handled rather
+///  than answered nonce_replayed. The body is read up to
+///  MAX_CALLBACK_BODY_BYTES (413 past it). Mount it on the path named in
+///  the class's `callbackOptions.url`; serve it through `toNodeHandler`
+///  from `@erc8426/issuer` on Node.
 export function callbackHandler(verifier: CallbackVerifier, onEvent: (event: CallbackEvent, request: Request) => void | Promise<void>): (request: Request) => Promise<Response> {
   const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
   return async (request) => {
     if (request.method.toUpperCase() !== "POST") return json(405, { error: "method_not_allowed" });
-    const text = await request.text();
+    const text = await readBodyCapped(request, MAX_CALLBACK_BODY_BYTES);
+    if (text === null) return json(413, { ok: false, error: "payload_too_large" });
     const result = await verifier.verify(text, request.headers);
     if (!result.ok) {
       const status = result.reason === "keys_unavailable" ? 503 : result.reason === "nonce_replayed" ? 200 : 400;
@@ -323,6 +409,7 @@ export function callbackHandler(verifier: CallbackVerifier, onEvent: (event: Cal
     try {
       await onEvent(result.event, request);
     } catch {
+      await result.release().catch(() => undefined);
       return json(503, { ok: false, error: "handler_failed" });
     }
     return json(200, { ok: true });

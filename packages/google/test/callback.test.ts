@@ -4,6 +4,7 @@ import {
   CALLBACK_PROTOCOL_VERSION,
   GOOGLE_PAY_PASSES_SENDER_ID,
   GOOGLE_ROOT_KEYS_URL,
+  MAX_CALLBACK_BODY_BYTES,
   callbackHandler,
   createCallbackVerifier,
   maxAgeOf,
@@ -243,6 +244,106 @@ describe("createCallbackVerifier", () => {
     expect(warnings[0]).toContain("curl/8.0");
     expect((await v.verify(JSON.stringify(g.message({ nonce: "n2" })), { "user-agent": "Googlebot" })).ok).toBe(true);
     expect(warnings).toHaveLength(1);
+  });
+});
+
+describe("review regressions", () => {
+  it("a handler that throws releases the nonce, so Google's redelivery is handled instead of lost", async () => {
+    const g = googleSide();
+    const { v } = verifier(g, { nonceStore: memoryCallbackNonceStore({ now: () => NOW }) });
+    let calls = 0;
+    const handle = callbackHandler(v, () => {
+      calls++;
+      if (calls === 1) throw new Error("db down");
+    });
+    const body = JSON.stringify(g.message());
+    const first = await handle(new Request("https://x/cb", { method: "POST", body }));
+    expect(first.status).toBe(503);
+    const redelivered = await handle(new Request("https://x/cb", { method: "POST", body }));
+    expect(redelivered.status).toBe(200);
+    expect(await redelivered.json()).toEqual({ ok: true });
+    expect(calls).toBe(2);
+    // Once handled, a further redelivery is the duplicate it is.
+    const third = await handle(new Request("https://x/cb", { method: "POST", body }));
+    expect(await third.json()).toMatchObject({ ok: false, error: "nonce_replayed" });
+    expect(calls).toBe(2);
+    // verify() exposes release() for callers that drive it themselves; without a store it is a no-op.
+    const plain = verifier(g).v;
+    const r = await plain.verify(JSON.stringify(g.message({ nonce: "n9" })));
+    expect(r.ok).toBe(true);
+    if (r.ok) await expect(r.release()).resolves.toBeUndefined();
+  });
+
+  it("a root key rotated in after the cache filled is picked up by one early refetch, rate capped", async () => {
+    const g1 = googleSide();
+    const g2 = googleSide();
+    let set = g1.rootKeys;
+    let fetches = 0;
+    let t = NOW;
+    const v = createCallbackVerifier({
+      issuerId: ISSUER,
+      now: () => t,
+      keyRefreshFloorSeconds: 60,
+      fetchKeys: async () => {
+        fetches += 1;
+        return set;
+      },
+      onWarning: () => undefined,
+    });
+    expect((await v.verify(JSON.stringify(g1.message()))).ok).toBe(true);
+    expect(fetches).toBe(1);
+    // Google adds a root; a message under it arrives before the cache expired.
+    set = { keys: [...g1.rootKeys.keys, ...g2.rootKeys.keys] };
+    const r = await v.verify(JSON.stringify(g2.message({ nonce: "n2" })));
+    expect(r.ok).toBe(true);
+    expect(fetches).toBe(2);
+    // An unverifiable message right after does not trigger another fetch within the floor.
+    const rogue = googleSide();
+    const refused = await v.verify(JSON.stringify(rogue.message({ nonce: "n3" })));
+    expect(refused.ok ? "accepted" : refused.reason).toBe("intermediate_key_unverified");
+    expect(fetches).toBe(2);
+    t += 61_000;
+    const refusedLater = await v.verify(JSON.stringify(rogue.message({ nonce: "n4" })));
+    expect(refusedLater.ok ? "accepted" : refusedLater.reason).toBe("intermediate_key_unverified");
+    expect(fetches).toBe(3);
+    // A root key with no finite keyExpiration is ignored.
+    const noExpiry = createCallbackVerifier({
+      issuerId: ISSUER,
+      now: () => NOW,
+      fetchKeys: async () => ({ keys: [{ keyValue: g1.root.keyValue, protocolVersion: CALLBACK_PROTOCOL_VERSION, keyExpiration: "" }] }),
+      onWarning: () => undefined,
+    });
+    const noExp = await noExpiry.verify(JSON.stringify(g1.message({ nonce: "n5" })));
+    expect(noExp.ok ? "accepted" : noExp.reason).toBe("intermediate_key_unverified");
+  });
+
+  it("an intermediate key without a finite keyExpiration is refused", async () => {
+    const g = googleSide();
+    const { v } = verifier(g);
+    for (const signedKey of [JSON.stringify({ keyValue: g.intermediate.keyValue }), JSON.stringify({ keyValue: g.intermediate.keyValue, keyExpiration: "soon" }), JSON.stringify({ keyValue: g.intermediate.keyValue, keyExpiration: null })]) {
+      const m = g.message();
+      m.intermediateSigningKey = { signedKey, signatures: [ecdsa(g.root.privateKey, toSignedString(GOOGLE_PAY_PASSES_SENDER_ID, CALLBACK_PROTOCOL_VERSION, signedKey))] };
+      const r = await v.verify(JSON.stringify(m));
+      expect(r.ok ? "accepted" : r.reason, signedKey).toBe("intermediate_key_unverified");
+    }
+    // A numeric keyExpiration is fine.
+    const numeric = JSON.stringify({ keyValue: g.intermediate.keyValue, keyExpiration: NOW + HOUR });
+    const m = g.message();
+    m.intermediateSigningKey = { signedKey: numeric, signatures: [ecdsa(g.root.privateKey, toSignedString(GOOGLE_PAY_PASSES_SENDER_ID, CALLBACK_PROTOCOL_VERSION, numeric))] };
+    const sig = ecdsa(g.intermediate.privateKey, toSignedString(GOOGLE_PAY_PASSES_SENDER_ID, ISSUER, CALLBACK_PROTOCOL_VERSION, m.signedMessage));
+    expect((await v.verify(JSON.stringify({ ...m, signature: sig }))).ok).toBe(true);
+  });
+
+  it("the handler caps the body it reads", async () => {
+    const g = googleSide();
+    const handle = callbackHandler(verifier(g).v, () => undefined);
+    expect(MAX_CALLBACK_BODY_BYTES).toBe(16 * 1024);
+    const big = await handle(new Request("https://x/cb", { method: "POST", body: "x".repeat(MAX_CALLBACK_BODY_BYTES + 1) }));
+    expect(big.status).toBe(413);
+    expect(await big.json()).toEqual({ ok: false, error: "payload_too_large" });
+    const declared = await handle(new Request("https://x/cb", { method: "POST", headers: { "content-length": String(MAX_CALLBACK_BODY_BYTES + 1) }, body: "{}" }));
+    expect(declared.status).toBe(413);
+    expect((await handle(new Request("https://x/cb", { method: "POST", body: JSON.stringify(g.message()) }))).status).toBe(200);
   });
 });
 
