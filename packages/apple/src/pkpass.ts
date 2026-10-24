@@ -120,7 +120,22 @@ const STYLE_KEY: Record<PassStyle, string> = {
 ///  device, so it is refused here instead, like a duplicate key.
 const POSTER_MAX_HEADER = 1;
 const POSTER_MAX_PRIMARY = 4;
+// WWDC26 session 209 ("What's new in Wallet") shows the poster face with a
+// single footer field and says further footer fields are not displayed; the
+// poster generic design guide lists two. One is what the device shows, so
+// one is the cap here.
 const POSTER_MAX_FOOTER = 1;
+
+/// The legacy faces' limits, from Apple's pass design guide: up to three
+///  header fields on every style, and on `generic` and `storeCard` one
+///  primary field and at most four secondary and auxiliary fields combined
+///  (the device drops the overflow silently, so it is refused here instead,
+///  as the poster face's limits are). eventTicket and coupon lay their rows
+///  out differently, and a posterGeneric pass's legacy dictionary follows
+///  Apple's sample; neither is capped here.
+const MAX_HEADER_FIELDS = 3;
+const MAX_PRIMARY_FIELDS_GENERIC = 1;
+const MAX_SECONDARY_PLUS_AUXILIARY_GENERIC = 4;
 
 /// Map PassContent to pass.json. Apple caps field counts per style and
 ///  silently drops overflow (a storeCard shows at most four secondary plus
@@ -273,6 +288,24 @@ export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<
     auxiliaryFields: auxiliary,
     backFields: [...(content.links ?? []).map(linkField), ...back],
   };
+  if (fields.headerFields.length > MAX_HEADER_FIELDS) {
+    throw new Error(`Apple Wallet shows up to ${MAX_HEADER_FIELDS} header fields; ${fields.headerFields.length} given (the device would drop the rest)`);
+  }
+  // Plain generic and storeCard only. A posterGeneric pass ships the poster
+  // face's fields into its legacy dictionary as well, up to four primaries,
+  // exactly as Apple's own sample does; that dictionary keeps the poster
+  // face's limits and is not capped here.
+  if (style === "generic" || style === "storeCard") {
+    if (primary.length > MAX_PRIMARY_FIELDS_GENERIC) {
+      throw new Error(`the ${style} style shows ${MAX_PRIMARY_FIELDS_GENERIC} primary field; ${primary.length} given (the device would drop the rest)`);
+    }
+    const rows = secondary.length + auxiliary.length;
+    if (rows > MAX_SECONDARY_PLUS_AUXILIARY_GENERIC) {
+      throw new Error(
+        `the ${style} style shows at most ${MAX_SECONDARY_PLUS_AUXILIARY_GENERIC} secondary and auxiliary fields combined; ${secondary.length} secondary and ${auxiliary.length} auxiliary given (the device would drop the rest)`,
+      );
+    }
+  }
   // Keys are unique across the WHOLE pass, links included. A duplicate is
   // dropped silently at signing time and the field never reaches the device,
   // so it is refused here instead.

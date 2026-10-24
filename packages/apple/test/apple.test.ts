@@ -160,6 +160,34 @@ describe("pass.json mapping", () => {
   });
 });
 
+describe("legacy face field caps", () => {
+  const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+  const f = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => ({ key: `${prefix}${i}`, label: prefix.toUpperCase(), value: String(i) }));
+
+  it("refuses more than four secondary and auxiliary fields combined on generic and storeCard, and more than one primary", () => {
+    for (const style of ["generic", "storeCard"] as const) {
+      expect(() => toPassJson(content({ style, secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).toThrow(/at most 4 secondary and auxiliary fields combined; 3 secondary and 2 auxiliary/);
+      expect(() => toPassJson(content({ style, secondary: f(5, "s"), auxiliary: [] }), opts)).toThrow(/at most 4/);
+      expect(() => toPassJson(content({ style, secondary: f(2, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+      expect(() => toPassJson(content({ style, secondary: f(4, "s"), auxiliary: [] }), opts)).not.toThrow();
+      expect(() => toPassJson(content({ style, primary: f(2, "p") }), opts)).toThrow(/shows 1 primary field; 2 given/);
+    }
+    // A posterGeneric pass ships the poster's fields into its legacy dictionary as Apple's sample does; the poster face keeps its own limits.
+    expect(() => toPassJson(content({ style: "posterGeneric", secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+    // eventTicket and coupon are not capped by this rule.
+    for (const style of ["eventTicket", "coupon"] as const) {
+      expect(() => toPassJson(content({ style, secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+    }
+  });
+
+  it("refuses more than three header fields on every style", () => {
+    for (const style of ["generic", "storeCard", "eventTicket", "coupon"] as const) {
+      expect(() => toPassJson(content({ style, header: f(4, "h") }), opts)).toThrow(/up to 3 header fields; 4 given/);
+      expect(() => toPassJson(content({ style, header: f(3, "h") }), opts)).not.toThrow();
+    }
+  });
+});
+
 describe("featured actions (iOS 27)", () => {
   const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
   const json = (c: PassContent) => toPassJson(c, opts) as Record<string, any>;

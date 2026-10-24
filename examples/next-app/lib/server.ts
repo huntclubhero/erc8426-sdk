@@ -230,13 +230,12 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
             { key: "boredom", label: "BOREDOM", value: `${state.boredom}%` },
           ]
         : [],
-      auxiliary: state
-        ? [
-            { key: "cares", label: "CARES", value: state.cares },
-            { key: "lapses", label: state.alive ? "LAPSES" : "LAPSED", value: relativeTime(state.diesAt) },
-          ]
-        : [],
+      // generic shows at most four secondary and auxiliary fields combined:
+      // the three needs above and the lapse timer; the care count moves to
+      // the back of the pass.
+      auxiliary: state ? [{ key: "lapses", label: state.alive ? "LAPSES" : "LAPSED", value: relativeTime(state.diesAt) }] : [],
       back: [
+        ...(state ? [{ key: "cares", label: "Cares", value: String(state.cares) }] : []),
         { key: "contract", label: "Issuing contract", value: config.contract },
         { key: "chain", label: "Chain", value: String(config.chainId) },
         { key: "owner", label: "Issued to", value: shortHex(owner) },
