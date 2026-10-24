@@ -113,7 +113,7 @@ describe("broken implementations are caught", () => {
     ["401 instead of 403 for a non-owner", { notOwner401: true }, "gated.non-owner-403", true],
     ["a challenge for another token", { wrongTokenInChallenge: true }, "challenge.token-resource", true],
     ["an already expired challenge", { expiredChallenge: true }, "challenge.expiration", true],
-    ["the apple pass served with the wrong media type", { wrongPkpassType: true }, "gated.manifest.apple-media-type", true],
+    ["the apple pass served with the wrong media type", { wrongPkpassType: true }, "gated.manifest.apple-media-type", false],
     ["the manifest served as text", { manifestAsText: true }, "gated.manifest.media-type", true],
     ["a verifier domain unrelated to the serving host", { wrongDomain: "elsewhere.example" }, "challenge.domain-host", false],
   ])("%s", async (_name, faults, id, isMust) => {
@@ -125,7 +125,7 @@ describe("broken implementations are caught", () => {
   });
 
   it("an ungated manifest is detected as public, and a public mirror is validated", async () => {
-    const { run } = world({ mode: "public", mirror: { formats: { google: "https://not-google.example/x" } } });
+    const { run } = world({ mode: "public", mirror: { formats: { google: "http://not-https.example/x" } } });
     const r = await run();
     expect(byId(r, "mirror.valid").status).toBe("fail");
     expect(r.ok).toBe(false);
@@ -138,16 +138,27 @@ describe("broken implementations are caught", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("a public manifest with a wrong pkpass media type fails the MUST", async () => {
+  it("a public manifest with a wrong pkpass media type is an advisory warning", async () => {
     const { run } = world({ mode: "public", faults: { wrongPkpassType: true } });
     const r = await run();
-    expect(byId(r, "manifest.apple-media-type")).toMatchObject({ status: "fail", detail: "Content-Type: application/octet-stream" });
+    expect(byId(r, "manifest.apple-media-type")).toMatchObject({ level: "SHOULD", status: "fail", detail: "Content-Type: application/octet-stream" });
+    expect(r.ok).toBe(true);
   });
 
   it("an invalid public manifest fails", async () => {
-    const { run } = world({ mode: "public", faults: { badGoogleLink: true } });
+    const { run } = world({ mode: "public", faults: { insecureGoogleLink: true } });
     const r = await run();
     expect(byId(r, "manifest.valid").status).toBe("fail");
+    expect(r.ok).toBe(false);
+  });
+
+  it("a google URL that is not a Save link is valid, with a warning", async () => {
+    const { run } = world({ mode: "public", faults: { badGoogleLink: true } });
+    const r = await run();
+    expect(byId(r, "manifest.valid").status).toBe("pass");
+    expect(byId(r, "manifest.lint")).toMatchObject({ level: "SHOULD", status: "fail" });
+    expect(byId(r, "manifest.lint").detail).toMatch(/formats\.google/);
+    expect(r.ok).toBe(true);
   });
 
   it("contract faults: no interface, passURI that never reverts", async () => {

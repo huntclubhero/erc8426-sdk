@@ -25,6 +25,8 @@ import { checkChallengeScope, decodeDataUri, domainsForUrl, resolveUri, type Gat
 
 import type { CheckLevel, CheckResult, CheckStatus, ConformanceOptions, ConformanceReport } from "./types.js";
 
+const APPLE_MEDIA_TYPE_TITLE = `The apple URL is served as ${PKPASS_MEDIA_TYPE} (what Apple devices expect; advisory)`;
+
 const S = {
   contract: "Contract interface",
   manifest: "Pass manifest",
@@ -196,13 +198,13 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     const parsed = parseManifest(body);
     if (!parsed.ok) {
       const detail = parsed.issues.filter((i) => i.level === "error").map((i) => `${i.path || "(root)"}: ${i.message}`).join("; ");
-      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, google Save link, updatedAt in seconds)", S.manifest, "MUST", "fail", detail);
+      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)", S.manifest, "MUST", "fail", detail);
       return null;
     }
     const platforms = Object.keys(parsed.manifest.formats).join(", ");
     record(
       `${idPrefix}.valid`,
-      "The manifest has the required shape (formats, google Save link, updatedAt in seconds)",
+      "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)",
       S.manifest,
       "MUST",
       "pass",
@@ -211,15 +213,17 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     const warnings = parsed.issues.filter((i) => i.level === "warning");
     record(
       `${idPrefix}.lint`,
-      "Acquisition URLs are https and updatedAt looks like seconds",
+      "No likely mistakes (updatedAt in seconds, google URL shape, manifest version)",
       S.manifest,
       "SHOULD",
       warnings.length === 0 ? "pass" : "fail",
       warnings.length === 0 ? undefined : warnings.map((w) => `${w.path}: ${w.message}`).join("; "),
     );
+    // Advisory: the standard defines `apple` by function and leaves the media
+    // type to the platform. Apple devices expect it, so a mismatch is a warning.
     const apple = parsed.manifest.formats.apple;
     if (!apple) {
-      record(`${idPrefix}.apple-media-type`, `The apple URL is served as ${PKPASS_MEDIA_TYPE}`, S.manifest, "MUST", "skip", "no apple format");
+      record(`${idPrefix}.apple-media-type`, APPLE_MEDIA_TYPE_TITLE, S.manifest, "SHOULD", "skip", "no apple format");
     } else {
       let res: HttpResult | null = null;
       let error = "";
@@ -231,10 +235,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       }
       if (!res || res.status < 200 || res.status >= 300) {
         record(`${idPrefix}.apple-reachable`, "The apple URL can be fetched", S.manifest, "SHOULD", "fail", res ? `HTTP ${res.status}` : error);
-        record(`${idPrefix}.apple-media-type`, `The apple URL is served as ${PKPASS_MEDIA_TYPE}`, S.manifest, "MUST", "skip", "the apple URL could not be fetched");
+        record(`${idPrefix}.apple-media-type`, APPLE_MEDIA_TYPE_TITLE, S.manifest, "SHOULD", "skip", "the apple URL could not be fetched");
       } else {
         const type = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-        record(`${idPrefix}.apple-media-type`, `The apple URL is served as ${PKPASS_MEDIA_TYPE}`, S.manifest, "MUST", type === PKPASS_MEDIA_TYPE ? "pass" : "fail", `Content-Type: ${type || "(none)"}`);
+        record(`${idPrefix}.apple-media-type`, APPLE_MEDIA_TYPE_TITLE, S.manifest, "SHOULD", type === PKPASS_MEDIA_TYPE ? "pass" : "fail", `Content-Type: ${type || "(none)"}`);
       }
     }
     return parsed.manifest;
