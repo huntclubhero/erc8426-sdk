@@ -12,7 +12,9 @@ import {
 } from "@erc8426/core";
 
 import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
+import type { AuthorizeInput } from "./authorize.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
+import type { EntitlementResult } from "./entitlement.js";
 import type { RateLimitRule } from "./rateLimit.js";
 import { RepeatCoalescer, memoryRepeatStore, sha256Hex } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
@@ -308,14 +310,29 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
     if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
-    // Keyed by the nonce and every byte of the presentation: an identical
-    // repeat (the phone resending an aborted POST) gets the first outcome
-    // instead of nonce_invalid; a different request carrying the same nonce
-    // keys differently and is refused by the floor as the replay it is.
-    const nonce = parseChallenge(proof.proof.message)?.nonce ?? "-";
-    const key = `nonce:${tokenId}:${action}:${nonce}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
+    // Keyed by the nonce, every byte of the presentation, and the fresh
+    // entitlement read for the claimed account: an identical repeat (the
+    // phone resending an aborted POST) gets the first outcome instead of
+    // nonce_invalid, but once ownership has changed the read differs, so
+    // the repeat is a new request and is judged afresh. A different request
+    // carrying the same nonce keys differently and is refused by the floor
+    // as the replay it is. The read is taken once: authorize reuses it.
+    const parsed = parseChallenge(proof.proof.message);
+    const nonce = parsed?.nonce ?? "-";
+    let freshRead: AuthorizeInput["freshRead"];
+    let readKey = "unread";
+    if (parsed) {
+      try {
+        const result = await x.entitled(tokenId, parsed.address, action);
+        freshRead = { account: parsed.address, result };
+        readKey = result.entitled ? `${result.via}:${parsed.address.toLowerCase()}` : "none";
+      } catch {
+        // Left to authorize, which spends the nonce and answers read_failed.
+      }
+    }
+    const key = `nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
     return coalesce(key, async () => {
-      const result = await x.authorize({ ...proof.proof, tokenId, action });
+      const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
       if (!result.ok) return refuse(result.error, challengeUri);
       return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
     });
@@ -400,33 +417,40 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function followLink(request: Request, linkToken: string): Promise<Response> {
     const text = await readText(request);
     if (text === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
-    // Rotation wins: the link is resolved first (side-effect free), and one
-    // that no longer resolves is refused before the repeat store is
-    // consulted. The key carries the link, its binding and the holder it is
-    // issued to, plus a hash of the body, so a recorded answer is never
-    // served once the binding changed, and the phone resending an aborted
-    // POST runs the action once and gets one answer twice. A body that
-    // differs is a new request.
+    // The fresh read wins: the link is resolved and check (2), the fresh
+    // entitlement read of the holder it was issued to, is taken BEFORE the
+    // repeat store is consulted. A link that no longer resolves is refused
+    // here; a read that cannot be taken is 503 here, untouched by the store.
+    // The key carries the link, its binding, the holder and the read's
+    // result, plus a hash of the body, so a recorded answer is never served
+    // once the binding changed or ownership moved: a repeat after a transfer
+    // is a new request and meets the fresh read (403 not_owner), while the
+    // phone resending an aborted POST, same body and same world, runs the
+    // action once and gets one answer twice. A body that differs in any
+    // byte (the confirm page's per-tap `attempt` field) is a new request.
     const resolved = await resolveActionLink(linkToken);
     if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
-    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${record.lastIssuedTo ?? "-"}:${await sha256Hex(text)}`;
+    const holder = record.lastIssuedTo;
+    let entitled: EntitlementResult | null = null;
+    if (holder) {
+      try {
+        entitled = await x.entitled(binding.tokenId, holder, binding.name);
+      } catch {
+        return error("read_failed");
+      }
+    }
+    const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
+    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await sha256Hex(text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
       // The link decides the action. A request naming another is refused, as
       // a proof for action A is refused for action B.
       if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
-      const holder = record.lastIssuedTo;
       // A link minted since a transfer and not yet issued to anyone authorizes
       // no one. It is not a verified non-entitled account, so not a 403.
-      if (!holder) return error("unknown_capability");
-      let entitled;
-      try {
-        entitled = await x.entitled(binding.tokenId, holder, binding.name);
-      } catch {
-        return error("read_failed");
-      }
+      if (!holder || !entitled) return error("unknown_capability");
       // A sold token behind a still-live link stops acting here, before any
       // rotation catches up. What this does NOT close is forwarding under an
       // unchanged owner: the residual the capability configuration discloses.

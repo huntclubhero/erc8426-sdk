@@ -160,13 +160,17 @@ describe("signed action (the two-check floor)", () => {
     const { message, signature } = await primed(h);
     h.chain.failing = true;
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(503);
-    h.chain.failing = false;
-    // A byte-identical repeat inside the repeat window gets that request's
-    // outcome again (repeat.test.ts); any other presentation, and the
-    // identical one once the window has passed, finds the nonce spent.
+    // While the chain still cannot be read, a byte-identical repeat gets
+    // that request's 503 again (repeat.test.ts).
     const identical = await h.post(ACTION_PATH("feed"), { message, signature });
     expect(identical.status).toBe(503);
     expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    h.chain.failing = false;
+    // Once the chain answers, the fresh read is part of the key, so the same
+    // presentation is judged afresh and finds its nonce spent: a retry needs
+    // a fresh challenge, as it did before repeats were coalesced.
+    const recovered = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(((await recovered.json()) as { error: string }).error).toBe("nonce_invalid");
     const retry = await h.post(ACTION_PATH("feed"), { message, signature, params: { retry: true } });
     expect(((await retry.json()) as { error: string }).error).toBe("nonce_invalid");
     h.clock.advance(31_000);

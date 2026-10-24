@@ -154,12 +154,22 @@ const afterBody = (await getJson(afterPass.manifest.formats.preview)).body;
 step(afterBody.serial && afterBody.serial !== bobPreview.body.serial, "after rotation the owner re-acquires and gets a new serial");
 
 // 12. The documented bound holds on the capability path: 4 plays a day,
-// enforced on chain by BoundedAction, then 429 bound_reached.
+// enforced on chain by BoundedAction, then 429 bound_reached. Each deliberate
+// tap carries its own `attempt`, as the confirm page's form does; a
+// byte-identical re-POST is the same request by design (one execution, the
+// same answer, marked X-Wallet-Pass-Repeat).
 const fresh = await passes.getManifest(token, { signer: bob });
 const freshPreview = await getJson(fresh.manifest.formats.preview);
 const playLink = freshPreview.body.links.find((l) => l.key === "play").url;
-const statuses = [];
-for (let i = 0; i < 5; i++) statuses.push((await post(playLink)).res.status);
+const firstPlay = await post(playLink, { attempt: "play-1" });
+const samePlay = await post(playLink, { attempt: "play-1" });
+step(
+  firstPlay.res.status === 200 && samePlay.res.status === 200 && samePlay.res.headers.get("x-wallet-pass-repeat") === "true" && JSON.stringify(samePlay.body) === JSON.stringify(firstPlay.body),
+  "an identical immediate re-POST returns the same outcome without a second execution",
+  `HTTP ${firstPlay.res.status}/${samePlay.res.status} repeat=${samePlay.res.headers.get("x-wallet-pass-repeat")}`,
+);
+const statuses = [firstPlay.res.status];
+for (let i = 2; i <= 5; i++) statuses.push((await post(playLink, { attempt: `play-${i}` })).res.status);
 step(statuses.slice(0, 4).every((s) => s === 200) && statuses[4] === 429, "capability bound: 4 plays pass, the 5th is 429", statuses.join(","));
 
 // 13. The browser RPC proxy refuses anything outside its allowlist.

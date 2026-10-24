@@ -110,6 +110,7 @@ export {
   defaultConfirmPage,
   ephemeralLinkSecret,
   linkDigest,
+  newAttempt,
   newLinkSeed,
   newLinkToken,
   newSerial,

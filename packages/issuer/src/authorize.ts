@@ -3,7 +3,7 @@ import { parseChallenge, sameToken, tokenRef, type AuthError, type ParsedChallen
 
 import type { ResolvedIssuerConfig } from "./config.js";
 import type { ChainReader } from "./chain.js";
-import { checkEntitlement, type EntitlementPolicy } from "./entitlement.js";
+import { checkEntitlement, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
 import type { SignatureVerifier } from "./signature.js";
 import type { NonceStore } from "./stores.js";
 
@@ -25,6 +25,11 @@ export interface AuthorizeInput {
   signature: Hex;
   tokenId: string;
   action: string;
+  /// A fresh entitlement read the caller already took for this request, for
+  ///  `account`, moments ago. Used in place of check (2) only when `account`
+  ///  is the challenge's claimed account, so the read is taken once per
+  ///  request and never for the wrong account.
+  freshRead?: { account: Address; result: EntitlementResult };
 }
 
 export type AuthorizeResult =
@@ -113,17 +118,21 @@ export async function authorize(input: AuthorizeInput, deps: AuthorizeDeps): Pro
   // Check (2): the fresh entitlement read, now. It closes the transfer
   // window. A read that could not be taken fails closed as retryable and is
   // never reported as a verdict on the account.
-  let entitled: Awaited<ReturnType<typeof checkEntitlement>>;
-  try {
-    entitled = await checkEntitlement(deps.entitlement, {
-      token: served,
-      account: parsed.address,
-      action: input.action,
-      reader: deps.chain,
-      now: nowMs,
-    });
-  } catch {
-    return { ok: false, error: "read_failed" };
+  let entitled: EntitlementResult;
+  if (input.freshRead && isAddressEqual(input.freshRead.account, parsed.address)) {
+    entitled = input.freshRead.result;
+  } else {
+    try {
+      entitled = await checkEntitlement(deps.entitlement, {
+        token: served,
+        account: parsed.address,
+        action: input.action,
+        reader: deps.chain,
+        now: nowMs,
+      });
+    } catch {
+      return { ok: false, error: "read_failed" };
+    }
   }
   if (!entitled.entitled) return { ok: false, error: "not_owner" };
 

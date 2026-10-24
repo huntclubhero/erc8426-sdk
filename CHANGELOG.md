@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.3.0 (unreleased; every package to 0.3.0, contracts to 0.2.0)
+## 0.3.1 (issuer only)
+
+Two fixes to the identical-repeat handling introduced in 0.3.0, found by the hosted demo's smoke run.
+
+- `@erc8426/issuer`: a repeat no longer masks a transfer. On `POST /links/:link` the link is resolved and the fresh entitlement read is taken BEFORE the repeat store is consulted, and the read's result is part of the repeat key, so an identical repeat after the token changed hands (before any rotation has been observed) is a new request and meets the fresh read: 403 `not_owner`, not the recorded 200. A read that cannot be taken answers 503 without touching the store. The read is taken once per request and reused by the handler. `POST /:tokenId/actions/:action` keys by the fresh read for the challenge's claimed account the same way (`AuthorizeInput.freshRead` lets `authorize` reuse it), so a repeat after a transfer is judged afresh; the nonce it spent makes that `nonce_invalid`.
+- `@erc8426/issuer`: deliberate taps stay distinct. The built-in confirm page (`defaultConfirmPage`) carries a fresh random hidden `attempt` field per render (`newAttempt`), so a page-driven POST is unique per tap and executes each time, while the browser's aborted-and-resent POST of the same page (same body) is still coalesced into one execution. Integrators that POST a link directly and want repeats to count send a per-tap `attempt` (or any distinguishing body member); an identical immediate re-POST is the same request by design. `repeat.windowSeconds` (default 30) bounds only byte-identical repeats in an unchanged world.
+- Example app: the smoke script sends a distinct `attempt` per deliberate play and asserts that an identical immediate re-POST returns the same outcome with no second execution (`X-Wallet-Pass-Repeat: true`).
+
+## 0.3.0 (every package to 0.3.0, contracts to 0.2.0)
 
 Mainnet hardening and alignment with the current ERC-8426 draft (ethereum/ERCs PR #2036).
 

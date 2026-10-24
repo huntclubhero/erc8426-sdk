@@ -129,13 +129,22 @@ function page(title: string, body: string): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${escapeHtml(title)}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1.25rem}button{font:inherit;padding:.75rem 1.5rem;border-radius:.5rem;border:0;background:#111;color:#fff}small{color:#666}</style></head><body>${body}</body></html>`;
 }
 
+/// A fresh value for the confirm page's hidden `attempt` field, so each
+///  rendered page posts a body of its own: a deliberate second tap (a new
+///  page, a new value) is a new request, while the browser resending the
+///  same page's aborted POST (same value) is coalesced into the first.
+export function newAttempt(): string {
+  return randomBase64Url(9);
+}
+
 /// The built-in confirm page for a link opened from a pass. It is inert: the
 ///  action runs only when the form is submitted, which keeps the GET free of
 ///  side effects for devices, previewers and crawlers that prefetch links.
+///  The form carries a per-render `attempt` field (see newAttempt).
 export function defaultConfirmPage(ctx: LinkPageContext): Response {
   const html = page(
     ctx.description,
-    `<h1>${escapeHtml(ctx.description)}</h1><p>Token ${escapeHtml(ctx.token.tokenId)}</p><form method="post" action="${escapeHtml(ctx.postUrl)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><button type="submit">Confirm</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,
+    `<h1>${escapeHtml(ctx.description)}</h1><p>Token ${escapeHtml(ctx.token.tokenId)}</p><form method="post" action="${escapeHtml(ctx.postUrl)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><input type="hidden" name="attempt" value="${escapeHtml(newAttempt())}"><button type="submit">Confirm</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,
   );
   return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
