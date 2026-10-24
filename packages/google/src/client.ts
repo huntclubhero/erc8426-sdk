@@ -59,7 +59,14 @@ export interface GoogleWalletClient {
   ///  another writer (409) falls back to patch, because the loser of the race
   ///  may carry the newer content.
   upsert<T = GoogleResource>(type: GoogleResourceType, resource: GoogleResource): Promise<{ created: boolean; resource: T }>;
+  /// APPEND a message (the `addMessage` method). Google keeps at most ten
+  ///  per object and shows them in no guaranteed order, so appending on
+  ///  every update fills the list with stale reminders; prefer
+  ///  `setMessages`, which replaces it.
   addMessage(type: GoogleResourceType, id: string, message: GoogleMessage): Promise<void>;
+  /// REPLACE the object's message list (PATCH `messages`), with an optional
+  ///  display end for every message in it. An empty list clears the card.
+  setMessages(type: GoogleResourceType, id: string, messages: GoogleMessage[], options?: { expiresAt?: Date }): Promise<void>;
   /// Sign a save link with this client's service account.
   saveUrl(opts: Omit<SaveUrlOptions, "serviceAccount">): Promise<string>;
 }
@@ -67,6 +74,17 @@ export interface GoogleWalletClient {
 /// Refresh a minute early, so a token never expires between the check and
 ///  the call.
 const REFRESH_EARLY_MS = 60_000;
+
+/// A `GoogleMessage` in the Wallet API's shape. Ids default to a time-based
+///  value (with the index, so two messages set at once never collide).
+function toWalletMessage(message: GoogleMessage, index = 0): Record<string, unknown> {
+  return {
+    id: message.id ?? `m-${Date.now().toString(36)}${index > 0 ? `-${index}` : ""}`,
+    header: message.header,
+    body: message.body,
+    messageType: message.notify ? "TEXT_AND_NOTIFY" : "TEXT",
+  };
+}
 
 export function googleWalletClient(opts: GoogleWalletClientOptions): GoogleWalletClient {
   assertIssuerId(opts.issuerId);
@@ -183,13 +201,15 @@ export function googleWalletClient(opts: GoogleWalletClientOptions): GoogleWalle
     },
 
     async addMessage(type: GoogleResourceType, id: string, message: GoogleMessage): Promise<void> {
-      await expectOk("POST", `${type}/${enc(id)}/addMessage`, {
-        message: {
-          id: message.id ?? `m-${Date.now().toString(36)}`,
-          header: message.header,
-          body: message.body,
-          messageType: message.notify ? "TEXT_AND_NOTIFY" : "TEXT",
-        },
+      await expectOk("POST", `${type}/${enc(id)}/addMessage`, { message: toWalletMessage(message) });
+    },
+
+    async setMessages(type: GoogleResourceType, id: string, messages: GoogleMessage[], options = {}) {
+      await client.patch(type, id, {
+        messages: messages.map((m, i) => ({
+          ...toWalletMessage(m, i),
+          ...(options.expiresAt ? { displayInterval: { end: { date: options.expiresAt.toISOString() } } } : {}),
+        })),
       });
     },
 

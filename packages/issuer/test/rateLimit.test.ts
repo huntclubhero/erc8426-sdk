@@ -3,21 +3,27 @@ import {
   DEFAULT_RATE_LIMITS,
   IssuerConfigError,
   REMOTE_ADDRESS_HEADER,
+  TRUSTED_PROXY_HEADERS,
   defaultClientKey,
+  forwardedClientKey,
   kvRateLimiter,
+  proxyClientKey,
   memoryKv,
   memoryRateLimiter,
   resolveConfig,
   toFetchRequest,
+  trustedHeaderClientKey,
   type KeyValueStore,
   type RateLimiter,
 } from "@erc8426/issuer";
 
 import { CONTRACT, TOKEN_ID, buildHarness, createClock, issuePassTo, linkTokenFor, newSigner, signChallenge, type Harness } from "./helpers.js";
+import { kvRepeatStore } from "@erc8426/issuer";
 
 const CHALLENGE = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}/challenge?address=${newSigner().address}`;
 const MANIFEST = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}`;
 const RULE = { limit: 3, windowSeconds: 60 };
+const baseConfig = { domain: "issuer.example", baseUrl: "https://issuer.example", chainId: 1, contract: CONTRACT, mode: "gated" as const };
 
 async function expectLimited(res: Response, family: string) {
   expect(res.status).toBe(429);
@@ -147,7 +153,7 @@ describe("kvRateLimiter", () => {
 
 describe("rate limiting on the HTTP surface", () => {
   function limited(overrides: Parameters<typeof buildHarness>[0] = {}): Harness {
-    return buildHarness({ rateLimit: { challenge: RULE, manifest: RULE, capability: RULE }, ...overrides });
+    return buildHarness({ rateLimit: { challenge: RULE, manifest: RULE, capability: RULE, perClient: false }, ...overrides });
   }
 
   it("is on by default with the documented limits", () => {
@@ -155,7 +161,15 @@ describe("rate limiting on the HTTP surface", () => {
     expect(c.rateLimit.challenge).toEqual(DEFAULT_RATE_LIMITS.challenge);
     expect(c.rateLimit.manifest).toEqual(DEFAULT_RATE_LIMITS.manifest);
     expect(c.rateLimit.capability).toEqual(DEFAULT_RATE_LIMITS.capability);
-    expect(DEFAULT_RATE_LIMITS).toEqual({ challenge: { limit: 30, windowSeconds: 60 }, manifest: { limit: 60, windowSeconds: 60 }, capability: { limit: 60, windowSeconds: 60 } });
+    expect(c.rateLimit.perClient).toEqual(DEFAULT_RATE_LIMITS.perClient);
+    expect(DEFAULT_RATE_LIMITS).toEqual({
+      challenge: { limit: 30, windowSeconds: 60 },
+      manifest: { limit: 60, windowSeconds: 60 },
+      capability: { limit: 60, windowSeconds: 60 },
+      action: { limit: 30, windowSeconds: 60 },
+      rotate: { limit: 10, windowSeconds: 60 },
+      perClient: { limit: 120, windowSeconds: 60 },
+    });
     expect(c.rateLimit.clientKey).toBe(defaultClientKey);
     expect(() => resolveConfig({ domain: "issuer.example", baseUrl: "https://issuer.example", chainId: 1, contract: CONTRACT, mode: "gated", rateLimit: { challenge: { limit: 0, windowSeconds: 60 } } })).toThrowError(IssuerConfigError);
   });
@@ -173,7 +187,7 @@ describe("rate limiting on the HTTP surface", () => {
 
   it("keys by client address and token, so one client or one token cannot exhaust the endpoint for others", async () => {
     const h = limited();
-    const ip = (a: string) => ({ "X-Forwarded-For": `${a}, 10.0.0.1` });
+    const ip = (a: string) => ({ [REMOTE_ADDRESS_HEADER]: a });
     for (let i = 0; i < RULE.limit; i++) expect((await h.get(CHALLENGE(), ip("203.0.113.5"))).status).toBe(200);
     expect((await h.get(CHALLENGE(), ip("203.0.113.5"))).status).toBe(429);
     // Another client, same token.
@@ -183,6 +197,30 @@ describe("rate limiting on the HTTP surface", () => {
     // A client naming no address at all is counted as one unknown client.
     for (let i = 0; i < RULE.limit; i++) expect((await h.get(CHALLENGE())).status).toBe(200);
     expect((await h.get(CHALLENGE())).status).toBe(429);
+  });
+
+  it("a client cannot start a fresh bucket by naming another token id or link: the per-client bucket bounds it", async () => {
+    // Per-token limits generous, per-client bucket small: distinct ids are
+    // what the attacker varies (one client minting nonces for 200 ids).
+    const h = buildHarness({ rateLimit: { challenge: { limit: 1000, windowSeconds: 60 }, perClient: { limit: 5, windowSeconds: 60 } } });
+    const addr = newSigner().address;
+    const ip = { [REMOTE_ADDRESS_HEADER]: "203.0.113.9" };
+    let ok = 0;
+    for (let i = 0; i < 20; i++) if ((await h.get(`/wallet-pass/${1000 + i}/challenge?address=${addr}`, ip)).status === 200) ok++;
+    expect(ok).toBe(5);
+    const refused = await h.get(`/wallet-pass/5000/challenge?address=${addr}`, ip);
+    await expectLimited(refused, "challenge");
+    // Another client is unaffected, and each family has its own client bucket.
+    expect((await h.get(`/wallet-pass/1/challenge?address=${addr}`, { [REMOTE_ADDRESS_HEADER]: "203.0.113.10" })).status).toBe(200);
+    expect((await h.get(`/wallet-pass/1`, ip)).status).toBe(401);
+    // The window resets.
+    h.clock.advance(60_000);
+    expect((await h.get(`/wallet-pass/6000/challenge?address=${addr}`, ip)).status).toBe(200);
+    // perClient: false leaves only the per-token buckets.
+    const noClientBucket = buildHarness({ rateLimit: { challenge: { limit: 2, windowSeconds: 60 }, perClient: false } });
+    for (let i = 0; i < 10; i++) expect((await noClientBucket.get(`/wallet-pass/${100 + i}/challenge?address=${addr}`, ip)).status).toBe(200);
+    expect((await noClientBucket.get(`/wallet-pass/100/challenge?address=${addr}`, ip)).status).toBe(200);
+    expect((await noClientBucket.get(`/wallet-pass/100/challenge?address=${addr}`, ip)).status).toBe(429);
   });
 
   it("manifest: the gated manifest is limited before any proof is checked", async () => {
@@ -231,6 +269,50 @@ describe("rate limiting on the HTTP surface", () => {
     expect(head.headers.get("retry-after")).toMatch(/^[0-9]+$/);
   });
 
+  it("signed action and rotate routes are limited too, and garbage presentations never fill the repeat store", async () => {
+    const repeatKv = memoryKv();
+    const h = buildHarness({ rateLimit: { action: RULE, rotate: RULE, perClient: false }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const s = newSigner();
+    const p = await signChallenge(h, s, TOKEN_ID, "levelUp");
+    const statuses: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      // A proof rewritten around a nonce the issuer never issued: refused as nonce_invalid, nothing to record.
+      const forged = { message: p.message.replace(/Nonce: \w+/, `Nonce: x${i}abcdefgh`), signature: p.signature };
+      statuses.push((await h.post(`/wallet-pass/${TOKEN_ID}/actions/levelUp`, { ...forged, junk: i })).status);
+    }
+    expect(statuses.slice(0, RULE.limit)).toEqual([401, 401, 401]);
+    expect(statuses.slice(RULE.limit).every((st) => st === 429)).toBe(true);
+    expect(repeatKv.size()).toBe(0);
+    const rotates: number[] = [];
+    for (let i = 0; i < 6; i++) rotates.push((await h.post(`/wallet-pass/${TOKEN_ID}/rotate`, { message: "m", signature: "0x00", i })).status);
+    expect(rotates.filter((st) => st === 429)).toHaveLength(3);
+    expect(repeatKv.size()).toBe(0);
+    // Another token id is its own bucket for these families too.
+    expect((await h.post(`/wallet-pass/413/actions/levelUp`, { message: "m", signature: "0x00" })).status).not.toBe(429);
+  });
+
+  it("two collections sharing one kvRateLimiter and one kvRepeatStore with default prefixes never share a bucket or a row", async () => {
+    const clock = createClock();
+    const kv = memoryKv({ now: clock.now });
+    const limiter = kvRateLimiter(kv);
+    const repeatKv = memoryKv({ now: clock.now });
+    const other = newSigner().address;
+    const a = buildHarness({ now: clock.now, rateLimit: { challenge: RULE, perClient: false, limiter }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const b = buildHarness({ now: clock.now, contract: other, rateLimit: { challenge: RULE, perClient: false, limiter }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const addr = newSigner().address;
+    for (let i = 0; i < RULE.limit; i++) expect((await a.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(200);
+    expect((await a.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(429);
+    // Same client, same token id, another collection: its own bucket.
+    expect((await b.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(200);
+    // Repeat rows carry the collection too.
+    const ownerA = newSigner();
+    const linksA = await issuePassTo(a, ownerA);
+    expect((await a.post(linksA.feed!, {})).status).toBe(200);
+    expect(repeatKv.size()).toBe(1);
+    expect(a.executed).toHaveLength(1);
+    expect(b.executed).toHaveLength(0);
+  });
+
   it("a store-backed limiter enforces one limit across two issuers sharing the store", async () => {
     const clock = createClock();
     const kv = memoryKv({ now: clock.now });
@@ -269,15 +351,87 @@ describe("rate limiting on the HTTP surface", () => {
     const res = await h.get(CHALLENGE(), { "x-api-key": "abc" });
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("42");
-    expect(seen).toEqual([`challenge:abc:${TOKEN_ID}`]);
+    // The per-client bucket is consulted first; a refusal there costs one hit.
+    // Every key starts with the collection the issuer serves.
+    const scope = `1:${CONTRACT.toLowerCase()}`;
+    expect(seen).toEqual([`${scope}:challenge:client:abc`]);
+    seen.length = 0;
+    const tokenOnly = buildHarness({ rateLimit: { limiter, perClient: false, clientKey: (r) => r.headers.get("x-api-key") } });
+    expect((await tokenOnly.get(CHALLENGE(), { "x-api-key": "abc" })).status).toBe(429);
+    expect(seen).toEqual([`${scope}:challenge:abc:${TOKEN_ID}`]);
   });
 
-  it("defaultClientKey prefers proxy headers, then the socket address the Node adapter records, and drops a forged one", async () => {
+  it("a client cannot spread its attempts across made-up addresses: the default key is the socket address alone", async () => {
+    const h = buildHarness({ rateLimit: { challenge: RULE, perClient: false } });
+    const addr = newSigner().address;
+    let ok = 0;
+    for (let i = 0; i < 20; i++) {
+      const r = await h.get(`/wallet-pass/1/challenge?address=${addr}`, {
+        "x-forwarded-for": `10.0.${i}.1, 203.0.113.7`,
+        "x-real-ip": `10.1.${i}.1`,
+        "cf-connecting-ip": `10.2.${i}.1`,
+        [REMOTE_ADDRESS_HEADER]: "203.0.113.7",
+      });
+      if (r.status === 200) ok++;
+    }
+    expect(ok).toBe(RULE.limit);
+  });
+
+  it("forwardedClientKey takes the hop the trusted proxy appended, never one the client sent", async () => {
+    const req = (xff: string, socket = "10.0.0.2") => new Request("https://issuer.example/", { headers: { "x-forwarded-for": xff, [REMOTE_ADDRESS_HEADER]: socket } });
+    expect(forwardedClientKey(1)(req("1.1.1.1, 2.2.2.2, 203.0.113.9"))).toBe("203.0.113.9");
+    expect(forwardedClientKey(2)(req("1.1.1.1, 2.2.2.2, 203.0.113.9"))).toBe("2.2.2.2");
+    // Fewer hops than trusted proxies: the client sent nothing usable, fall back to the socket.
+    expect(forwardedClientKey(3)(req("2.2.2.2, 203.0.113.9"))).toBe("10.0.0.2");
+    expect(forwardedClientKey(1)(new Request("https://issuer.example/"))).toBeNull();
+    expect(() => forwardedClientKey(0)).toThrow(/positive integer/);
+    // Behind one proxy, the attacker's rotating first hop changes nothing.
+    const h = buildHarness({ rateLimit: { challenge: RULE, perClient: false, clientKey: forwardedClientKey(1) } });
+    const addr = newSigner().address;
+    let ok = 0;
+    for (let i = 0; i < 20; i++) {
+      const r = await h.get(`/wallet-pass/1/challenge?address=${addr}`, { "x-forwarded-for": `10.0.${i}.1, 203.0.113.7` });
+      if (r.status === 200) ok++;
+    }
+    expect(ok).toBe(RULE.limit);
+  });
+
+  it("trustProxy names the proxy that fronts the issuer: on Vercel that is x-real-ip, and CDN headers it passes through are ignored", async () => {
+    const h = buildHarness({ rateLimit: { challenge: RULE, perClient: false, trustProxy: "vercel" } });
+    const addr = newSigner().address;
+    let ok = 0;
+    // The attacker rotates cf-connecting-ip and true-client-ip (Vercel passes them through from the client) while Vercel's x-real-ip stays theirs.
+    for (let i = 0; i < 20; i++) {
+      const r = await h.get(`/wallet-pass/1/challenge?address=${addr}`, { "cf-connecting-ip": `10.0.${i}.1`, "true-client-ip": `10.1.${i}.1`, "x-real-ip": "203.0.113.7" });
+      if (r.status === 200) ok++;
+    }
+    expect(ok).toBe(RULE.limit);
+    // Another real client is its own bucket.
+    expect((await h.get(`/wallet-pass/1/challenge?address=${addr}`, { "x-real-ip": "203.0.113.8" })).status).toBe(200);
+    expect(TRUSTED_PROXY_HEADERS).toEqual({ vercel: "x-real-ip", cloudflare: "cf-connecting-ip", fly: "fly-client-ip", akamai: "true-client-ip" });
+    expect(proxyClientKey("cloudflare")(new Request("https://issuer.example/", { headers: { "cf-connecting-ip": "192.0.2.1" } }))).toBe("192.0.2.1");
+    expect(resolveConfig({ ...baseConfig, rateLimit: { trustProxy: { header: "x-client" } } }).rateLimit.clientKey(new Request("https://x/", { headers: { "x-client": "a" } }))).toBe("a");
+    expect(resolveConfig({ ...baseConfig, rateLimit: { trustProxy: { forwardedHops: 1 } } }).rateLimit.clientKey(new Request("https://x/", { headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" } }))).toBe("2.2.2.2");
+    expect(() => resolveConfig({ ...baseConfig, rateLimit: { trustProxy: "nope" as unknown as "vercel" } })).toThrowError(IssuerConfigError);
+    // An explicit clientKey wins over trustProxy.
+    const custom = resolveConfig({ ...baseConfig, rateLimit: { trustProxy: "vercel", clientKey: () => "fixed" } });
+    expect(custom.rateLimit.clientKey(new Request("https://x/", { headers: { "x-real-ip": "203.0.113.7" } }))).toBe("fixed");
+  });
+
+  it("trustedHeaderClientKey reads only the named header, then the socket", () => {
+    const key = trustedHeaderClientKey("cf-connecting-ip");
+    const req = (headers: Record<string, string>) => new Request("https://issuer.example/", { headers });
+    expect(key(req({ "cf-connecting-ip": "192.0.2.1", "x-real-ip": "198.51.100.1" }))).toBe("192.0.2.1");
+    expect(key(req({ "x-real-ip": "198.51.100.1", [REMOTE_ADDRESS_HEADER]: "10.0.0.2" }))).toBe("10.0.0.2");
+    expect(key(req({}))).toBeNull();
+    expect(() => trustedHeaderClientKey("")).toThrow(/required/);
+  });
+
+  it("defaultClientKey is the socket address the Node adapter records, dropping a forged one, and nothing else", async () => {
     const key = (headers: Record<string, string>) => defaultClientKey(new Request("https://issuer.example/", { headers }));
     expect(key({})).toBeNull();
-    expect(key({ "x-forwarded-for": " 203.0.113.9 , 10.0.0.1" })).toBe("203.0.113.9");
-    expect(key({ "x-forwarded-for": "203.0.113.9", "x-real-ip": "198.51.100.1" })).toBe("198.51.100.1");
-    expect(key({ "x-real-ip": "198.51.100.1", "cf-connecting-ip": "192.0.2.1" })).toBe("192.0.2.1");
+    expect(key({ "x-forwarded-for": " 203.0.113.9 , 10.0.0.1" })).toBeNull();
+    expect(key({ "x-real-ip": "198.51.100.1", "cf-connecting-ip": "192.0.2.1", "true-client-ip": "192.0.2.2", "fly-client-ip": "192.0.2.3" })).toBeNull();
     expect(key({ [REMOTE_ADDRESS_HEADER]: "::1" })).toBe("::1");
     const fromSocket = await toFetchRequest({ method: "GET", url: "/wallet-pass/1", headers: { [REMOTE_ADDRESS_HEADER]: "1.2.3.4" }, socket: { remoteAddress: "127.0.0.1" }, async *[Symbol.asyncIterator]() {} });
     expect(defaultClientKey(fromSocket)).toBe("127.0.0.1");

@@ -12,9 +12,11 @@ import {
 } from "@erc8426/core";
 
 import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
-import type { ActionDefinition, LinkPageContext } from "./config.js";
+import type { AuthorizeInput } from "./authorize.js";
+import { normalizeOrigin, type ActionDefinition, type LinkPageContext } from "./config.js";
+import type { EntitlementResult } from "./entitlement.js";
 import type { RateLimitRule } from "./rateLimit.js";
-import { RepeatCoalescer, memoryRepeatStore, sha256Hex } from "./repeat.js";
+import { RepeatCoalescer, errorCodeOf, memoryRepeatStore, sha256Hex, type RecordedOutcome } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
 
@@ -143,13 +145,30 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // covers the link or nonce and a hash of every byte that matters, so only
   // a presentation that differs from the first is a new request (or, on the
   // nonce path, a replay).
+  // Every rate-limit and repeat key starts with the collection the issuer
+  // serves, so two issuers sharing one kvRateLimiter or kvRepeatStore (and
+  // their default prefixes) never read or count each other's rows.
+  const scope = `${config.chainId}:${config.contract.toLowerCase()}`;
   const repeats = config.repeat ? new RepeatCoalescer(config.repeat.store ?? memoryRepeatStore({ now: x.now }), config.repeat.windowSeconds) : null;
-  async function coalesce(key: string | null, run: () => Promise<Response>): Promise<Response> {
+  async function coalesce(key: string | null, run: () => Promise<Response>, recordIf?: (outcome: RecordedOutcome) => boolean): Promise<Response> {
     if (!repeats || key === null) return run();
-    const { response, repeated } = await repeats.run(key, run);
+    const { response, repeated } = await repeats.run(key, run, recordIf);
     if (repeated) response.headers.set("X-Wallet-Pass-Repeat", "true");
     return response;
   }
+  // The bytes that make two POSTs the same request: the body and the media
+  // type it was sent as (the same text parses differently as JSON, a form or
+  // plain text).
+  const bodyHash = (request: Request, text: string) => sha256Hex(`${(request.headers.get("content-type") ?? "").toLowerCase()}\n${text}`);
+  // On the signed route an outcome is recorded only once the nonce was
+  // spent: a refusal before that point (no challenge, wrong verifier, an
+  // unknown or spent nonce) costs the issuer nothing to re-judge and would
+  // otherwise let anonymous garbage fill the repeat store.
+  const NOT_SPENT = new Set(["invalid_message", "domain_mismatch", "nonce_invalid"]);
+  const recordIfNonceSpent = (outcome: RecordedOutcome) => {
+    const code = errorCodeOf(outcome);
+    return code === undefined || !NOT_SPENT.has(code);
+  };
 
   function error(code: IssuerErrorCode, extra: Json = {}): Response {
     const status = statusForIssuerError(code);
@@ -171,9 +190,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const origin = request.headers.get("Origin");
     let allow: string;
     if (cors.origins === "*") allow = "*";
-    else if (origin && cors.origins.includes(origin)) allow = origin;
-    else return {};
-    const h: Record<string, string> = { "Access-Control-Allow-Origin": allow, "Access-Control-Expose-Headers": "Retry-After" };
+    else {
+      const normalized = origin ? normalizeOrigin(origin) : null;
+      if (normalized !== null && cors.origins.includes(normalized)) allow = origin!;
+      else return {};
+    }
+    const h: Record<string, string> = { "Access-Control-Allow-Origin": allow, "Access-Control-Expose-Headers": "Retry-After, X-Wallet-Pass-Repeat" };
     if (allow !== "*") h["Vary"] = "Origin";
     return h;
   }
@@ -199,12 +221,20 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // answer 429 rate_limited with Retry-After when it is over the limit. The
   // attempt is counted before any work, so a refused request costs the
   // issuer nothing but the count. Null when the request may proceed.
-  async function throttle(request: Request, family: "challenge" | "manifest" | "capability", pathToken: string): Promise<Response | null> {
+  async function throttle(request: Request, family: "challenge" | "manifest" | "capability" | "action" | "rotate", pathToken: string): Promise<Response | null> {
     const rule: RateLimitRule | false = config.rateLimit[family];
-    if (rule === false) return null;
+    const perClient = config.rateLimit.perClient;
+    if (rule === false && perClient === false) return null;
     const client = config.rateLimit.clientKey(request) ?? "unknown";
-    const decision = await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, x.now());
-    if (decision.allowed) return null;
+    const now = x.now();
+    // Two buckets: the client alone (so naming a new token id or link does
+    // not start a fresh bucket) and the client with the path token (so one
+    // token hammered from one place is bounded tighter still). The client
+    // bucket is checked first, so a client past it costs one counter write.
+    const perClientDecision = perClient === false ? null : await config.rateLimit.limiter.hit(`${scope}:${family}:client:${client}`, perClient, now);
+    const decision =
+      perClientDecision && !perClientDecision.allowed ? perClientDecision : rule === false ? null : await config.rateLimit.limiter.hit(`${scope}:${family}:${client}:${pathToken}`, rule, now);
+    if (!decision || decision.allowed) return null;
     return json(429, { error: "rate_limited", message: `too many ${family} requests; retry after ${decision.retryAfterSeconds} s` }, { "Retry-After": String(decision.retryAfterSeconds) });
   }
 
@@ -308,17 +338,36 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
     if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
-    // Keyed by the nonce and every byte of the presentation: an identical
-    // repeat (the phone resending an aborted POST) gets the first outcome
-    // instead of nonce_invalid; a different request carrying the same nonce
-    // keys differently and is refused by the floor as the replay it is.
-    const nonce = parseChallenge(proof.proof.message)?.nonce ?? "-";
-    const key = `nonce:${tokenId}:${action}:${nonce}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
-    return coalesce(key, async () => {
-      const result = await x.authorize({ ...proof.proof, tokenId, action });
-      if (!result.ok) return refuse(result.error, challengeUri);
-      return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
-    });
+    // Keyed by the nonce, every byte of the presentation, and the fresh
+    // entitlement read for the claimed account: an identical repeat (the
+    // phone resending an aborted POST) gets the first outcome instead of
+    // nonce_invalid, but once ownership has changed the read differs, so
+    // the repeat is a new request and is judged afresh. A different request
+    // carrying the same nonce keys differently and is refused by the floor
+    // as the replay it is. The read is taken once: authorize reuses it.
+    const parsed = parseChallenge(proof.proof.message);
+    const nonce = parsed?.nonce ?? "-";
+    let freshRead: AuthorizeInput["freshRead"];
+    let readKey = "unread";
+    if (parsed) {
+      try {
+        const result = await x.entitled(tokenId, parsed.address, action);
+        freshRead = { account: parsed.address, result };
+        readKey = result.entitled ? `${result.via}:${parsed.address.toLowerCase()}` : "none";
+      } catch {
+        // Left to authorize, which spends the nonce and answers read_failed.
+      }
+    }
+    const key = `${scope}:nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n`)}:${await bodyHash(request, text)}`;
+    return coalesce(
+      key,
+      async () => {
+        const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
+        if (!result.ok) return refuse(result.error, challengeUri);
+        return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+      },
+      recordIfNonceSpent,
+    );
   }
 
   // POST {base}/:tokenId/rotate
@@ -400,33 +449,40 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function followLink(request: Request, linkToken: string): Promise<Response> {
     const text = await readText(request);
     if (text === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
-    // Rotation wins: the link is resolved first (side-effect free), and one
-    // that no longer resolves is refused before the repeat store is
-    // consulted. The key carries the link, its binding and the holder it is
-    // issued to, plus a hash of the body, so a recorded answer is never
-    // served once the binding changed, and the phone resending an aborted
-    // POST runs the action once and gets one answer twice. A body that
-    // differs is a new request.
+    // The fresh read wins: the link is resolved and check (2), the fresh
+    // entitlement read of the holder it was issued to, is taken BEFORE the
+    // repeat store is consulted. A link that no longer resolves is refused
+    // here; a read that cannot be taken is 503 here, untouched by the store.
+    // The key carries the link, its binding, the holder and the read's
+    // result, plus a hash of the body, so a recorded answer is never served
+    // once the binding changed or ownership moved: a repeat after a transfer
+    // is a new request and meets the fresh read (403 not_owner), while the
+    // phone resending an aborted POST, same body and same world, runs the
+    // action once and gets one answer twice. A body that differs in any
+    // byte (the confirm page's per-tap `attempt` field) is a new request.
     const resolved = await resolveActionLink(linkToken);
     if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
-    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${record.lastIssuedTo ?? "-"}:${await sha256Hex(text)}`;
+    const holder = record.lastIssuedTo;
+    let entitled: EntitlementResult | null = null;
+    if (holder) {
+      try {
+        entitled = await x.entitled(binding.tokenId, holder, binding.name);
+      } catch {
+        return error("read_failed");
+      }
+    }
+    const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
+    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
       // The link decides the action. A request naming another is refused, as
       // a proof for action A is refused for action B.
       if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
-      const holder = record.lastIssuedTo;
       // A link minted since a transfer and not yet issued to anyone authorizes
       // no one. It is not a verified non-entitled account, so not a 403.
-      if (!holder) return error("unknown_capability");
-      let entitled;
-      try {
-        entitled = await x.entitled(binding.tokenId, holder, binding.name);
-      } catch {
-        return error("read_failed");
-      }
+      if (!holder || !entitled) return error("unknown_capability");
       // A sold token behind a still-live link stops acting here, before any
       // rotation catches up. What this does NOT close is forwarding under an
       // unchanged owner: the residual the capability configuration discloses.
@@ -512,10 +568,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       return (await throttle(request, "challenge", tokenId)) ?? challenge(url, tokenId);
     }
     if (segments.length === 2 && second === "rotate") {
-      return method === "POST" ? rotate(request, tokenId) : methodNotAllowed("POST, OPTIONS");
+      if (method !== "POST") return methodNotAllowed("POST, OPTIONS");
+      return (await throttle(request, "rotate", tokenId)) ?? rotate(request, tokenId);
     }
     if (segments.length === 3 && second === "actions") {
-      return method === "POST" ? signedAction(request, tokenId, third!) : methodNotAllowed("POST, OPTIONS");
+      if (method !== "POST") return methodNotAllowed("POST, OPTIONS");
+      return (await throttle(request, "action", tokenId)) ?? signedAction(request, tokenId, third!);
     }
     return error("unknown_capability");
   }

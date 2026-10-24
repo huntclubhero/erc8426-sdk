@@ -160,13 +160,14 @@ describe("signed action (the two-check floor)", () => {
     const { message, signature } = await primed(h);
     h.chain.failing = true;
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(503);
-    h.chain.failing = false;
-    // A byte-identical repeat inside the repeat window gets that request's
-    // outcome again (repeat.test.ts); any other presentation, and the
-    // identical one once the window has passed, finds the nonce spent.
+    // A 503 is never recorded for a repeat (it says the request could not be
+    // judged), so even the byte-identical presentation is judged afresh and
+    // finds its nonce spent: a retry needs a fresh challenge, as it did
+    // before repeats were coalesced (repeat.test.ts).
     const identical = await h.post(ACTION_PATH("feed"), { message, signature });
-    expect(identical.status).toBe(503);
-    expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    expect(((await identical.json()) as { error: string }).error).toBe("nonce_invalid");
+    expect(identical.headers.get("x-wallet-pass-repeat")).toBeNull();
+    h.chain.failing = false;
     const retry = await h.post(ACTION_PATH("feed"), { message, signature, params: { retry: true } });
     expect(((await retry.json()) as { error: string }).error).toBe("nonce_invalid");
     h.clock.advance(31_000);

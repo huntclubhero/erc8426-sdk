@@ -70,9 +70,19 @@ export interface GoogleFormatProviderOptions {
   /// Extra class fields, merged over the generated class on first insert.
   classOverrides?: ClassOptions["overrides"];
   redemptionChannel?: ClassOptions["redemptionChannel"];
-  /// A message to attach on notifyUpdate, or null for a silent update. Card-only text unless the
-  /// message sets `notify: true`, which is what raises an Android notification.
+  /// The one message the card should carry after this update, or null for
+  ///  none. The provider REPLACES the object's message list with it (PATCH
+  ///  `messages`), so a reminder is cleared the moment the update that
+  ///  follows its action returns null: Google keeps at most ten messages
+  ///  per object in no guaranteed order, and appending one per update left
+  ///  the holder scrolling stale reminders. Card-only text unless the
+  ///  message sets `notify: true`, which is what raises an Android
+  ///  notification. Each message is given a display end of
+  ///  `messageTtlSeconds` from now.
   messageFor?(ctx: PassContext): GoogleMessage | null;
+  /// How long a message set by `messageFor` stays on the card when nothing
+  ///  replaces it. Default 86400 (a day). A superseded message has no end.
+  messageTtlSeconds?: number;
   /// Shown on an object when it is superseded: a fixed message, null for
   ///  none, or a function of why ("transfer" or "reset", undefined when
   ///  unknown). Defaults to `defaultSupersededMessage`, which says why and
@@ -184,6 +194,12 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     if (m === undefined) return defaultSupersededMessage(reason);
     return typeof m === "function" ? m(reason) : m;
   }
+  /// The message list of a superseded object: the notice, or nothing.
+  const supersededMessages = (reason: SupersededReason | undefined): GoogleMessage[] => {
+    const m = supersededMessageFor(reason);
+    return m ? [m] : [];
+  };
+  const messageTtlMs = (opts.messageTtlSeconds ?? 86_400) * 1000;
 
   async function expire(serial: string, record: GoogleObjectRecord, reason: SupersededReason): Promise<void> {
     const id = `${client.issuerId}.${record.objectSuffix}`;
@@ -203,8 +219,9 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
         await new Promise((r) => setTimeout(r, EXPIRE_RETRY_DELAY_MS));
         await client.patch(type, id, expired);
       }
-      const msg = supersededMessageFor(reason);
-      if (msg) await client.addMessage(type, id, msg);
+      // The superseded notice replaces whatever reminders the card carried;
+      // nothing on a replaced pass should still ask the holder to act.
+      await client.setMessages(type, id, supersededMessages(reason));
     } catch (err) {
       report(err, `expire superseded object ${id} for ${serial}`);
     }
@@ -253,13 +270,10 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       next.superseded = superseding;
       await store.put(serial, next);
       if (newlySuperseded) {
-        const msg = supersededMessageFor(ctx.content.supersededReason);
-        if (msg) {
-          try {
-            await client.addMessage(`${object.vertical}Object`, object.resource.id, msg);
-          } catch (err) {
-            report(err, `superseded message ${object.resource.id}`);
-          }
+        try {
+          await client.setMessages(`${object.vertical}Object`, object.resource.id, supersededMessages(ctx.content.supersededReason));
+        } catch (err) {
+          report(err, `superseded message ${object.resource.id}`);
         }
       }
       return { object, record: next, ok: true };
@@ -298,13 +312,16 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
     async notifyUpdate(ctx: PassContext): Promise<void> {
       const { object, ok } = await sync(ctx);
       if (!ok) throw new Error(`Google object ${object.resource.id} could not be updated`);
-      const msg = opts.messageFor?.(ctx);
-      if (msg) {
-        try {
-          await client.addMessage(`${object.vertical}Object`, object.resource.id, msg);
-        } catch (err) {
-          report(err, `addMessage ${object.resource.id}`);
-        }
+      // A superseded object already carries its notice (sync set it) and
+      // takes no reminders. Otherwise the list becomes exactly what
+      // messageFor says now: one message with a display end, or nothing,
+      // so a reminder disappears once the action it asked for has landed.
+      if (ctx.content.voided || !opts.messageFor) return;
+      const msg = opts.messageFor(ctx);
+      try {
+        await client.setMessages(`${object.vertical}Object`, object.resource.id, msg ? [msg] : [], { expiresAt: new Date(Date.now() + messageTtlMs) });
+      } catch (err) {
+        report(err, `setMessages ${object.resource.id}`);
       }
     },
 

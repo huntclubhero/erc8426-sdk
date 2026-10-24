@@ -44,4 +44,6 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 
 ## Notifications
 
+The provider keeps the card's message list to what matters now: `notifyUpdate` REPLACES the list (PATCH `messages`) with the one message `messageFor` returns, each given a display end of `messageTtlSeconds` (default a day), and clears it when `messageFor` returns null, so a reminder disappears the moment the action it asked for has landed. Appending (`addMessage`) is still on the client for integrators who want it, but Google keeps at most ten messages per object and shows them in no guaranteed order, so a reminder per update left holders scrolling stale ones. A superseded object carries only its notice.
+
 A Google Wallet message is card-only text by default (`messageType: TEXT`): the holder sees it inside the saved pass and nothing else happens on the phone. Set `notify: true` on the message returned by `messageFor` to send `TEXT_AND_NOTIFY`, which raises an Android notification. Use it for anything the holder must act on and keep the rest silent; Google caps notifying messages per object per day (three at the time of writing). Apple has no equivalent switch: an Apple banner comes from a field whose value changed while it carries `changeMessage`, see the Apple notes.

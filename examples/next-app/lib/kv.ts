@@ -36,6 +36,14 @@ export function upstashKv(redis: Redis): KeyValueStore {
     },
     getDel: (k) => redis.getdel<string>(k),
     del: async (k) => void (await redis.del(k)),
+    // INCR, with the expiry set when the counter is created, so the rate
+    // limiter's count is exact across instances (without incr the limiter
+    // reads and writes the counter back and racing requests undercount).
+    async incr(k, ttlSeconds) {
+      const n = await redis.incr(k);
+      if (n === 1) await redis.expire(k, ttlSeconds);
+      return n;
+    },
   };
 }
 

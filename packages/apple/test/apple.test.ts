@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
 
-import { PKPASS_MEDIA_TYPE, isPassFileProvider, type PassContent, type PassContext, tokenRef } from "@erc8426/core";
+import { FEATURED_ACTION_TYPES, PKPASS_MEDIA_TYPE, isPassFileProvider, type PassContent, type PassContext, tokenRef } from "@erc8426/core";
 import {
   MemoryApplePassStore,
   applePassKitWebService,
@@ -160,6 +160,34 @@ describe("pass.json mapping", () => {
   });
 });
 
+describe("legacy face field caps", () => {
+  const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+  const f = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => ({ key: `${prefix}${i}`, label: prefix.toUpperCase(), value: String(i) }));
+
+  it("refuses more than four secondary and auxiliary fields combined on generic and storeCard, and more than one primary", () => {
+    for (const style of ["generic", "storeCard"] as const) {
+      expect(() => toPassJson(content({ style, secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).toThrow(/at most 4 secondary and auxiliary fields combined; 3 secondary and 2 auxiliary/);
+      expect(() => toPassJson(content({ style, secondary: f(5, "s"), auxiliary: [] }), opts)).toThrow(/at most 4/);
+      expect(() => toPassJson(content({ style, secondary: f(2, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+      expect(() => toPassJson(content({ style, secondary: f(4, "s"), auxiliary: [] }), opts)).not.toThrow();
+      expect(() => toPassJson(content({ style, primary: f(2, "p") }), opts)).toThrow(/shows 1 primary field; 2 given/);
+    }
+    // A posterGeneric pass ships the poster's fields into its legacy dictionary as Apple's sample does; the poster face keeps its own limits.
+    expect(() => toPassJson(content({ style: "posterGeneric", secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+    // eventTicket and coupon are not capped by this rule.
+    for (const style of ["eventTicket", "coupon"] as const) {
+      expect(() => toPassJson(content({ style, secondary: f(3, "s"), auxiliary: f(2, "a") }), opts)).not.toThrow();
+    }
+  });
+
+  it("refuses more than three header fields on every style", () => {
+    for (const style of ["generic", "storeCard", "eventTicket", "coupon"] as const) {
+      expect(() => toPassJson(content({ style, header: f(4, "h") }), opts)).toThrow(/up to 3 header fields; 4 given/);
+      expect(() => toPassJson(content({ style, header: f(3, "h") }), opts)).not.toThrow();
+    }
+  });
+});
+
 describe("featured actions (iOS 27)", () => {
   const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
   const json = (c: PassContent) => toPassJson(c, opts) as Record<string, any>;
@@ -181,21 +209,44 @@ describe("featured actions (iOS 27)", () => {
       { identifier: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" },
       { identifier: "feed", type: "addToBalance", url: "https://issuer.example/a?x=1&y=2" },
     ]);
-    // Any string type passes through for types Apple adds later.
-    expect(json(content({ featuredActions: [{ id: "x", type: "somethingNew", url: "https://issuer.example/x" }] })).featuredActions[0].type).toBe("somethingNew");
+    // The type list is closed: an unknown type would fail at signing with an opaque "type is missing", so it is refused here by name.
+    expect(() => json(content({ featuredActions: [{ id: "x", type: "somethingNew" as "shop", url: "https://issuer.example/x" }] }))).toThrow(
+      /type "somethingNew", which Apple Wallet does not define/,
+    );
+    expect(() => json(content({ featuredActions: [{ id: "x", type: "website" as "shop", url: "https://issuer.example/x" }] }))).toThrow(/membershipBenefits, viewOffersRewards/);
+    for (const type of FEATURED_ACTION_TYPES.filter((t) => t !== "place")) {
+      expect(json(content({ featuredActions: [{ id: "t", type, url: "https://issuer.example/t" }] })).featuredActions[0].type).toBe(type);
+    }
     // Works on every style, poster included.
     for (const style of ["generic", "eventTicket", "coupon", "posterGeneric"] as const) {
       expect(json(content({ style, secondary: [], auxiliary: [], featuredActions: [{ id: "o", type: "shop", url: "https://issuer.example/shop" }] })).featuredActions).toHaveLength(1);
     }
   });
 
+  it("a place action carries a placeIdentifier and no URL, and signs", async () => {
+    const place = content({ featuredActions: [{ id: "venue", type: "place", placeIdentifier: "I63802885C8189B2B" }] });
+    expect(json(place).featuredActions).toEqual([{ identifier: "venue", type: "place", placeIdentifier: "I63802885C8189B2B" }]);
+    expect(() => json(content({ featuredActions: [{ id: "venue", type: "place", url: "https://maps.apple.com/?q=x" } as never] }))).toThrow(/takes a placeIdentifier, not a url or link/);
+    expect(() => json(content({ featuredActions: [{ id: "venue", type: "place", link: "act" } as never] }))).toThrow(/takes a placeIdentifier/);
+    expect(() => json(content({ featuredActions: [{ id: "venue", type: "place", placeIdentifier: "" } as never] }))).toThrow(/needs a placeIdentifier/);
+    expect(() => json(content({ featuredActions: [{ id: "s", type: "shop", url: "https://issuer.example/s", placeIdentifier: "I1" } as never] }))).toThrow(/not a placeIdentifier/);
+    // The signing library accepts both the place form and a URL form.
+    const certs = makeTestCerts();
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM, certificates: certs };
+    const signed = JSON.parse(unzip(await buildPkpass(place, base))["pass.json"]!.toString()) as Record<string, any>;
+    expect(signed.featuredActions).toEqual([{ identifier: "venue", type: "place", placeIdentifier: "I63802885C8189B2B" }]);
+    const shop = content({ featuredActions: [{ id: "s", type: "membershipBenefits", url: "https://issuer.example/offers" }] });
+    const signedShop = JSON.parse(unzip(await buildPkpass(shop, base))["pass.json"]!.toString()) as Record<string, any>;
+    expect(signedShop.featuredActions[0]).toEqual({ identifier: "s", type: "membershipBenefits", url: "https://issuer.example/offers" });
+  });
+
   it("refuses more than two, duplicate ids, missing types and unknown link references", () => {
-    const three = [1, 2, 3].map((n) => ({ id: `a${n}`, type: "shop", url: `https://issuer.example/${n}` }));
+    const three = [1, 2, 3].map((n) => ({ id: `a${n}`, type: "shop" as const, url: `https://issuer.example/${n}` }));
     expect(() => json(content({ featuredActions: three }))).toThrow(/at most 2 featured actions; 3 given/);
     expect(() =>
       json(content({ featuredActions: [{ id: "a", type: "shop", url: "https://issuer.example/1" }, { id: "a", type: "shop", url: "https://issuer.example/2" }] })),
     ).toThrow(/duplicate featured action id "a"/);
-    expect(() => json(content({ featuredActions: [{ id: "a", type: "", url: "https://issuer.example/1" }] }))).toThrow(/needs a type/);
+    expect(() => json(content({ featuredActions: [{ id: "a", type: "" as "shop", url: "https://issuer.example/1" }] }))).toThrow(/does not define/);
     expect(() => json(content({ featuredActions: [{ id: "a", type: "shop", link: "nope" }] }))).toThrow(/references link "nope"/);
   });
 

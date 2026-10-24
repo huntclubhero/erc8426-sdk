@@ -19,6 +19,7 @@ import { assetId, erc721Abi, walletPassAbi, type PassContent } from "@erc8426/co
 import {
   ActionError,
   createIssuer,
+  kvRateLimiter,
   kvStores,
   watchPassUpdates,
   watchTransfers,
@@ -229,13 +230,12 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
             { key: "boredom", label: "BOREDOM", value: `${state.boredom}%` },
           ]
         : [],
-      auxiliary: state
-        ? [
-            { key: "cares", label: "CARES", value: state.cares },
-            { key: "lapses", label: state.alive ? "LAPSES" : "LAPSED", value: relativeTime(state.diesAt) },
-          ]
-        : [],
+      // generic shows at most four secondary and auxiliary fields combined:
+      // the three needs above and the lapse timer; the care count moves to
+      // the back of the pass.
+      auxiliary: state ? [{ key: "lapses", label: state.alive ? "LAPSES" : "LAPSED", value: relativeTime(state.diesAt) }] : [],
       back: [
+        ...(state ? [{ key: "cares", label: "Cares", value: String(state.cares) }] : []),
         { key: "contract", label: "Issuing contract", value: config.contract },
         { key: "chain", label: "Chain", value: String(config.chainId) },
         { key: "owner", label: "Issued to", value: shortHex(owner) },
@@ -275,6 +275,14 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
     // (32+ bytes, the same on every instance) before deploying as production.
     ...(process.env.ISSUER_LINK_SECRET ? { linkSecret: process.env.ISSUER_LINK_SECRET } : {}),
     ...(redis ? { stores: kvStores(upstashKv(redis), { chainId: config.chainId, contract: config.contract, prefix: `${prefix}issuer:` }) } : {}),
+    // One rate limit across every instance (the in-memory limiter counts per
+    // lambda), keyed by the address Vercel puts in x-real-ip. The CDN
+    // headers Vercel passes through from the client (cf-connecting-ip,
+    // true-client-ip) are spoofable and are not consulted.
+    rateLimit: {
+      ...(redis ? { limiter: kvRateLimiter(upstashKv(redis), { prefix: `${prefix}rl:` }) } : {}),
+      ...(process.env.VERCEL ? { trustProxy: "vercel" as const } : {}),
+    },
     providers,
     render,
     capability: { enabled: true },

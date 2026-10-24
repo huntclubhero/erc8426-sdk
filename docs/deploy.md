@@ -36,7 +36,7 @@ export const DELETE = apple.webService;
 
 - **Stores:** Upstash Redis (or Vercel KV, which is Upstash) through `kvStores`; the issuer README has the ten-line adapter. Use Postgres or Redis for the Apple and Google stores.
 - **Events:** serverless functions cannot hold a `watchTransfers` subscription. Use an indexer webhook (below), or a Vercel Cron job that reads `Transfer`, `PassUpdate` and `BatchPassUpdate` logs since the last processed block and calls the same hooks.
-- **Secrets:** Vercel environment variables, marked sensitive. Base64 PEM files to keep their newlines intact.
+- **Secrets:** Vercel environment variables, marked sensitive. Base64 PEM files to keep their newlines intact. `linkSecret` (the example reads `ISSUER_LINK_SECRET`) is one of them: 32+ bytes, the same on every instance, required in production; the links are derived from it, so a store dump yields none.
 - **APNs:** the client reuses its HTTP/2 session within a warm instance; a cold start reconnects once. That is fine at pass-update volumes.
 - **Preview deployments:** Apple only calls `https` web services on public hosts, so test device updates on a deployed preview, not localhost.
 

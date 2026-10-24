@@ -40,32 +40,43 @@ export interface PassLink {
 ///  the Wallet Passes "Defining the metadata" article). Wallet draws each
 ///  action as a card beneath the pass face with an icon and its own
 ///  localized call to action for the type, so pick the type that names what
-///  the holder gets. Any other string is passed through.
-export type FeaturedActionType =
-  | "membershipBenefits"
-  | "viewOffersRewards"
-  | "place"
-  | "call"
-  | "order"
-  | "shop"
-  | "addToBalance"
-  | "bookAppointment"
-  | "bookCar"
-  | "bookFlight"
-  | "bookStay"
-  | "viewSchedule"
-  | "watchTrailer"
-  | "listenToMusic";
+///  the holder gets. The list is closed: the signing library validates
+///  against it and an unknown type fails at signing with an opaque error, so
+///  it is refused here by name instead.
+export const FEATURED_ACTION_TYPES = [
+  "membershipBenefits",
+  "viewOffersRewards",
+  "place",
+  "call",
+  "order",
+  "shop",
+  "addToBalance",
+  "bookAppointment",
+  "bookCar",
+  "bookFlight",
+  "bookStay",
+  "viewSchedule",
+  "watchTrailer",
+  "listenToMusic",
+] as const;
+export type FeaturedActionType = (typeof FEATURED_ACTION_TYPES)[number];
 
 /// One Featured Action (Apple Wallet, iOS 27; older iOS and Google ignore
-///  it). Either a fixed absolute https `url`, or `link`: the `key` of one of
-///  the content's `links`, whose URL is filled in at render time so a
-///  capability link rotates with the pass.
-export type FeaturedAction = {
-  /// Unique among the pass's featured actions (pass.json `identifier`).
-  id: string;
-  type: FeaturedActionType | (string & {});
-} & ({ url: string; link?: undefined } | { link: string; url?: undefined });
+///  it). Every type but `place` takes either a fixed absolute https `url`,
+///  or `link`: the `key` of one of the content's `links`, whose URL is
+///  filled in at render time so a capability link rotates with the pass.
+///  `place` takes a `placeIdentifier` (an Apple Maps place id) and no URL.
+export type FeaturedAction =
+  | {
+      /// Unique among the pass's featured actions (pass.json `identifier`).
+      id: string;
+      type: Exclude<FeaturedActionType, "place">;
+      url: string;
+      link?: undefined;
+      placeIdentifier?: undefined;
+    }
+  | { id: string; type: Exclude<FeaturedActionType, "place">; link: string; url?: undefined; placeIdentifier?: undefined }
+  | { id: string; type: "place"; placeIdentifier: string; url?: undefined; link?: undefined };
 
 /// Apple shows at most two featured actions.
 export const MAX_FEATURED_ACTIONS = 2;

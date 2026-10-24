@@ -45,6 +45,21 @@ export interface PassRecord {
   /// Format key to the seed of its current download link, for providers the
   ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
+  /// Set by `kvStores` when the record was just read through from a 0.2.x
+  ///  row (`${prefix}pass:${tokenId}`): its links were tokens, not seeds,
+  ///  and are gone, and its installed passes still show them. The issuer
+  ///  settles such a record on first use: a new serial with fresh links, and
+  ///  the old serial pushed as superseded ("Links reset", re-add the pass).
+  ///  Cleared by that rotation.
+  migratedFrom?: "0.2";
+  /// Fingerprint (`LinkKeyring.id`) of the `linkSecret` the link bindings
+  ///  were last written under. When it differs from the running issuer's
+  ///  (the secret was rotated, or a development process restarted with an
+  ///  ephemeral one), the bindings are rewritten under the current secret
+  ///  on the next load, so the holder's next claim gets working links
+  ///  instead of a record whose links are dead forever. Absent on records
+  ///  written before 0.3.1, which are re-bound the same way.
+  linkKeyring?: string;
   /// Unix seconds of the last content change (the manifest's `updatedAt`).
   updatedAt: number;
   /// Unix seconds of the last rotation, or of creation.
@@ -201,6 +216,13 @@ export interface KvStoresOptions {
   contract: string;
   /// Literal key prefix. Default "erc8426:".
   prefix?: string;
+  /// Read through to 0.2.x rows (`${prefix}pass:${tokenId}`) on a miss:
+  ///  the record is copied under the scoped key with its links dropped and
+  ///  `migratedFrom: "0.2"` set, the old pass row and its link rows are
+  ///  deleted, and the issuer supersedes the old serial on first use so the
+  ///  installed pass gets the "Links reset, re-add" push. Default true; set
+  ///  false once no 0.2.x row can remain.
+  legacy?: boolean;
 }
 
 /// Build the namespace every key of a collection lives under:
@@ -236,6 +258,33 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
     if (value === null || value === undefined) return null;
     return (typeof value === "string" ? JSON.parse(value) : value) as T;
   };
+  const legacyPrefix = options.prefix ?? "erc8426:";
+  const readLegacy = options.legacy !== false;
+  // A 0.2.x pass row, moved under the scoped key the first time it is
+  // missed there. Its `links` and `downloads` held raw tokens that nothing
+  // can resolve under the digest scheme, so they are dropped (and their
+  // `${prefix}link:` rows deleted) and the record is marked for the issuer
+  // to settle: a new serial, and the old one superseded, so every installed
+  // pass learns it was replaced instead of freezing with dead links.
+  const migrateLegacy = async (tokenId: string): Promise<PassRecord | null> => {
+    const old = parse<PassRecord>(await kv.get(`${legacyPrefix}pass:${tokenId}`));
+    if (!old || typeof old !== "object" || typeof old.serial !== "string") return null;
+    const migrated: PassRecord = {
+      tokenId,
+      serial: old.serial,
+      generation: typeof old.generation === "number" ? old.generation : 0,
+      lastIssuedTo: old.lastIssuedTo ?? null,
+      links: {},
+      downloads: {},
+      updatedAt: typeof old.updatedAt === "number" ? old.updatedAt : 0,
+      rotatedAt: typeof old.rotatedAt === "number" ? old.rotatedAt : 0,
+      migratedFrom: "0.2",
+    };
+    await kv.set(passKey(tokenId), JSON.stringify(migrated));
+    const oldTokens = [...Object.values(old.links ?? {}), ...Object.values(old.downloads ?? {})].filter((t): t is string => typeof t === "string");
+    await Promise.all([kv.del(`${legacyPrefix}pass:${tokenId}`), ...oldTokens.map((t) => kv.del(`${legacyPrefix}link:${t}`))]);
+    return migrated;
+  };
   return {
     nonces: {
       async issue(nonce, record, ttlSeconds) {
@@ -252,7 +301,9 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
     },
     passes: {
       async get(tokenId) {
-        return parse<PassRecord>(await kv.get(passKey(tokenId)));
+        const record = parse<PassRecord>(await kv.get(passKey(tokenId)));
+        if (record || !readLegacy) return record;
+        return migrateLegacy(tokenId);
       },
       async put(record) {
         await kv.set(passKey(record.tokenId), JSON.stringify(record));

@@ -1,7 +1,18 @@
 import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
-import { defaultClientKey, memoryRateLimiter, unlimited, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+import {
+  defaultClientKey,
+  forwardedClientKey,
+  memoryRateLimiter,
+  proxyClientKey,
+  trustedHeaderClientKey,
+  unlimited,
+  type ClientKeyFn,
+  type RateLimitRule,
+  type RateLimiter,
+  type TrustedProxy,
+} from "./rateLimit.js";
 import type { RepeatStore } from "./repeat.js";
 
 /// The two configurations the standard defines under Acquisition URLs.
@@ -102,10 +113,31 @@ export interface RateLimitConfig {
   /// GET and POST /links/:link and GET /passes/:link, keyed by client and
   ///  link. Default 60 per 60 s. A POST costs a chain read and an action.
   capability?: RateLimitRule | false;
+  /// POST /:tokenId/actions/:action, keyed by client and token. Default 30
+  ///  per 60 s. Every presentation costs a parse and a signature check.
+  action?: RateLimitRule | false;
+  /// POST /:tokenId/rotate, keyed by client and token. Default 10 per 60 s.
+  rotate?: RateLimitRule | false;
+  /// A second bucket per family keyed by the client ALONE, with no token in
+  ///  the key, so a client cannot start a fresh bucket for every token id or
+  ///  link it names and mint nonces or chain reads without bound. Default
+  ///  120 per 60 s per family. `false` disables it (the per-token buckets
+  ///  stay).
+  perClient?: RateLimitRule | false;
   /// The client identity a request is counted under. Default
-  ///  `defaultClientKey` (proxy headers, then the socket address the Node
-  ///  adapter recorded). Return null to count every unknown client together.
-  clientKey?: (request: Request) => string | null;
+  ///  `defaultClientKey`: the socket address the Node adapter recorded, and
+  ///  nothing a client can send. Behind a proxy use `trustProxy`, or give
+  ///  `forwardedClientKey(n)` or `trustedHeaderClientKey(name)` here. Return
+  ///  null to count every unknown client together. Wins over `trustProxy`.
+  clientKey?: ClientKeyFn;
+  /// The proxy that fronts the issuer, by name or by the header it
+  ///  overwrites or the number of X-Forwarded-For hops it appends. Sets
+  ///  `clientKey` accordingly. REQUIRED behind any proxy, or every client
+  ///  shares the proxy's bucket; and it must name the proxy that actually
+  ///  sits in front, since a CDN header the platform passes through from the
+  ///  client (`cf-connecting-ip` on Vercel) is spoofable and lets one client
+  ///  rotate buckets or burn a victim's.
+  trustProxy?: TrustedProxy | { header: string } | { forwardedHops: number };
 }
 
 export interface ResolvedRateLimitConfig {
@@ -113,7 +145,10 @@ export interface ResolvedRateLimitConfig {
   challenge: RateLimitRule | false;
   manifest: RateLimitRule | false;
   capability: RateLimitRule | false;
-  clientKey: (request: Request) => string | null;
+  action: RateLimitRule | false;
+  rotate: RateLimitRule | false;
+  perClient: RateLimitRule | false;
+  clientKey: ClientKeyFn;
 }
 
 /// Identical repeats answered with the first outcome (see repeat.ts). iOS
@@ -253,6 +288,19 @@ export interface ResolvedIssuerConfig {
   maxBatchRange: number;
   rateLimit: ResolvedRateLimitConfig;
   repeat: ResolvedRepeatConfig | false;
+}
+
+/// An origin in its canonical serialization (lowercase scheme and host, no
+///  default port, no path), or null for anything that is not an origin.
+export function normalizeOrigin(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.origin === "null" || url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") return null;
+  return url.origin;
 }
 
 /// Thrown by `createIssuer` for a configuration the spec does not allow or
@@ -400,13 +448,22 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
       throw new IssuerConfigError('cors.origins must be "*" or an array of origins');
     }
     if (Array.isArray(cors.origins)) {
+      // Normalized once here (lowercase scheme and host, default port
+      // dropped), and the request's Origin is normalized the same way before
+      // the comparison, so "HTTPS://App.Example:443" and "https://app.example"
+      // are one origin.
+      const normalized: string[] = [];
       for (const o of cors.origins) {
-        if (typeof o !== "string" || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
+        const n = typeof o === "string" ? normalizeOrigin(o) : null;
+        if (n === null || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
           throw new IssuerConfigError(`cors.origins entries must be origins (scheme://host[:port]) with no path, got "${String(o)}"`);
         }
+        if (!normalized.includes(n)) normalized.push(n);
       }
+      cors = { origins: normalized, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
+    } else {
+      cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
     }
-    cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
   }
 
   return {
@@ -443,10 +500,13 @@ function resolveRepeat(config: RepeatConfig | false | undefined): ResolvedRepeat
   return { windowSeconds: positiveInt("repeat.windowSeconds", c.windowSeconds, DEFAULT_REPEAT_WINDOW_SECONDS), ...(c.store ? { store: c.store } : {}) };
 }
 
-export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability", RateLimitRule>> = {
+export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability" | "action" | "rotate" | "perClient", RateLimitRule>> = {
   challenge: { limit: 30, windowSeconds: 60 },
   manifest: { limit: 60, windowSeconds: 60 },
   capability: { limit: 60, windowSeconds: 60 },
+  action: { limit: 30, windowSeconds: 60 },
+  rotate: { limit: 10, windowSeconds: 60 },
+  perClient: { limit: 120, windowSeconds: 60 },
 };
 
 function rule(name: string, value: RateLimitRule | false | undefined, fallback: RateLimitRule): RateLimitRule | false {
@@ -458,16 +518,31 @@ function rule(name: string, value: RateLimitRule | false | undefined, fallback: 
 
 function resolveRateLimit(config: RateLimitConfig | false | undefined): ResolvedRateLimitConfig {
   if (config === false) {
-    return { limiter: unlimited, challenge: false, manifest: false, capability: false, clientKey: defaultClientKey };
+    return { limiter: unlimited, challenge: false, manifest: false, capability: false, action: false, rotate: false, perClient: false, clientKey: defaultClientKey };
   }
   const c = config ?? {};
   if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
   if (c.clientKey !== undefined && typeof c.clientKey !== "function") throw new IssuerConfigError("rateLimit.clientKey must be a function");
+  let clientKey: ClientKeyFn | undefined = c.clientKey;
+  if (clientKey === undefined && c.trustProxy !== undefined) {
+    const tp = c.trustProxy;
+    try {
+      if (typeof tp === "string") clientKey = proxyClientKey(tp);
+      else if (typeof tp === "object" && tp !== null && "header" in tp) clientKey = trustedHeaderClientKey(tp.header);
+      else if (typeof tp === "object" && tp !== null && "forwardedHops" in tp) clientKey = forwardedClientKey(tp.forwardedHops);
+      else throw new Error(`rateLimit.trustProxy must be a proxy name, { header }, or { forwardedHops }`);
+    } catch (e) {
+      throw new IssuerConfigError((e as Error).message);
+    }
+  }
   return {
     limiter: c.limiter ?? memoryRateLimiter(),
     challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
     manifest: rule("manifest", c.manifest, DEFAULT_RATE_LIMITS.manifest),
     capability: rule("capability", c.capability, DEFAULT_RATE_LIMITS.capability),
-    clientKey: c.clientKey ?? defaultClientKey,
+    action: rule("action", c.action, DEFAULT_RATE_LIMITS.action),
+    rotate: rule("rotate", c.rotate, DEFAULT_RATE_LIMITS.rotate),
+    perClient: rule("perClient", c.perClient, DEFAULT_RATE_LIMITS.perClient),
+    clientKey: clientKey ?? defaultClientKey,
   };
 }

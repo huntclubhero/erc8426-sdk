@@ -116,6 +116,8 @@ export const issuer = createIssuer({
   mode: "gated",
   publicClient,
   stores: kvStores(kv, { chainId: 8453, contract: "0xYourCollection" }), // shared store with atomic getDel for nonces; keys scoped per collection
+  linkSecret: process.env.ISSUER_LINK_SECRET!, // 32+ bytes, the same on every instance; links are derived from it
+  environment: "production",
   providers: [apple, google],
   render: ({ token, serial, links }) => ({
     serial,

@@ -81,9 +81,10 @@ export function memoryRateLimiter(options: MemoryRateLimiterOptions = {}): RateL
 }
 
 export interface KvRateLimiterOptions {
-  /// Key prefix. Default "erc8426:rl:". Give the limiter the same
-  ///  chain-and-contract scope as `kvStores` if one KV serves several
-  ///  collections (for example `${kvKeyNamespace(scope)}rl:`).
+  /// Key prefix. Default "erc8426:rl:". The issuer already starts every key
+  ///  it counts with its chain id and contract, so one limiter on one KV
+  ///  serves several collections without a prefix of their own; set one to
+  ///  separate environments.
   prefix?: string;
 }
 
@@ -134,24 +135,77 @@ export const unlimited: RateLimiter = {
 ///  trustworthy where the adapter is in use.
 export const REMOTE_ADDRESS_HEADER = "x-erc8426-remote-address" as const;
 
-/// The client address a request arrived from, best effort: the platform
-///  headers a trusted proxy sets (Cloudflare, then the usual reverse-proxy
-///  names, with the first X-Forwarded-For hop), then the socket address the
-///  Node adapter recorded, else null. A deployment with no proxy in front
-///  should pass its own `clientKey`, since X-Forwarded-For is then
-///  client-supplied and a client could spread its attempts across made-up
-///  addresses; one that fronts the issuer with a proxy should make sure the
-///  proxy overwrites these headers rather than appending to them.
+export type ClientKeyFn = (request: Request) => string | null;
+
+/// The socket address the Node adapter recorded, else null. Nothing a client
+///  can send is consulted: every proxy header is client-supplied unless a
+///  proxy the operator controls overwrites it, and a limiter keyed on a
+///  header the client picks is no limiter (rotate the value, start a fresh
+///  bucket; name a victim's address, burn theirs). Behind a proxy, the
+///  socket address is the proxy's, so every client shares one bucket until
+///  the operator says which header to trust: see `forwardedClientKey` and
+///  `trustedHeaderClientKey`.
 export function defaultClientKey(request: Request): string | null {
-  const h = request.headers;
-  const direct = h.get("cf-connecting-ip") ?? h.get("true-client-ip") ?? h.get("x-real-ip") ?? h.get("fly-client-ip");
-  if (direct && direct.trim() !== "") return direct.trim();
-  const forwarded = h.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0]!.trim();
-    if (first !== "") return first;
-  }
-  const remote = h.get(REMOTE_ADDRESS_HEADER);
-  if (remote && remote.trim() !== "") return remote.trim();
-  return null;
+  const remote = request.headers.get(REMOTE_ADDRESS_HEADER);
+  return remote && remote.trim() !== "" ? remote.trim() : null;
+}
+
+/// Client address from `X-Forwarded-For` behind a known number of trusted
+///  proxies: the hop `trustedHops` from the right is the address the
+///  outermost trusted proxy saw, and everything left of it is whatever the
+///  client sent. With one proxy in front, `forwardedClientKey(1)` takes the
+///  last hop. Falls back to the socket address, then null.
+export function forwardedClientKey(trustedHops: number): ClientKeyFn {
+  if (!Number.isInteger(trustedHops) || trustedHops < 1) throw new Error(`forwardedClientKey: trustedHops must be a positive integer, got ${String(trustedHops)}`);
+  return (request) => {
+    const forwarded = request.headers.get("x-forwarded-for");
+    if (forwarded) {
+      const hops = forwarded
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s !== "");
+      const hop = hops[hops.length - trustedHops];
+      if (hop !== undefined) return hop;
+    }
+    return defaultClientKey(request);
+  };
+}
+
+/// The proxies this SDK knows the client-address header of. Each is a
+///  header the platform OVERWRITES on every request, so a client cannot set
+///  it: Vercel rewrites `x-real-ip` (and passes `cf-connecting-ip` and
+///  `true-client-ip` through from the client untouched, so those are NOT
+///  trustworthy there); Cloudflare sets `cf-connecting-ip`; Fly sets
+///  `fly-client-ip`; Akamai sets `true-client-ip`. Pick the one for the
+///  proxy that actually fronts the issuer, never for a CDN that might.
+export type TrustedProxy = "vercel" | "cloudflare" | "fly" | "akamai";
+
+export const TRUSTED_PROXY_HEADERS: Readonly<Record<TrustedProxy, string>> = {
+  vercel: "x-real-ip",
+  cloudflare: "cf-connecting-ip",
+  fly: "fly-client-ip",
+  akamai: "true-client-ip",
+};
+
+/// `clientKey` for a known proxy: `trustedHeaderClientKey` of the header
+///  that proxy overwrites.
+export function proxyClientKey(proxy: TrustedProxy): ClientKeyFn {
+  const header = TRUSTED_PROXY_HEADERS[proxy];
+  if (!header) throw new Error(`proxyClientKey: unknown proxy "${String(proxy)}" (vercel, cloudflare, fly, akamai)`);
+  return trustedHeaderClientKey(header);
+}
+
+/// Client address from one named header a trusted proxy sets, for example
+///  `trustedHeaderClientKey("cf-connecting-ip")` behind Cloudflare or
+///  `"fly-client-ip"` on Fly. Opt-in by name: the operator knows which
+///  proxy fronts the issuer and that it overwrites the header. Falls back
+///  to the socket address, then null.
+export function trustedHeaderClientKey(headerName: string): ClientKeyFn {
+  if (typeof headerName !== "string" || headerName.trim() === "") throw new Error("trustedHeaderClientKey: headerName is required");
+  const name = headerName.trim();
+  return (request) => {
+    const value = request.headers.get(name);
+    if (value && value.trim() !== "") return value.split(",")[0]!.trim();
+    return defaultClientKey(request);
+  };
 }

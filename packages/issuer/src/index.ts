@@ -17,6 +17,7 @@ export {
   IssuerConfigError,
   MAINNET_CHAIN_IDS,
   isKnownMainnet,
+  normalizeOrigin,
   resolveConfig,
   resolveEnvironment,
   type IssuerEnvironment,
@@ -35,6 +36,8 @@ export {
 } from "./config.js";
 export {
   RepeatCoalescer,
+  errorCodeOf,
+  isRecordableOutcome,
   kvRepeatStore,
   memoryRepeatStore,
   sha256Hex,
@@ -46,6 +49,12 @@ export {
 export {
   REMOTE_ADDRESS_HEADER,
   defaultClientKey,
+  TRUSTED_PROXY_HEADERS,
+  forwardedClientKey,
+  proxyClientKey,
+  trustedHeaderClientKey,
+  type ClientKeyFn,
+  type TrustedProxy,
   kvRateLimiter,
   memoryRateLimiter,
   unlimited,
@@ -110,6 +119,7 @@ export {
   defaultConfirmPage,
   ephemeralLinkSecret,
   linkDigest,
+  newAttempt,
   newLinkSeed,
   newLinkToken,
   newSerial,

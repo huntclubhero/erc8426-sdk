@@ -1,4 +1,4 @@
-import { googleFormatProvider, googleWalletClient, saveOrigins, type GoogleFormatProvider, type GoogleObjectStore } from "@erc8426/google";
+import { googleFormatProvider, googleWalletClient, type GoogleFormatProvider, type GoogleObjectStore } from "@erc8426/google";
 
 import type { ServerConfig } from "./config";
 
@@ -12,7 +12,9 @@ export function googleProvider(config: ServerConfig, store?: GoogleObjectStore):
     ...(store ? { store } : {}),
     client: googleWalletClient({ serviceAccount: google.serviceAccount, issuerId: google.issuerId }),
     classSuffix: google.classSuffix,
-    origins: saveOrigins([config.baseUrl]),
+    // The deployed origin only, from NEXT_PUBLIC_BASE_URL. saveOrigins would
+    // add a www variant, which a vercel.app host does not have.
+    origins: [new URL(config.baseUrl).origin],
     unhostedImages: "omit",
     messageFor: () => ({ header: "Your pet changed", body: "Open the pass to see how it is doing." }),
     onError: (err, where) => console.warn(`[google] ${where}: ${err.message}`),

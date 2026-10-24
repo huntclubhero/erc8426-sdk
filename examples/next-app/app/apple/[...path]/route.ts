@@ -16,7 +16,7 @@ async function handle(request: Request): Promise<Response> {
     return json({ error: "internal_error", message: (e as Error).message }, { status: 500 });
   }
   const apple = runtime.config.apple ? appleWebService() : undefined;
-  return apple ? apple.webService(request) : json({ error: "not_found" }, { status: 404 });
+  return apple ? apple.webService(request) : json({ error: "unknown_capability", message: "Apple Wallet is not configured" }, { status: 404 });
 }
 
 export { handle as GET, handle as POST, handle as DELETE };

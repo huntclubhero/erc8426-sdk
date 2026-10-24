@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { IssuerConfigError, LinkKeyring, createIssuer, kvStores, linkDigest, memoryKv, memoryStores, type KeyValueStore } from "@erc8426/issuer";
 
-import { CONTRACT, FakeChain, HARNESS_LINK_SECRET, TOKEN_ID, buildHarness, fakeProviders, issuePassTo, newSigner } from "./helpers.js";
+import { CONTRACT, FakeChain, HARNESS_LINK_SECRET, TOKEN_ID, buildHarness, claim, fakeProviders, issuePassTo, newSigner } from "./helpers.js";
 
 /// A KV that remembers every key and value ever written or deleted, so a
 ///  test can scan the whole store for a token string.
@@ -128,6 +128,102 @@ describe("a read of the store yields no usable capability", () => {
     expect(await k1.digestOfSeed("seed")).toBe(await linkDigest(await k1.token("seed")));
     expect(await linkDigest("x")).toMatch(/^[0-9a-f]{64}$/);
     expect(() => new LinkKeyring(new Uint8Array(16))).toThrow(/32 bytes/);
+  });
+
+  describe("a secret change does not leave links dead", () => {
+    it("re-binds a record written under another secret on its next load: the next claim's download and links work, the old URLs die", async () => {
+      const kv = recordingKv();
+      const stores = kvStores(kv, SCOPE);
+      const owner = newSigner();
+      const a = buildHarness({ rateLimit: false, stores });
+      const oldLinks = await issuePassTo(a, owner);
+      const oldRecord = (await stores.passes.get(TOKEN_ID))!;
+      expect(oldRecord.linkKeyring).toMatch(/^[0-9a-f]{16}$/);
+      // Same store, a new secret: a rotation, or a dev restart with the ephemeral one.
+      const b = buildHarness({ rateLimit: false, stores, linkSecret: "a different secret of thirty-two bytes or more!!" });
+      b.chain.setOwner(TOKEN_ID, owner.address);
+      const { res, body } = await claim(b, owner);
+      expect(res.status).toBe(200);
+      const download = await b.get(new URL(body.formats.apple).pathname);
+      expect(download.status).toBe(200);
+      const links = await b.issuer.capabilityLinksFor(TOKEN_ID);
+      expect((await b.post(new URL(links.feed!).pathname)).status).toBe(200);
+      expect(b.executed).toHaveLength(1);
+      // The record kept its seeds and serial and carries the new stamp.
+      const record = (await stores.passes.get(TOKEN_ID))!;
+      expect(record.serial).toBe(oldRecord.serial);
+      expect(record.links).toEqual(oldRecord.links);
+      expect(record.linkKeyring).not.toBe(oldRecord.linkKeyring);
+      // Links minted under the old secret are dead, as a secret rotation promises.
+      expect((await b.post(oldLinks.feed!)).status).toBe(404);
+      expect(links.feed).not.toBe(oldLinks.feed);
+      // A second claim is a no-op for the bindings: no link row is written again.
+      const linkRows = () => [...kv.written.keys()].filter((k) => k.includes(":link:")).length;
+      const writes = linkRows();
+      expect((await claim(b, owner)).res.status).toBe(200);
+      expect(linkRows()).toBe(writes);
+    });
+
+    it("a 0.2.x-shaped record (raw tokens in links, rows keyed by raw token) heals on the first claim: old link dead, new manifest download and links work", async () => {
+      const kv = memoryKv();
+      const stores = kvStores(kv, SCOPE);
+      const owner = newSigner();
+      const raw = "A".repeat(43);
+      const rawDl = "B".repeat(43);
+      await stores.passes.put({ tokenId: TOKEN_ID, serial: "s", generation: 0, lastIssuedTo: owner.address, links: { feed: raw, water: "C".repeat(43) }, downloads: { apple: rawDl }, updatedAt: 1, rotatedAt: 1 });
+      await stores.links.put(raw, { kind: "action", tokenId: TOKEN_ID, name: "feed", generation: 0 });
+      const h = buildHarness({ rateLimit: false, stores });
+      h.chain.setOwner(TOKEN_ID, owner.address);
+      expect((await h.post(`/wallet-pass/links/${raw}`)).status).toBe(404);
+      const { res, body } = await claim(h, owner);
+      expect(res.status).toBe(200);
+      expect((await h.get(new URL(body.formats.apple).pathname)).status).toBe(200);
+      expect((await h.get(`/wallet-pass/passes/${rawDl}`)).status).toBe(404);
+      const links = await h.issuer.capabilityLinksFor(TOKEN_ID);
+      expect((await h.post(new URL(links.feed!).pathname)).status).toBe(200);
+      expect((await h.post(new URL(links.water!).pathname)).status).toBe(200);
+      expect((await stores.passes.get(TOKEN_ID))!.linkKeyring).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it("rotation after a secret change deletes the rows that exist under the current secret", async () => {
+      const kv = recordingKv();
+      const stores = kvStores(kv, SCOPE);
+      const owner = newSigner();
+      const a = buildHarness({ rateLimit: false, stores });
+      await issuePassTo(a, owner);
+      const b = buildHarness({ rateLimit: false, stores, linkSecret: "a different secret of thirty-two bytes or more!!" });
+      b.chain.setOwner(TOKEN_ID, owner.address);
+      const before = (await stores.passes.get(TOKEN_ID))!;
+      const seeds = [...Object.values(before.links), ...Object.values(before.downloads)];
+      const keyring = new LinkKeyring(new TextEncoder().encode("a different secret of thirty-two bytes or more!!"));
+      const currentDigests = await Promise.all(seeds.map((s) => keyring.digestOfSeed(s)));
+      // rotate() reads the record straight from the store: it re-binds first, then deletes.
+      await b.issuer.rotate(TOKEN_ID);
+      for (const d of currentDigests) {
+        expect(kv.deleted).toContain(`erc8426:1:${CONTRACT.toLowerCase()}:link:${d}`);
+        expect(await kv.get(`erc8426:1:${CONTRACT.toLowerCase()}:link:${d}`)).toBeNull();
+      }
+      const after = (await stores.passes.get(TOKEN_ID))!;
+      expect(after.generation).toBe(before.generation + 1);
+      expect(after.linkKeyring).toBe(await keyring.id());
+      const links = await b.issuer.capabilityLinksFor(TOKEN_ID);
+      expect((await b.post(new URL(links.feed!).pathname)).status).toBe(200);
+    });
+
+    it("two development processes with ephemeral secrets over one store: the second heals the record instead of serving dead links", async () => {
+      const stores = memoryStores();
+      const quiet = () => undefined;
+      const owner = newSigner();
+      const a = buildHarness({ rateLimit: false, stores, linkSecret: undefined, onWarning: quiet });
+      const oldLinks = await issuePassTo(a, owner);
+      const b = buildHarness({ rateLimit: false, stores, linkSecret: undefined, onWarning: quiet });
+      b.chain.setOwner(TOKEN_ID, owner.address);
+      expect((await b.post(oldLinks.feed!)).status).toBe(404);
+      const { res } = await claim(b, owner);
+      expect(res.status).toBe(200);
+      const links = await b.issuer.capabilityLinksFor(TOKEN_ID);
+      expect((await b.post(new URL(links.feed!).pathname)).status).toBe(200);
+    });
   });
 
   describe("linkSecret configuration", () => {

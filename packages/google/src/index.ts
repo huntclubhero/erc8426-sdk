@@ -33,6 +33,7 @@ export {
   CALLBACK_PROTOCOL_VERSION,
   GOOGLE_PAY_PASSES_SENDER_ID,
   GOOGLE_ROOT_KEYS_URL,
+  MAX_CALLBACK_BODY_BYTES,
   callbackHandler,
   createCallbackVerifier,
   maxAgeOf,

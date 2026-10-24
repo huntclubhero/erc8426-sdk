@@ -20,7 +20,7 @@ import {
 import { authorize as runFloor, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
 import { LinkKeyring, ephemeralLinkSecret, isLinkTokenShape, linkDigest, newLinkSeed, newSerial } from "./capability.js";
 import { publicClientChainReader, type ChainReader, type ReadBlockTag, type ReadContractClient } from "./chain.js";
-import { IssuerConfigError, isKnownMainnet, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
+import { IssuerConfigError, isKnownMainnet, resolveConfig, resolveEnvironment, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
 import { checkEntitlement, ownerOnly, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
 import { IssuerError } from "./errors.js";
 import { createRouter } from "./http.js";
@@ -192,11 +192,15 @@ export interface IssuerInternals {
 
 type RotationReason = "transfer" | "claim" | "owner_request";
 
-/// True under NODE_ENV=production. Guarded so the issuer still runs where
-///  there is no `process` (Workers, Deno without Node compatibility). The
-///  `environment` option, when set, overrides this; see resolveEnvironment.
+/// True under NODE_ENV=production and nothing else. Guarded so the issuer
+///  still runs where there is no `process` (Workers, Deno without Node
+///  compatibility).
+/// @deprecated NODE_ENV is only the fallback; the issuer's own answer is
+///  `issuer.config.environment` (the explicit `environment` option, else
+///  NODE_ENV, else "unknown"), or `resolveEnvironment(explicit)` before an
+///  issuer exists. Nothing in the issuer reads this function any more.
 export function isProductionEnv(): boolean {
-  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+  return resolveEnvironment(undefined) === "production";
 }
 
 /// Fill in any store the options leave out with the in-memory one, refusing
@@ -231,6 +235,13 @@ function resolveStores(options: CreateIssuerOptions, config: ResolvedIssuerConfi
   if (config.environment === "unknown" && isKnownMainnet(config.chainId)) {
     warn(
       `[erc8426/issuer] production mode is undetermined: chain ${config.chainId} is a mainnet but neither the environment option nor NODE_ENV is set, so the production guards (the in-memory store refusal) cannot tell this is real. Set environment: "production" (or "development") in createIssuer.`,
+    );
+  } else if (options.environment === "development" && isKnownMainnet(config.chainId)) {
+    // The explicit option only: a NODE_ENV-derived development (a test
+    // runner against a mainnet fork) is covered by the undetermined case
+    // above when NODE_ENV is unset, and is not worth a warning when set.
+    warn(
+      `[erc8426/issuer] environment is "development" but chain ${config.chainId} is a mainnet: the production guards (the in-memory store refusal, the linkSecret requirement) are off for an issuer that serves real tokens. If this is the real deployment, set environment: "production".`,
     );
   }
   const given = options.stores ?? {};
@@ -303,13 +314,34 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // The store keys of every link and download the record currently holds.
   const digestsOf = (record: PassRecord) => Promise.all([...Object.values(record.links), ...Object.values(record.downloads)].map((seed) => keyring.digestOfSeed(seed)));
 
+  // A record bound under another linkSecret (a rotation, a dev restart with
+  // an ephemeral secret, or a 0.3.0 record with no stamp) has link rows the
+  // current keyring can never reach: the digests it computes from the seeds
+  // differ from the ones stored, so every link and download would answer
+  // unknown_capability forever. Rewrite the bindings under the current
+  // secret and stamp the record. The seeds themselves stay, so the URLs
+  // the holder sees change (a secret rotation retires every old link, as
+  // documented) but the record stays whole and the next claim works.
+  async function rebind(record: PassRecord): Promise<boolean> {
+    const id = await keyring.id();
+    if (record.linkKeyring === id) return false;
+    for (const [action, seed] of Object.entries(record.links)) {
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
+    }
+    for (const [format, seed] of Object.entries(record.downloads)) {
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "download", tokenId: record.tokenId, name: format, generation: record.generation });
+    }
+    record.linkKeyring = id;
+    return true;
+  }
+
   // Mint links for whatever the record is missing: every capability action
   // and every file format. A link is a random seed in the record plus a
   // binding stored under the digest of the token derived from that seed;
   // the token itself is never written anywhere. Links already present are
-  // kept.
+  // kept (and re-bound first if the secret changed under them).
   async function fill(record: PassRecord): Promise<boolean> {
-    let changed = false;
+    let changed = await rebind(record);
     for (const action of config.capabilityActions) {
       if (record.links[action]) continue;
       const seed = newLinkSeed();
@@ -327,8 +359,19 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return changed;
   }
 
+  // A record read through from a 0.2.x row (stores.ts, `migratedFrom`) is
+  // settled on first use: rotated under a new serial with fresh links, and
+  // the old serial pushed as superseded with reason "reset", so the holder's
+  // installed pass says it was replaced and how to re-add it, rather than
+  // sitting frozen with links that can never resolve again.
+  async function settle(record: PassRecord): Promise<PassRecord> {
+    if (!record.migratedFrom) return record;
+    return rotateRecord(record, "owner_request", null);
+  }
+
   async function loadOrCreate(tokenId: string): Promise<PassRecord> {
     let record = await stores.passes.get(tokenId);
+    if (record) record = await settle(record);
     if (!record) {
       const t = nowSeconds();
       record = { tokenId, serial: newSerial(), generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: t, rotatedAt: t };
@@ -392,8 +435,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //  - "claim": a new account's first claim; it becomes the holder.
   //  - "owner_request": the holder of record is unchanged.
   async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
+    // So the deletes below hit the rows that exist under the current secret.
+    if (await rebind(record)) await stores.passes.put(record);
+    const { migratedFrom: _settled, ...base } = record;
     const next: PassRecord = {
-      ...record,
+      ...base,
       generation: record.generation + 1,
       serial: newSerial(),
       lastIssuedTo: reason === "transfer" ? null : reason === "claim" ? holder : record.lastIssuedTo,
@@ -417,8 +463,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // (render would read a token that no longer exists) and retire every link
   // and download. Nothing is minted in their place; a re-mint starts over.
   async function burnRecord(record: PassRecord): Promise<void> {
+    if (await rebind(record)) await stores.passes.put(record);
+    const { migratedFrom: _settled, ...base } = record;
     const next: PassRecord = {
-      ...record,
+      ...base,
       generation: record.generation + 1,
       serial: newSerial(),
       lastIssuedTo: null,
@@ -602,8 +650,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const summary: PassUpdateSummary = { updated: 0, burned: [], rotated: [] };
       const failed: string[] = [];
       for (const id of ids) {
-        const record = await stores.passes.get(id);
+        let record = await stores.passes.get(id);
         if (!record) continue;
+        // A migrated 0.2.x record is settled first (old serial superseded,
+        // new serial minted), so the fresh content below goes to the new
+        // pass and never to a pass that still shows dead links.
+        record = await settle(record);
         // updatedAt SHOULD change whenever PassUpdate is emitted for the token.
         record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
         await stores.passes.put(record);
@@ -681,7 +733,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     },
     onPassUpdate: internals.onPassUpdate,
     async capabilityLinksFor(tokenId) {
-      const record = await stores.passes.get(normalizeTokenId(tokenId));
+      let record = await stores.passes.get(normalizeTokenId(tokenId));
+      if (record) record = await settle(record);
       return record ? await linkUrls(record) : {};
     },
   };
