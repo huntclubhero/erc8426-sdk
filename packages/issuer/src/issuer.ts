@@ -359,8 +359,19 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return changed;
   }
 
+  // A record read through from a 0.2.x row (stores.ts, `migratedFrom`) is
+  // settled on first use: rotated under a new serial with fresh links, and
+  // the old serial pushed as superseded with reason "reset", so the holder's
+  // installed pass says it was replaced and how to re-add it, rather than
+  // sitting frozen with links that can never resolve again.
+  async function settle(record: PassRecord): Promise<PassRecord> {
+    if (!record.migratedFrom) return record;
+    return rotateRecord(record, "owner_request", null);
+  }
+
   async function loadOrCreate(tokenId: string): Promise<PassRecord> {
     let record = await stores.passes.get(tokenId);
+    if (record) record = await settle(record);
     if (!record) {
       const t = nowSeconds();
       record = { tokenId, serial: newSerial(), generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: t, rotatedAt: t };
@@ -426,8 +437,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
     // So the deletes below hit the rows that exist under the current secret.
     if (await rebind(record)) await stores.passes.put(record);
+    const { migratedFrom: _settled, ...base } = record;
     const next: PassRecord = {
-      ...record,
+      ...base,
       generation: record.generation + 1,
       serial: newSerial(),
       lastIssuedTo: reason === "transfer" ? null : reason === "claim" ? holder : record.lastIssuedTo,
@@ -452,8 +464,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // and download. Nothing is minted in their place; a re-mint starts over.
   async function burnRecord(record: PassRecord): Promise<void> {
     if (await rebind(record)) await stores.passes.put(record);
+    const { migratedFrom: _settled, ...base } = record;
     const next: PassRecord = {
-      ...record,
+      ...base,
       generation: record.generation + 1,
       serial: newSerial(),
       lastIssuedTo: null,
@@ -637,8 +650,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const summary: PassUpdateSummary = { updated: 0, burned: [], rotated: [] };
       const failed: string[] = [];
       for (const id of ids) {
-        const record = await stores.passes.get(id);
+        let record = await stores.passes.get(id);
         if (!record) continue;
+        // A migrated 0.2.x record is settled first (old serial superseded,
+        // new serial minted), so the fresh content below goes to the new
+        // pass and never to a pass that still shows dead links.
+        record = await settle(record);
         // updatedAt SHOULD change whenever PassUpdate is emitted for the token.
         record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
         await stores.passes.put(record);
@@ -716,7 +733,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     },
     onPassUpdate: internals.onPassUpdate,
     async capabilityLinksFor(tokenId) {
-      const record = await stores.passes.get(normalizeTokenId(tokenId));
+      let record = await stores.passes.get(normalizeTokenId(tokenId));
+      if (record) record = await settle(record);
       return record ? await linkUrls(record) : {};
     },
   };

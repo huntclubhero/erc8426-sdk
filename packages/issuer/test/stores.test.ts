@@ -126,10 +126,22 @@ describe("kvStores", () => {
     expect((await b.links.get("t"))!.name).toBe("water");
   });
 
-  it("does not read rows written under the 0.2.x key shape", async () => {
+  it("reads a 0.2.x row through once, moving it under the scoped key without its links and marking it for the issuer to settle", async () => {
     const kv = memoryKv();
-    await kv.set("erc8426:pass:7", JSON.stringify({ tokenId: "7", serial: "old", generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: 1, rotatedAt: 1 }));
-    expect(await kvStores(kv, SCOPE).passes.get("7")).toBeNull();
+    await kv.set("erc8426:pass:7", JSON.stringify({ tokenId: "7", serial: "old", generation: 3, lastIssuedTo: null, links: { feed: "rawtoken" }, downloads: {}, updatedAt: 1, rotatedAt: 1 }));
+    await kv.set("erc8426:link:rawtoken", JSON.stringify({ kind: "action", tokenId: "7", name: "feed", generation: 3 }));
+    const s = kvStores(kv, SCOPE);
+    const migrated = await s.passes.get("7");
+    expect(migrated).toMatchObject({ tokenId: "7", serial: "old", generation: 3, links: {}, downloads: {}, migratedFrom: "0.2" });
+    expect(await kv.get("erc8426:pass:7")).toBeNull();
+    expect(await kv.get("erc8426:link:rawtoken")).toBeNull();
+    expect(await kv.get(`${NS}pass:7`)).not.toBeNull();
+    // Second read comes from the scoped key.
+    expect((await s.passes.get("7"))!.serial).toBe("old");
+    // Opted out: the old row is left alone and not read.
+    const kv2 = memoryKv();
+    await kv2.set("erc8426:pass:7", JSON.stringify({ tokenId: "7", serial: "old", generation: 0, lastIssuedTo: null, links: {}, downloads: {}, updatedAt: 1, rotatedAt: 1 }));
+    expect(await kvStores(kv2, { ...SCOPE, legacy: false }).passes.get("7")).toBeNull();
   });
 
   it("stays single-use across interleaving callers on a remote store", async () => {
