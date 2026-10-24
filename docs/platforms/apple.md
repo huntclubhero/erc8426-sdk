@@ -55,6 +55,10 @@ Keep `basePath` outside the issuer's `/wallet-pass` so the two route trees never
 - **At the device cap, registration answers 403.** A pass keeps at most `MAX_REGISTRATIONS_PER_PASS` (10) live devices; the eleventh device's registration gets 403, a status outside the 200/201/401 Apple documents for this call. The pass still installs on that device, it just never updates (no push, no refresh) until a slot frees: a device unregisters, or the owner's token rotates (which supersedes the whole set). Nobody is ever evicted. A custom store MUST implement `supersede()`; without it a forwarded copy that filled the slots keeps them across every rotation and the owner is locked out.
 - **Persistent store.** `MemoryApplePassStore` is for tests. On serverless each instance has its own memory, so registrations vanish. Implement `ApplePassStore` over Postgres or Redis; records carry `PassContent`, whose `Date` and `Uint8Array` values need serializing.
 
+## Featured Actions (iOS 27)
+
+`featuredActions` on the pass content puts up to two action cards beneath the pass face, each a fixed https URL or a reference to one of the pass's links by key (filled in at render time, so it rotates with the pass). See the package README, "Featured Actions (iOS 27)", including the note that a featured action is in every screenshot of the pass.
+
 ## Lock-screen notifications
 
 **Documented** (the `changeMessage` field key, as described in the Passcreator, PassKit and Airship help documentation):

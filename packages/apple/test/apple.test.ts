@@ -9,6 +9,7 @@ import {
   appleFormatProvider,
   supersededContent,
   buildPkpass,
+  featuredActionsFor,
   passImages,
   validateSignerCertificate,
   createApnsClient,
@@ -156,6 +157,85 @@ describe("pass.json mapping", () => {
     expect(hexToRgb("#fff")).toBe("rgb(255,255,255)");
     expect(hexToRgb("0E2A3A")).toBe("rgb(14,42,58)");
     expect(() => hexToRgb("blue")).toThrow();
+  });
+});
+
+describe("featured actions (iOS 27)", () => {
+  const opts = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM };
+  const json = (c: PassContent) => toPassJson(c, opts) as Record<string, any>;
+
+  it("is absent unless the content carries featured actions", () => {
+    expect(json(content())).not.toHaveProperty("featuredActions");
+    expect(json(content({ featuredActions: [] }))).not.toHaveProperty("featuredActions");
+    expect(featuredActionsFor(content())).toBeUndefined();
+  });
+
+  it("emits Apple's array shape, in order, for fixed URLs and for link references", () => {
+    const c = content({
+      featuredActions: [
+        { id: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" },
+        { id: "feed", type: "addToBalance", link: "act" },
+      ],
+    });
+    expect(json(c).featuredActions).toEqual([
+      { identifier: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" },
+      { identifier: "feed", type: "addToBalance", url: "https://issuer.example/a?x=1&y=2" },
+    ]);
+    // Any string type passes through for types Apple adds later.
+    expect(json(content({ featuredActions: [{ id: "x", type: "somethingNew", url: "https://issuer.example/x" }] })).featuredActions[0].type).toBe("somethingNew");
+    // Works on every style, poster included.
+    for (const style of ["generic", "eventTicket", "coupon", "posterGeneric"] as const) {
+      expect(json(content({ style, secondary: [], auxiliary: [], featuredActions: [{ id: "o", type: "shop", url: "https://issuer.example/shop" }] })).featuredActions).toHaveLength(1);
+    }
+  });
+
+  it("refuses more than two, duplicate ids, missing types and unknown link references", () => {
+    const three = [1, 2, 3].map((n) => ({ id: `a${n}`, type: "shop", url: `https://issuer.example/${n}` }));
+    expect(() => json(content({ featuredActions: three }))).toThrow(/at most 2 featured actions; 3 given/);
+    expect(() =>
+      json(content({ featuredActions: [{ id: "a", type: "shop", url: "https://issuer.example/1" }, { id: "a", type: "shop", url: "https://issuer.example/2" }] })),
+    ).toThrow(/duplicate featured action id "a"/);
+    expect(() => json(content({ featuredActions: [{ id: "a", type: "", url: "https://issuer.example/1" }] }))).toThrow(/needs a type/);
+    expect(() => json(content({ featuredActions: [{ id: "a", type: "shop", link: "nope" }] }))).toThrow(/references link "nope"/);
+  });
+
+  it("requires an absolute https URL", () => {
+    for (const url of ["www.example.com/offers", "http://issuer.example/offers", "javascript:alert(1)", "/offers", "", "mailto:a@b.c"]) {
+      expect(() => json(content({ featuredActions: [{ id: "a", type: "shop", url }] })), url).toThrow(/https/);
+    }
+    // A link reference is checked the same way.
+    expect(() => json(content({ links: [{ key: "act", label: "x", url: "http://issuer.example/a" }], featuredActions: [{ id: "a", type: "shop", link: "act" }] }))).toThrow(/https/);
+  });
+
+  it("a link reference is resolved at render time, so it follows the capability URL after rotation", async () => {
+    const before = content({ links: [{ key: "feed", label: "Feed", url: "https://issuer.example/wallet-pass/links/AAAA" }], featuredActions: [{ id: "feed", type: "addToBalance", link: "feed" }] });
+    const after = content({ links: [{ key: "feed", label: "Feed", url: "https://issuer.example/wallet-pass/links/BBBB" }], featuredActions: [{ id: "feed", type: "addToBalance", link: "feed" }] });
+    expect(json(before).featuredActions[0].url).toBe("https://issuer.example/wallet-pass/links/AAAA");
+    expect(json(after).featuredActions[0].url).toBe("https://issuer.example/wallet-pass/links/BBBB");
+    // Through the signed bundle too.
+    const certs = makeTestCerts();
+    const base = { passTypeIdentifier: PASS_TYPE, teamIdentifier: TEAM, certificates: certs };
+    const read = async (c: PassContent) => JSON.parse(unzip(await buildPkpass(c, base))["pass.json"]!.toString()) as Record<string, any>;
+    expect((await read(before)).featuredActions[0].url).toContain("/AAAA");
+    expect((await read(after)).featuredActions[0].url).toContain("/BBBB");
+  });
+
+  it("a superseded pass carries no featured action that points at a capability link", () => {
+    const live = content({
+      featuredActions: [
+        { id: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" },
+        { id: "feed", type: "addToBalance", link: "act" },
+      ],
+    });
+    // Voided content keeps only the fixed URL action; the link reference is dropped without error even when the links are gone.
+    const voided = json({ ...live, voided: true, links: [] });
+    expect(voided.voided).toBe(true);
+    expect(voided.featuredActions).toEqual([{ identifier: "offers", type: "membershipBenefits", url: "https://issuer.example/offers" }]);
+    expect(json({ ...live, voided: true, featuredActions: [{ id: "feed", type: "addToBalance", link: "act" }] })).not.toHaveProperty("featuredActions");
+    // What the provider renders for a superseded serial carries none at all.
+    const superseded = supersededContent(live, "transfer");
+    expect(superseded.featuredActions).toBeUndefined();
+    expect(json(superseded)).not.toHaveProperty("featuredActions");
   });
 });
 

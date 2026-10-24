@@ -1,6 +1,6 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 
-import type { BarcodeFormat, ImageSource, PassContent, PassField, PassLink, PassStyle } from "@erc8426/core";
+import { MAX_FEATURED_ACTIONS, type BarcodeFormat, type FeaturedAction, type ImageSource, type PassContent, type PassField, type PassLink, type PassStyle } from "@erc8426/core";
 import { PKPass } from "passkit-generator";
 
 import { resolveImage, type ImageFetchOptions } from "./images.js";
@@ -122,6 +122,48 @@ const POSTER_MAX_FOOTER = 1;
 ///  with the full field set, so iOS 26 and earlier render the legacy layout.
 ///  Wallet prefers the poster dictionary when it knows it. Needs
 ///  passkit-generator 3.6 or later at signing time: 3.5 strips the key.
+/// The top-level `featuredActions` array for pass.json, or undefined when
+///  the content carries none. Up to two; each URL absolute https (a
+///  capability link is https, and a scheme-less value such as Apple's own
+///  "www.example.com/offers" example would be ambiguous); a `link` reference
+///  resolves to the URL of the content's link with that key, at render time,
+///  so it rotates with the pass. On voided (superseded) content the entries
+///  that point at links are dropped: the old pass must not keep offering
+///  the retired capability on its face.
+export function featuredActionsFor(content: PassContent): Array<{ identifier: string; type: string; url: string }> | undefined {
+  const actions = content.featuredActions;
+  if (!actions || actions.length === 0) return undefined;
+  if (actions.length > MAX_FEATURED_ACTIONS) {
+    throw new Error(`Apple Wallet shows at most ${MAX_FEATURED_ACTIONS} featured actions; ${actions.length} given`);
+  }
+  const ids = new Set<string>();
+  const out: Array<{ identifier: string; type: string; url: string }> = [];
+  for (const a of actions as FeaturedAction[]) {
+    if (typeof a.id !== "string" || a.id === "") throw new Error("a featured action needs a non-empty id");
+    if (ids.has(a.id)) throw new Error(`duplicate featured action id "${a.id}"`);
+    ids.add(a.id);
+    if (typeof a.type !== "string" || a.type === "") throw new Error(`featured action "${a.id}" needs a type (for example "membershipBenefits")`);
+    let url: string;
+    if (a.link !== undefined) {
+      if (content.voided) continue;
+      const link = (content.links ?? []).find((l) => l.key === a.link);
+      if (!link) throw new Error(`featured action "${a.id}" references link "${a.link}", which the content does not carry`);
+      url = link.url;
+    } else {
+      url = a.url as string;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error(`featured action "${a.id}" url must be an absolute https URL, got "${String(url)}"`);
+    }
+    if (parsed.protocol !== "https:") throw new Error(`featured action "${a.id}" url must be https, got "${url}"`);
+    out.push({ identifier: a.id, type: a.type, url });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<string, unknown> {
   const style = content.style ?? "generic";
   if (content.footer?.length && style !== "posterGeneric") {
@@ -187,6 +229,8 @@ export function toPassJson(content: PassContent, opts: PassJsonOptions): Record<
   if (relevant) json.relevantDate = passDate(relevant);
   if (content.expiresAt) json.expirationDate = passDate(content.expiresAt);
   if (content.voided) json.voided = true;
+  const featured = featuredActionsFor(content);
+  if (featured) json.featuredActions = featured;
   if (content.locations?.length) {
     // Apple honours at most ten locations per pass.
     json.locations = content.locations.slice(0, 10).map((l) => ({
