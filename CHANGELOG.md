@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 (core) and 0.3.1 (conformance)
+
+ERC-8426 now defines format keys by function: `apple` obtains an Apple Wallet pass and `google` a Google Wallet pass. The pkpass media type and the Save to Google Wallet link shape are described as platform behavior, not requirements. The SDK follows. Other packages are unchanged; client and react pick up the core change through their `^0.3.0` range.
+
+- `@erc8426/core` 0.3.2: `parseManifest` keeps a `google` URL that is not a Save to Google Wallet link and reports a warning on `formats.google`, instead of dropping it with an error. An issuer that routes the Google URL through its own endpoint first is conformant, and the Google button no longer disappears in clients built on the SDK.
+- `@erc8426/conformance` 0.3.1: `manifest.apple-media-type` is reported at SHOULD level, so a wrong media type warns without failing conformance. `manifest.valid` no longer requires a Save link; a `google` URL of another shape shows up under `manifest.lint`.
+
 ## 0.3.1 (issuer, google, core and apple)
 
 - `@erc8426/core` 0.3.1 and `@erc8426/apple` 0.3.1 carry the Featured Action changes in this release (a closed `FeaturedActionType` union with `FEATURED_ACTION_TYPES`, the `place` shape with `placeIdentifier`, type validation by name) and the legacy pass faces' field caps; client, react and conformance are unchanged at 0.3.0, contracts at 0.2.0.
