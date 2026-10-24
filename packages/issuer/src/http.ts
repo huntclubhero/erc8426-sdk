@@ -16,7 +16,7 @@ import type { AuthorizeInput } from "./authorize.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
 import type { EntitlementResult } from "./entitlement.js";
 import type { RateLimitRule } from "./rateLimit.js";
-import { RepeatCoalescer, memoryRepeatStore, sha256Hex } from "./repeat.js";
+import { RepeatCoalescer, errorCodeOf, memoryRepeatStore, sha256Hex, type RecordedOutcome } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
 
@@ -146,12 +146,25 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // a presentation that differs from the first is a new request (or, on the
   // nonce path, a replay).
   const repeats = config.repeat ? new RepeatCoalescer(config.repeat.store ?? memoryRepeatStore({ now: x.now }), config.repeat.windowSeconds) : null;
-  async function coalesce(key: string | null, run: () => Promise<Response>): Promise<Response> {
+  async function coalesce(key: string | null, run: () => Promise<Response>, recordIf?: (outcome: RecordedOutcome) => boolean): Promise<Response> {
     if (!repeats || key === null) return run();
-    const { response, repeated } = await repeats.run(key, run);
+    const { response, repeated } = await repeats.run(key, run, recordIf);
     if (repeated) response.headers.set("X-Wallet-Pass-Repeat", "true");
     return response;
   }
+  // The bytes that make two POSTs the same request: the body and the media
+  // type it was sent as (the same text parses differently as JSON, a form or
+  // plain text).
+  const bodyHash = (request: Request, text: string) => sha256Hex(`${(request.headers.get("content-type") ?? "").toLowerCase()}\n${text}`);
+  // On the signed route an outcome is recorded only once the nonce was
+  // spent: a refusal before that point (no challenge, wrong verifier, an
+  // unknown or spent nonce) costs the issuer nothing to re-judge and would
+  // otherwise let anonymous garbage fill the repeat store.
+  const NOT_SPENT = new Set(["invalid_message", "domain_mismatch", "nonce_invalid"]);
+  const recordIfNonceSpent = (outcome: RecordedOutcome) => {
+    const code = errorCodeOf(outcome);
+    return code === undefined || !NOT_SPENT.has(code);
+  };
 
   function error(code: IssuerErrorCode, extra: Json = {}): Response {
     const status = statusForIssuerError(code);
@@ -201,7 +214,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // answer 429 rate_limited with Retry-After when it is over the limit. The
   // attempt is counted before any work, so a refused request costs the
   // issuer nothing but the count. Null when the request may proceed.
-  async function throttle(request: Request, family: "challenge" | "manifest" | "capability", pathToken: string): Promise<Response | null> {
+  async function throttle(request: Request, family: "challenge" | "manifest" | "capability" | "action" | "rotate", pathToken: string): Promise<Response | null> {
     const rule: RateLimitRule | false = config.rateLimit[family];
     const perClient = config.rateLimit.perClient;
     if (rule === false && perClient === false) return null;
@@ -337,12 +350,16 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         // Left to authorize, which spends the nonce and answers read_failed.
       }
     }
-    const key = `nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
-    return coalesce(key, async () => {
-      const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
-      if (!result.ok) return refuse(result.error, challengeUri);
-      return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
-    });
+    const key = `nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n`)}:${await bodyHash(request, text)}`;
+    return coalesce(
+      key,
+      async () => {
+        const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
+        if (!result.ok) return refuse(result.error, challengeUri);
+        return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+      },
+      recordIfNonceSpent,
+    );
   }
 
   // POST {base}/:tokenId/rotate
@@ -448,7 +465,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       }
     }
     const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
-    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await sha256Hex(text)}`;
+    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
@@ -543,10 +560,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       return (await throttle(request, "challenge", tokenId)) ?? challenge(url, tokenId);
     }
     if (segments.length === 2 && second === "rotate") {
-      return method === "POST" ? rotate(request, tokenId) : methodNotAllowed("POST, OPTIONS");
+      if (method !== "POST") return methodNotAllowed("POST, OPTIONS");
+      return (await throttle(request, "rotate", tokenId)) ?? rotate(request, tokenId);
     }
     if (segments.length === 3 && second === "actions") {
-      return method === "POST" ? signedAction(request, tokenId, third!) : methodNotAllowed("POST, OPTIONS");
+      if (method !== "POST") return methodNotAllowed("POST, OPTIONS");
+      return (await throttle(request, "action", tokenId)) ?? signedAction(request, tokenId, third!);
     }
     return error("unknown_capability");
   }

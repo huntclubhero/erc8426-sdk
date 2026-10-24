@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Hex } from "viem";
 import { encodeBase64Url } from "@erc8426/core";
-import { DEFAULT_REPEAT_WINDOW_SECONDS, kvRepeatStore, memoryKv, memoryRepeatStore, resolveConfig, type RepeatStore } from "@erc8426/issuer";
+import { DEFAULT_REPEAT_WINDOW_SECONDS, isRecordableOutcome, kvRepeatStore, memoryKv, memoryRepeatStore, resolveConfig, type RepeatStore } from "@erc8426/issuer";
 
 import { CONTRACT, TOKEN_ID, buildHarness, createClock, issuePassTo, newSigner, signChallenge, type Harness } from "./helpers.js";
 
@@ -35,7 +35,32 @@ function storeSuite(name: string, make: (now: () => number) => RepeatStore) {
 storeSuite("memoryRepeatStore", (now) => memoryRepeatStore({ now }));
 storeSuite("kvRepeatStore", (now) => kvRepeatStore(memoryKv({ now })));
 
+describe("isRecordableOutcome", () => {
+  it("refuses every 5xx and anything carrying Retry-After, whatever its status", () => {
+    const o = (status: number, headers: Record<string, string> = {}) => ({ status, headers, body: "{}" });
+    expect(isRecordableOutcome(o(200))).toBe(true);
+    expect(isRecordableOutcome(o(403))).toBe(true);
+    expect(isRecordableOutcome(o(404))).toBe(true);
+    expect(isRecordableOutcome(o(500))).toBe(false);
+    expect(isRecordableOutcome(o(503, { "Retry-After": "5" }))).toBe(false);
+    expect(isRecordableOutcome(o(429, { "retry-after": "7" }))).toBe(false);
+    expect(isRecordableOutcome(o(200, { "Retry-After": "1" }))).toBe(false);
+  });
+});
+
 describe("memoryRepeatStore", () => {
+  it("drops expired entries without scanning the whole map on every write", async () => {
+    const clock = createClock();
+    const s = memoryRepeatStore({ now: clock.now, maxEntries: 1000 });
+    for (let i = 0; i < 50; i++) await s.put(`k${i}`, { status: 200, headers: {}, body: "" }, 1);
+    clock.advance(1500);
+    expect(await s.get("k0")).toBeNull(); // expired on read
+    await s.put("fresh", { status: 200, headers: {}, body: "" }, 60);
+    // One sweep ran (more than a second since the last): the expired keys are gone.
+    for (let i = 0; i < 50; i++) expect(await s.get(`k${i}`)).toBeNull();
+    expect(await s.get("fresh")).not.toBeNull();
+  });
+
   it("is bounded, least recently used first out", async () => {
     const s = memoryRepeatStore({ maxEntries: 2 });
     const o = (n: number) => ({ status: 200, headers: {}, body: String(n) });
@@ -223,6 +248,58 @@ describe("identical repeats on POST /links/:link", () => {
     expect(h.executed).toHaveLength(1);
   });
 
+  it("never records a 5xx or an answer carrying Retry-After: a retry after Retry-After meets a fresh read", async () => {
+    const h = limited();
+    const owner = newSigner();
+    const links = await issuePassTo(h, owner);
+    const body = "{}";
+    // read_failed: 503 with Retry-After, answered before the store, never recorded.
+    h.chain.failing = true;
+    const failed = await postRaw(h, links.feed!, body);
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("retry-after")).toMatch(/^[0-9]+$/);
+    h.chain.failing = false;
+    h.clock.advance(Number(failed.headers.get("retry-after")) * 1000);
+    const retried = await postRaw(h, links.feed!, body);
+    expect(retried.status).toBe(200);
+    expect(retried.headers.get("x-wallet-pass-repeat")).toBeNull();
+    expect(h.executed).toHaveLength(1);
+    // action_failed: the integrator's action threw (500). Not recorded either: the next identical request runs again.
+    const boom = buildHarness({
+      rateLimit: false,
+      actions: {
+        feed: {
+          description: "Feed",
+          capability: true,
+          bound: "none",
+          execute: () => {
+            throw new Error("db down");
+          },
+        },
+        water: { description: "Water", capability: true, bound: "none", execute: () => null },
+        levelUp: { description: "Level up", execute: () => null },
+      },
+    });
+    const l2 = await issuePassTo(boom, newSigner());
+    expect((await postRaw(boom, l2.feed!, body)).status).toBe(500);
+    const again = await postRaw(boom, l2.feed!, body);
+    expect(again.status).toBe(500);
+    expect(again.headers.get("x-wallet-pass-repeat")).toBeNull();
+    expect(boom.errors).toHaveLength(2);
+  });
+
+  it("the same bytes under another Content-Type are another request", async () => {
+    const h = limited();
+    const links = await issuePassTo(h, newSigner());
+    const text = "params=x";
+    const a = await postRaw(h, links.feed!, text, { "Content-Type": "text/plain" });
+    const b = await postRaw(h, links.feed!, text, { "Content-Type": "application/x-www-form-urlencoded" });
+    expect(a.status).toBe(400); // text/plain is neither JSON nor a form
+    expect(b.status).toBe(200);
+    expect(b.headers.get("x-wallet-pass-repeat")).toBeNull();
+    expect(h.executed).toHaveLength(1);
+  });
+
   it("takes the fresh read once per request and answers 503 outside the store when it cannot be taken", async () => {
     const h = limited();
     const links = await issuePassTo(h, newSigner());
@@ -352,6 +429,23 @@ describe("identical repeats on POST /:tokenId/actions/:action", () => {
     expect(((await after.json()) as { error: string }).error).toBe("nonce_invalid");
     expect(h.executed).toHaveLength(1);
     expect(h.executed[0]!.account).toBe(account.address);
+  });
+
+  it("signed path: nothing is recorded until the nonce was spent, so garbage never fills the store", async () => {
+    const kv = memoryKv();
+    const h = buildHarness({ rateLimit: false, repeat: { store: kvRepeatStore(kv) } });
+    const { message, signature } = await proofFor(h);
+    // Unknown nonce, unparseable message, wrong verifier: refused, not recorded.
+    expect((await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify({ message: message.replace(/Nonce: \w+/, "Nonce: zzzzzzzzzzzz"), signature }))).status).toBe(401);
+    expect((await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify({ message: "hello", signature }))).status).toBe(400);
+    expect((await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify({ message: message.replace("issuer.example wants", "evil.example wants"), signature }))).status).toBe(400);
+    expect(kv.size()).toBe(0);
+    // A presentation that spent the nonce is recorded, success or refusal.
+    expect((await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify({ message, signature: `0x${"ab".repeat(65)}` }))).status).toBe(401);
+    expect(kv.size()).toBe(1);
+    const again = await postRaw(h, ACTION_PATH("levelUp"), JSON.stringify({ message, signature: `0x${"ab".repeat(65)}` }));
+    expect(((await again.json()) as { error: string }).error).toBe("signature_invalid");
+    expect(again.headers.get("x-wallet-pass-repeat")).toBe("true");
   });
 
   it("signed path: the fresh read is taken once per request", async () => {

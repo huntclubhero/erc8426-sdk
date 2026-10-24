@@ -40,6 +40,15 @@ export function memoryRepeatStore(options: MemoryRepeatStoreOptions = {}): Repea
   const maxEntries = options.maxEntries ?? 10_000;
   const now = options.now ?? Date.now;
   const entries = new Map<string, { outcome: RecordedOutcome; expiresAt: number }>();
+  // Expired entries are dropped on read, and swept at most once a second on
+  // write (or when the map is full), so a write stays O(1) amortized rather
+  // than a scan of the whole map.
+  let lastSweep = now();
+  const sweep = (t: number) => {
+    if (t - lastSweep < 1000 && entries.size <= maxEntries) return;
+    lastSweep = t;
+    for (const [k, e] of entries) if (t >= e.expiresAt) entries.delete(k);
+  };
   return {
     async get(key) {
       const e = entries.get(key);
@@ -55,7 +64,7 @@ export function memoryRepeatStore(options: MemoryRepeatStoreOptions = {}): Repea
     },
     async put(key, outcome, ttlSeconds) {
       const t = now();
-      for (const [k, e] of entries) if (t >= e.expiresAt) entries.delete(k);
+      sweep(t);
       entries.delete(key);
       entries.set(key, { outcome: { status: outcome.status, headers: { ...outcome.headers }, body: outcome.body }, expiresAt: t + ttlSeconds * 1000 });
       while (entries.size > maxEntries) {
@@ -114,9 +123,33 @@ export function fromOutcome(outcome: RecordedOutcome): Response {
   return new Response(outcome.body, { status: outcome.status, headers: outcome.headers });
 }
 
+/// Whether a completed outcome may be recorded for the window. A 5xx, or any
+///  answer carrying Retry-After, says the request could not be judged, not
+///  how it was judged (the reference server records no 503 either): a retry
+///  after Retry-After must meet a fresh read, not the recorded failure. The
+///  caller may narrow this further per route (the signed route records
+///  nothing until the nonce was spent).
+export function isRecordableOutcome(outcome: RecordedOutcome): boolean {
+  if (outcome.status >= 500) return false;
+  for (const name of Object.keys(outcome.headers)) if (name.toLowerCase() === "retry-after") return false;
+  return true;
+}
+
+/// The `error` member of a JSON error body, or undefined.
+export function errorCodeOf(outcome: RecordedOutcome): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(outcome.body);
+    const code = (parsed as { error?: unknown } | null)?.error;
+    return typeof code === "string" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /// Coalesce identical requests: one key, one execution. A request whose key
 ///  is in flight awaits the same promise; one whose key completed within the
-///  window gets the recorded outcome; anything else runs and is recorded.
+///  window gets the recorded outcome; anything else runs and is recorded
+///  when `isRecordableOutcome` (and the caller's `recordIf`) allow.
 export class RepeatCoalescer {
   private readonly inflight = new Map<string, Promise<RecordedOutcome>>();
   constructor(
@@ -124,19 +157,20 @@ export class RepeatCoalescer {
     private readonly windowSeconds: number,
   ) {}
 
-  async run(key: string, execute: () => Promise<Response>): Promise<{ response: Response; repeated: boolean }> {
+  async run(key: string, execute: () => Promise<Response>, recordIf?: (outcome: RecordedOutcome) => boolean): Promise<{ response: Response; repeated: boolean }> {
     const pending = this.inflight.get(key);
     if (pending) return { response: fromOutcome(await pending), repeated: true };
     const recorded = await this.store.get(key);
     if (recorded) return { response: fromOutcome(recorded), repeated: true };
     const promise = (async () => {
-      // Every completed outcome is recorded, refusals included, as the
-      // reference server does: the repeat gets THAT request's answer, so a
-      // refused presentation repeats its refusal and never turns into
-      // nonce_invalid. State that moved on (a rotation, a claim) changes
-      // the key on the capability path, so a stale answer is never served.
+      // Every judged outcome is recorded, refusals included, as the reference
+      // server does: the repeat gets THAT request's answer, so a refused
+      // presentation repeats its refusal and never turns into nonce_invalid.
+      // An outcome that is no judgment (a 5xx, a Retry-After) is not, nor
+      // one the caller excludes. State that moved on (a rotation, a claim, a
+      // transfer) changes the key, so a stale answer is never served.
       const outcome = await toOutcome(await execute());
-      await this.store.put(key, outcome, this.windowSeconds);
+      if (isRecordableOutcome(outcome) && (!recordIf || recordIf(outcome))) await this.store.put(key, outcome, this.windowSeconds);
       return outcome;
     })();
     this.inflight.set(key, promise);

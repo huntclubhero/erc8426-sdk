@@ -35,6 +35,8 @@ export {
 } from "./config.js";
 export {
   RepeatCoalescer,
+  errorCodeOf,
+  isRecordableOutcome,
   kvRepeatStore,
   memoryRepeatStore,
   sha256Hex,

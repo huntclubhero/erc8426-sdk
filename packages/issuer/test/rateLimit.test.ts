@@ -16,6 +16,7 @@ import {
 } from "@erc8426/issuer";
 
 import { CONTRACT, TOKEN_ID, buildHarness, createClock, issuePassTo, linkTokenFor, newSigner, signChallenge, type Harness } from "./helpers.js";
+import { kvRepeatStore } from "@erc8426/issuer";
 
 const CHALLENGE = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}/challenge?address=${newSigner().address}`;
 const MANIFEST = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}`;
@@ -162,6 +163,8 @@ describe("rate limiting on the HTTP surface", () => {
       challenge: { limit: 30, windowSeconds: 60 },
       manifest: { limit: 60, windowSeconds: 60 },
       capability: { limit: 60, windowSeconds: 60 },
+      action: { limit: 30, windowSeconds: 60 },
+      rotate: { limit: 10, windowSeconds: 60 },
       perClient: { limit: 120, windowSeconds: 60 },
     });
     expect(c.rateLimit.clientKey).toBe(defaultClientKey);
@@ -261,6 +264,28 @@ describe("rate limiting on the HTTP surface", () => {
     const head = await h.issuer.handler(new Request(`https://issuer.example${download}`, { method: "HEAD" }));
     expect(head.status).toBe(429);
     expect(head.headers.get("retry-after")).toMatch(/^[0-9]+$/);
+  });
+
+  it("signed action and rotate routes are limited too, and garbage presentations never fill the repeat store", async () => {
+    const repeatKv = memoryKv();
+    const h = buildHarness({ rateLimit: { action: RULE, rotate: RULE, perClient: false }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const s = newSigner();
+    const p = await signChallenge(h, s, TOKEN_ID, "levelUp");
+    const statuses: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      // A proof rewritten around a nonce the issuer never issued: refused as nonce_invalid, nothing to record.
+      const forged = { message: p.message.replace(/Nonce: \w+/, `Nonce: x${i}abcdefgh`), signature: p.signature };
+      statuses.push((await h.post(`/wallet-pass/${TOKEN_ID}/actions/levelUp`, { ...forged, junk: i })).status);
+    }
+    expect(statuses.slice(0, RULE.limit)).toEqual([401, 401, 401]);
+    expect(statuses.slice(RULE.limit).every((st) => st === 429)).toBe(true);
+    expect(repeatKv.size()).toBe(0);
+    const rotates: number[] = [];
+    for (let i = 0; i < 6; i++) rotates.push((await h.post(`/wallet-pass/${TOKEN_ID}/rotate`, { message: "m", signature: "0x00", i })).status);
+    expect(rotates.filter((st) => st === 429)).toHaveLength(3);
+    expect(repeatKv.size()).toBe(0);
+    // Another token id is its own bucket for these families too.
+    expect((await h.post(`/wallet-pass/413/actions/levelUp`, { message: "m", signature: "0x00" })).status).not.toBe(429);
   });
 
   it("a store-backed limiter enforces one limit across two issuers sharing the store", async () => {

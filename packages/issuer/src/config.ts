@@ -102,6 +102,11 @@ export interface RateLimitConfig {
   /// GET and POST /links/:link and GET /passes/:link, keyed by client and
   ///  link. Default 60 per 60 s. A POST costs a chain read and an action.
   capability?: RateLimitRule | false;
+  /// POST /:tokenId/actions/:action, keyed by client and token. Default 30
+  ///  per 60 s. Every presentation costs a parse and a signature check.
+  action?: RateLimitRule | false;
+  /// POST /:tokenId/rotate, keyed by client and token. Default 10 per 60 s.
+  rotate?: RateLimitRule | false;
   /// A second bucket per family keyed by the client ALONE, with no token in
   ///  the key, so a client cannot start a fresh bucket for every token id or
   ///  link it names and mint nonces or chain reads without bound. Default
@@ -121,6 +126,8 @@ export interface ResolvedRateLimitConfig {
   challenge: RateLimitRule | false;
   manifest: RateLimitRule | false;
   capability: RateLimitRule | false;
+  action: RateLimitRule | false;
+  rotate: RateLimitRule | false;
   perClient: RateLimitRule | false;
   clientKey: ClientKeyFn;
 }
@@ -452,10 +459,12 @@ function resolveRepeat(config: RepeatConfig | false | undefined): ResolvedRepeat
   return { windowSeconds: positiveInt("repeat.windowSeconds", c.windowSeconds, DEFAULT_REPEAT_WINDOW_SECONDS), ...(c.store ? { store: c.store } : {}) };
 }
 
-export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability" | "perClient", RateLimitRule>> = {
+export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability" | "action" | "rotate" | "perClient", RateLimitRule>> = {
   challenge: { limit: 30, windowSeconds: 60 },
   manifest: { limit: 60, windowSeconds: 60 },
   capability: { limit: 60, windowSeconds: 60 },
+  action: { limit: 30, windowSeconds: 60 },
+  rotate: { limit: 10, windowSeconds: 60 },
   perClient: { limit: 120, windowSeconds: 60 },
 };
 
@@ -468,7 +477,7 @@ function rule(name: string, value: RateLimitRule | false | undefined, fallback: 
 
 function resolveRateLimit(config: RateLimitConfig | false | undefined): ResolvedRateLimitConfig {
   if (config === false) {
-    return { limiter: unlimited, challenge: false, manifest: false, capability: false, perClient: false, clientKey: defaultClientKey };
+    return { limiter: unlimited, challenge: false, manifest: false, capability: false, action: false, rotate: false, perClient: false, clientKey: defaultClientKey };
   }
   const c = config ?? {};
   if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
@@ -478,6 +487,8 @@ function resolveRateLimit(config: RateLimitConfig | false | undefined): Resolved
     challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
     manifest: rule("manifest", c.manifest, DEFAULT_RATE_LIMITS.manifest),
     capability: rule("capability", c.capability, DEFAULT_RATE_LIMITS.capability),
+    action: rule("action", c.action, DEFAULT_RATE_LIMITS.action),
+    rotate: rule("rotate", c.rotate, DEFAULT_RATE_LIMITS.rotate),
     perClient: rule("perClient", c.perClient, DEFAULT_RATE_LIMITS.perClient),
     clientKey: c.clientKey ?? defaultClientKey,
   };
