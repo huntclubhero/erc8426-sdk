@@ -17,6 +17,7 @@ export {
   IssuerConfigError,
   MAINNET_CHAIN_IDS,
   isKnownMainnet,
+  normalizeOrigin,
   resolveConfig,
   resolveEnvironment,
   type IssuerEnvironment,

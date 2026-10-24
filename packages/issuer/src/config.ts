@@ -271,6 +271,19 @@ export interface ResolvedIssuerConfig {
   repeat: ResolvedRepeatConfig | false;
 }
 
+/// An origin in its canonical serialization (lowercase scheme and host, no
+///  default port, no path), or null for anything that is not an origin.
+export function normalizeOrigin(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.origin === "null" || url.pathname !== "/" || url.search !== "" || url.hash !== "" || url.username !== "" || url.password !== "") return null;
+  return url.origin;
+}
+
 /// Thrown by `createIssuer` for a configuration the spec does not allow or
 ///  that cannot work. The message names the field and the rule.
 export class IssuerConfigError extends Error {
@@ -416,13 +429,22 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
       throw new IssuerConfigError('cors.origins must be "*" or an array of origins');
     }
     if (Array.isArray(cors.origins)) {
+      // Normalized once here (lowercase scheme and host, default port
+      // dropped), and the request's Origin is normalized the same way before
+      // the comparison, so "HTTPS://App.Example:443" and "https://app.example"
+      // are one origin.
+      const normalized: string[] = [];
       for (const o of cors.origins) {
-        if (typeof o !== "string" || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
+        const n = typeof o === "string" ? normalizeOrigin(o) : null;
+        if (n === null || !/^[a-z][a-z0-9+.-]*:\/\/[^/]+$/i.test(o)) {
           throw new IssuerConfigError(`cors.origins entries must be origins (scheme://host[:port]) with no path, got "${String(o)}"`);
         }
+        if (!normalized.includes(n)) normalized.push(n);
       }
+      cors = { origins: normalized, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
+    } else {
+      cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
     }
-    cors = { origins: cors.origins, maxAgeSeconds: cors.maxAgeSeconds ?? 600 };
   }
 
   return {

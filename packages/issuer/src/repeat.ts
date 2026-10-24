@@ -77,8 +77,10 @@ export function memoryRepeatStore(options: MemoryRepeatStoreOptions = {}): Repea
 }
 
 export interface KvRepeatStoreOptions {
-  /// Key prefix. Default "erc8426:repeat:". Give it the collection's scope
-  ///  (`${kvKeyNamespace(scope)}repeat:`) when one KV serves several.
+  /// Key prefix. Default "erc8426:repeat:". The issuer already starts every
+  ///  repeat key with its chain id and contract, so one store on one KV
+  ///  serves several collections without a prefix of their own; set one to
+  ///  separate environments.
   prefix?: string;
 }
 

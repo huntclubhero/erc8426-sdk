@@ -288,6 +288,28 @@ describe("rate limiting on the HTTP surface", () => {
     expect((await h.post(`/wallet-pass/413/actions/levelUp`, { message: "m", signature: "0x00" })).status).not.toBe(429);
   });
 
+  it("two collections sharing one kvRateLimiter and one kvRepeatStore with default prefixes never share a bucket or a row", async () => {
+    const clock = createClock();
+    const kv = memoryKv({ now: clock.now });
+    const limiter = kvRateLimiter(kv);
+    const repeatKv = memoryKv({ now: clock.now });
+    const other = newSigner().address;
+    const a = buildHarness({ now: clock.now, rateLimit: { challenge: RULE, perClient: false, limiter }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const b = buildHarness({ now: clock.now, contract: other, rateLimit: { challenge: RULE, perClient: false, limiter }, repeat: { store: kvRepeatStore(repeatKv) } });
+    const addr = newSigner().address;
+    for (let i = 0; i < RULE.limit; i++) expect((await a.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(200);
+    expect((await a.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(429);
+    // Same client, same token id, another collection: its own bucket.
+    expect((await b.get(`/wallet-pass/1/challenge?address=${addr}`)).status).toBe(200);
+    // Repeat rows carry the collection too.
+    const ownerA = newSigner();
+    const linksA = await issuePassTo(a, ownerA);
+    expect((await a.post(linksA.feed!, {})).status).toBe(200);
+    expect(repeatKv.size()).toBe(1);
+    expect(a.executed).toHaveLength(1);
+    expect(b.executed).toHaveLength(0);
+  });
+
   it("a store-backed limiter enforces one limit across two issuers sharing the store", async () => {
     const clock = createClock();
     const kv = memoryKv({ now: clock.now });
@@ -327,11 +349,13 @@ describe("rate limiting on the HTTP surface", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("42");
     // The per-client bucket is consulted first; a refusal there costs one hit.
-    expect(seen).toEqual(["challenge:client:abc"]);
+    // Every key starts with the collection the issuer serves.
+    const scope = `1:${CONTRACT.toLowerCase()}`;
+    expect(seen).toEqual([`${scope}:challenge:client:abc`]);
     seen.length = 0;
     const tokenOnly = buildHarness({ rateLimit: { limiter, perClient: false, clientKey: (r) => r.headers.get("x-api-key") } });
     expect((await tokenOnly.get(CHALLENGE(), { "x-api-key": "abc" })).status).toBe(429);
-    expect(seen).toEqual([`challenge:abc:${TOKEN_ID}`]);
+    expect(seen).toEqual([`${scope}:challenge:abc:${TOKEN_ID}`]);
   });
 
   it("a client cannot spread its attempts across made-up addresses: the default key is the socket address alone", async () => {

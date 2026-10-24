@@ -13,7 +13,7 @@ import {
 
 import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
 import type { AuthorizeInput } from "./authorize.js";
-import type { ActionDefinition, LinkPageContext } from "./config.js";
+import { normalizeOrigin, type ActionDefinition, type LinkPageContext } from "./config.js";
 import type { EntitlementResult } from "./entitlement.js";
 import type { RateLimitRule } from "./rateLimit.js";
 import { RepeatCoalescer, errorCodeOf, memoryRepeatStore, sha256Hex, type RecordedOutcome } from "./repeat.js";
@@ -145,6 +145,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // covers the link or nonce and a hash of every byte that matters, so only
   // a presentation that differs from the first is a new request (or, on the
   // nonce path, a replay).
+  // Every rate-limit and repeat key starts with the collection the issuer
+  // serves, so two issuers sharing one kvRateLimiter or kvRepeatStore (and
+  // their default prefixes) never read or count each other's rows.
+  const scope = `${config.chainId}:${config.contract.toLowerCase()}`;
   const repeats = config.repeat ? new RepeatCoalescer(config.repeat.store ?? memoryRepeatStore({ now: x.now }), config.repeat.windowSeconds) : null;
   async function coalesce(key: string | null, run: () => Promise<Response>, recordIf?: (outcome: RecordedOutcome) => boolean): Promise<Response> {
     if (!repeats || key === null) return run();
@@ -186,9 +190,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const origin = request.headers.get("Origin");
     let allow: string;
     if (cors.origins === "*") allow = "*";
-    else if (origin && cors.origins.includes(origin)) allow = origin;
-    else return {};
-    const h: Record<string, string> = { "Access-Control-Allow-Origin": allow, "Access-Control-Expose-Headers": "Retry-After" };
+    else {
+      const normalized = origin ? normalizeOrigin(origin) : null;
+      if (normalized !== null && cors.origins.includes(normalized)) allow = origin!;
+      else return {};
+    }
+    const h: Record<string, string> = { "Access-Control-Allow-Origin": allow, "Access-Control-Expose-Headers": "Retry-After, X-Wallet-Pass-Repeat" };
     if (allow !== "*") h["Vary"] = "Origin";
     return h;
   }
@@ -224,8 +231,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // not start a fresh bucket) and the client with the path token (so one
     // token hammered from one place is bounded tighter still). The client
     // bucket is checked first, so a client past it costs one counter write.
-    const perClientDecision = perClient === false ? null : await config.rateLimit.limiter.hit(`${family}:client:${client}`, perClient, now);
-    const decision = perClientDecision && !perClientDecision.allowed ? perClientDecision : rule === false ? null : await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, now);
+    const perClientDecision = perClient === false ? null : await config.rateLimit.limiter.hit(`${scope}:${family}:client:${client}`, perClient, now);
+    const decision =
+      perClientDecision && !perClientDecision.allowed ? perClientDecision : rule === false ? null : await config.rateLimit.limiter.hit(`${scope}:${family}:${client}:${pathToken}`, rule, now);
     if (!decision || decision.allowed) return null;
     return json(429, { error: "rate_limited", message: `too many ${family} requests; retry after ${decision.retryAfterSeconds} s` }, { "Retry-After": String(decision.retryAfterSeconds) });
   }
@@ -350,7 +358,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         // Left to authorize, which spends the nonce and answers read_failed.
       }
     }
-    const key = `nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n`)}:${await bodyHash(request, text)}`;
+    const key = `${scope}:nonce:${tokenId}:${action}:${nonce}:${readKey}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n`)}:${await bodyHash(request, text)}`;
     return coalesce(
       key,
       async () => {
@@ -465,7 +473,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       }
     }
     const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
-    const key = `link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
+    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });

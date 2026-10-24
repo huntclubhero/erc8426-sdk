@@ -20,7 +20,7 @@ import {
 import { authorize as runFloor, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
 import { LinkKeyring, ephemeralLinkSecret, isLinkTokenShape, linkDigest, newLinkSeed, newSerial } from "./capability.js";
 import { publicClientChainReader, type ChainReader, type ReadBlockTag, type ReadContractClient } from "./chain.js";
-import { IssuerConfigError, isKnownMainnet, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
+import { IssuerConfigError, isKnownMainnet, resolveConfig, resolveEnvironment, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
 import { checkEntitlement, ownerOnly, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
 import { IssuerError } from "./errors.js";
 import { createRouter } from "./http.js";
@@ -192,11 +192,15 @@ export interface IssuerInternals {
 
 type RotationReason = "transfer" | "claim" | "owner_request";
 
-/// True under NODE_ENV=production. Guarded so the issuer still runs where
-///  there is no `process` (Workers, Deno without Node compatibility). The
-///  `environment` option, when set, overrides this; see resolveEnvironment.
+/// True under NODE_ENV=production and nothing else. Guarded so the issuer
+///  still runs where there is no `process` (Workers, Deno without Node
+///  compatibility).
+/// @deprecated NODE_ENV is only the fallback; the issuer's own answer is
+///  `issuer.config.environment` (the explicit `environment` option, else
+///  NODE_ENV, else "unknown"), or `resolveEnvironment(explicit)` before an
+///  issuer exists. Nothing in the issuer reads this function any more.
 export function isProductionEnv(): boolean {
-  return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
+  return resolveEnvironment(undefined) === "production";
 }
 
 /// Fill in any store the options leave out with the in-memory one, refusing
@@ -231,6 +235,13 @@ function resolveStores(options: CreateIssuerOptions, config: ResolvedIssuerConfi
   if (config.environment === "unknown" && isKnownMainnet(config.chainId)) {
     warn(
       `[erc8426/issuer] production mode is undetermined: chain ${config.chainId} is a mainnet but neither the environment option nor NODE_ENV is set, so the production guards (the in-memory store refusal) cannot tell this is real. Set environment: "production" (or "development") in createIssuer.`,
+    );
+  } else if (options.environment === "development" && isKnownMainnet(config.chainId)) {
+    // The explicit option only: a NODE_ENV-derived development (a test
+    // runner against a mainnet fork) is covered by the undetermined case
+    // above when NODE_ENV is unset, and is not worth a warning when set.
+    warn(
+      `[erc8426/issuer] environment is "development" but chain ${config.chainId} is a mainnet: the production guards (the in-memory store refusal, the linkSecret requirement) are off for an issuer that serves real tokens. If this is the real deployment, set environment: "production".`,
     );
   }
   const given = options.stores ?? {};

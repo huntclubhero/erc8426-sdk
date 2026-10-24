@@ -204,14 +204,32 @@ describe("stores at startup", () => {
       expect(messages).toEqual([]);
     });
 
-    it("explicit development allows the fallback even under NODE_ENV=production, with the one fallback warning", () => {
+    it("explicit development allows the fallback even under NODE_ENV=production, with the fallback warning (and, on a mainnet, a warning that the guards are off)", () => {
       process.env.NODE_ENV = "production";
       expect(isProductionEnv()).toBe(true);
       const messages: string[] = [];
+      // base is chain 1, a mainnet.
       expect(() => createIssuer({ ...minimal(), environment: "development", onWarning: (m) => messages.push(m) })).not.toThrow();
-      expect(messages).toHaveLength(1);
-      expect(messages[0]).toMatch(/in-memory/);
-      expect(messages[0]).not.toMatch(/undetermined/);
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toMatch(/environment is "development" but chain 1 is a mainnet/);
+      expect(messages[1]).toMatch(/in-memory/);
+      expect(messages.join(" ")).not.toMatch(/undetermined/);
+      // On a test chain, only the fallback warning.
+      const quiet: string[] = [];
+      createIssuer({ ...minimal(), chainId: 31337, environment: "development", onWarning: (m) => quiet.push(m) });
+      expect(quiet).toHaveLength(1);
+      expect(quiet[0]).toMatch(/in-memory/);
+    });
+
+    it("isProductionEnv is the NODE_ENV fallback only (deprecated): the issuer answers through config.environment", () => {
+      process.env.NODE_ENV = "production";
+      expect(isProductionEnv()).toBe(true);
+      const dev = createIssuer({ ...minimal(), environment: "development", onWarning: () => undefined });
+      expect(dev.config.environment).toBe("development");
+      delete process.env.NODE_ENV;
+      expect(isProductionEnv()).toBe(false);
+      const prod = createIssuer({ ...minimal(), environment: "production", stores: memoryStores() });
+      expect(prod.config.environment).toBe("production");
     });
 
     it("warns once that production mode is undetermined when neither is set and the chain is a known mainnet, even with full stores", () => {
@@ -235,8 +253,12 @@ describe("stores at startup", () => {
       createIssuer({ ...minimal(), chainId: 31337, stores: memoryStores(), onWarning: (m) => messages.push(m) });
       createIssuer({ ...minimal(), chainId: 11155111, stores: memoryStores(), onWarning: (m) => messages.push(m) });
       expect(messages).toEqual([]);
+      // Explicit development on a mainnet is not undetermined, but it is worth one warning of its own.
       createIssuer({ ...minimal(), chainId: 1, environment: "development", stores: memoryStores(), onWarning: (m) => messages.push(m) });
-      expect(messages).toEqual([]);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatch(/environment is "development" but chain 1 is a mainnet/);
+      expect(messages[0]).not.toMatch(/undetermined/);
+      messages = [];
       process.env.NODE_ENV = "test";
       messages = [];
       createIssuer({ ...minimal(), chainId: 1, stores: memoryStores(), onWarning: (m) => messages.push(m) });

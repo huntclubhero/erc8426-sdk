@@ -81,9 +81,10 @@ export function memoryRateLimiter(options: MemoryRateLimiterOptions = {}): RateL
 }
 
 export interface KvRateLimiterOptions {
-  /// Key prefix. Default "erc8426:rl:". Give the limiter the same
-  ///  chain-and-contract scope as `kvStores` if one KV serves several
-  ///  collections (for example `${kvKeyNamespace(scope)}rl:`).
+  /// Key prefix. Default "erc8426:rl:". The issuer already starts every key
+  ///  it counts with its chain id and contract, so one limiter on one KV
+  ///  serves several collections without a prefix of their own; set one to
+  ///  separate environments.
   prefix?: string;
 }
 

@@ -122,7 +122,7 @@ Until 0.4.0 the client and `isWalletPassErrorCode` also accept the 0.2.x names `
 
 ## CORS
 
-Off unless configured. With no `cors` the issuer sends no `Access-Control` headers, so a page on another origin cannot read the manifest, a challenge or a refusal, which is right when the only browser caller is your own site. A browser-based marketplace or wallet on another origin needs `cors: { origins: ["https://market.example"] }` (echoed per request, with `Vary: Origin`) or an explicit `cors: { origins: "*" }`. The preflight admits the two proof headers. Until 0.2.x a wildcard was the silent default.
+Off unless configured. With no `cors` the issuer sends no `Access-Control` headers, so a page on another origin cannot read the manifest, a challenge or a refusal, which is right when the only browser caller is your own site. A browser-based marketplace or wallet on another origin needs `cors: { origins: ["https://market.example"] }` (compared after normalization, so case and a default port do not matter; echoed per request, with `Vary: Origin`; `Retry-After` and `X-Wallet-Pass-Repeat` are exposed) or an explicit `cors: { origins: "*" }`. The preflight admits the two proof headers. Until 0.2.x a wildcard was the silent default.
 
 ## Security model
 

@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import express from "express";
-import { expressMiddleware, toNodeHandler } from "@erc8426/issuer";
+import { expressMiddleware, normalizeOrigin, toNodeHandler } from "@erc8426/issuer";
 
 import { TOKEN_ID, buildHarness, newSigner, proof, signChallenge, type Harness } from "./helpers.js";
 
@@ -60,12 +60,30 @@ describe("CORS", () => {
     expect(other.headers.get("access-control-allow-origin")).toBeNull();
     // Never a wildcard from a list, and nothing without an Origin header.
     expect(ok.headers.get("access-control-allow-origin")).not.toBe("*");
+    // A browser may read the repeat marker and Retry-After.
+    expect(ok.headers.get("access-control-expose-headers")).toContain("X-Wallet-Pass-Repeat");
+    expect(ok.headers.get("access-control-expose-headers")).toContain("Retry-After");
     expect((await h.get(MANIFEST)).headers.get("access-control-allow-origin")).toBeNull();
     const preflight = await h.issuer.handler(
       new Request(`https://issuer.example${MANIFEST}`, { method: "OPTIONS", headers: { Origin: "https://evil.example", "Access-Control-Request-Method": "GET" } }),
     );
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("compares origins after normalization: case, default port and trailing form do not split an origin", async () => {
+    const h = buildHarness({ cors: { origins: ["HTTPS://App.Example:443", "http://Dev.Local:8080"] } });
+    expect(h.issuer.config.cors && h.issuer.config.cors.origins).toEqual(["https://app.example", "http://dev.local:8080"]);
+    for (const origin of ["https://app.example", "https://APP.example", "https://app.example:443", "http://dev.local:8080", "HTTP://DEV.LOCAL:8080"]) {
+      const res = await h.get(MANIFEST, { Origin: origin });
+      expect(res.headers.get("access-control-allow-origin"), origin).toBe(origin);
+    }
+    for (const origin of ["https://app.example:8443", "http://app.example", "https://dev.local:8080", "null", "not an origin"]) {
+      expect((await h.get(MANIFEST, { Origin: origin })).headers.get("access-control-allow-origin"), origin).toBeNull();
+    }
+    expect(normalizeOrigin("https://App.Example:443")).toBe("https://app.example");
+    expect(normalizeOrigin("https://app.example/path")).toBeNull();
+    expect(normalizeOrigin("app.example")).toBeNull();
   });
 
   it("can be switched off", async () => {
