@@ -313,6 +313,9 @@ function fakeGoogle() {
       }
       const merged = { ...existing, ...body };
       resources.set(path, merged);
+      // A PATCH that carries `messages` replaces the list; record each entry
+      // the way addMessage calls are recorded, so tests read one log.
+      if (Array.isArray(body.messages)) for (const m of body.messages) messages.push({ path: `${path}/messages`, body: { message: m } });
       return Response.json(merged);
     }
     return new Response(null, { status: 405 });
@@ -419,8 +422,9 @@ describe("googleFormatProvider", () => {
     const old = g.resources.get(`genericObject/${oldId}`)!;
     expect(old.state).toBe("EXPIRED");
     expect(old.linksModuleData).toEqual({ uris: [] });
-    expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${oldId}/addMessage`]);
+    expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${oldId}/messages`]);
     expect(g.messages[0]!.body.message).toMatchObject({ header: "Transferred" });
+    expect((old.messages as unknown[]).length).toBe(1);
     expect(g.resources.get(`genericObject/${newId}`)!.state).toBe("ACTIVE");
   });
 
@@ -438,7 +442,7 @@ describe("googleFormatProvider", () => {
     const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
     const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
     await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
-    expect(g.messages.at(-1)!.path).toBe(`genericObject/${id}/addMessage`);
+    expect(g.messages.at(-1)!.path).toBe(`genericObject/${id}/messages`);
     expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Last chance", body: "Your pass lapses in 2h.", messageType: "TEXT_AND_NOTIFY" });
   });
 
@@ -494,7 +498,7 @@ describe("googleFormatProvider", () => {
     expect(obj.state).toBe("EXPIRED");
     expect(obj.linksModuleData).toEqual({ uris: [] });
     expect(JSON.stringify(obj)).not.toContain("https://issuer.example/a?x=1");
-    expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${id}/addMessage`]);
+    expect(g.messages.map((m) => m.path)).toEqual([`genericObject/${id}/messages`]);
     expect(g.messages[0]!.body.message.body).toMatch(/^A newer pass replaced this one/);
 
     // Idempotent: a repeat notify sends no second message.
@@ -569,6 +573,50 @@ describe("googleFormatProvider", () => {
     expect(plain.g.resources.get(`genericClass/${ISSUER}.collection_v1`)!.viewUnlockRequirement).toBeUndefined();
     await plain.p.rotate("s3r1al");
     expect(plain.g.calls.find((c) => c.method === "PATCH" && c.body?.state === "EXPIRED")!.body).toEqual({ state: "EXPIRED", linksModuleData: { uris: [] } });
+  });
+
+  it("replaces the message list on every update instead of appending, clears it when messageFor returns null, and gives messages a display end", async () => {
+    let current: { header: string; body: string; notify?: boolean } | null = { header: "Hungry", body: "Feed your pet", notify: true };
+    const { g, p } = setup({ messageFor: () => current, messageTtlSeconds: 3600 });
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    const key = `genericObject/${id}`;
+    // Three updates with a reminder each: the card holds ONE message, the latest.
+    for (const header of ["Hungry", "Thirsty", "Bored"]) {
+      current = { header, body: `${header} now`, notify: true };
+      await p.notifyUpdate!(ctx(OWNER_A, content({ primary: [{ key: "bal", label: "BALANCE", value: header }] })));
+    }
+    const list = g.resources.get(key)!.messages as Array<Record<string, any>>;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ header: "Bored", messageType: "TEXT_AND_NOTIFY" });
+    expect(new Date(list[0]!.displayInterval.end.date).getTime() - Date.now()).toBeGreaterThan(3500_000);
+    expect(new Date(list[0]!.displayInterval.end.date).getTime() - Date.now()).toBeLessThanOrEqual(3600_000);
+    // The action landed: messageFor says nothing, the reminder is cleared.
+    current = null;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ primary: [{ key: "bal", label: "BALANCE", value: "fed" }] })));
+    expect(g.resources.get(key)!.messages).toEqual([]);
+    // No addMessage call was ever made.
+    expect(g.calls.some((c) => c.path.endsWith("/addMessage"))).toBe(false);
+    // Superseding replaces any reminder with the notice and nothing else.
+    current = { header: "Hungry", body: "Feed your pet" };
+    await p.notifyUpdate!(ctx(OWNER_A));
+    expect((g.resources.get(key)!.messages as unknown[]).length).toBe(1);
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    const afterSupersede = g.resources.get(key)!.messages as Array<Record<string, any>>;
+    expect(afterSupersede).toHaveLength(1);
+    expect(afterSupersede[0]).toMatchObject({ header: "Links reset" });
+    expect(afterSupersede[0]!.displayInterval).toBeUndefined();
+    // A further update on the superseded object sets no reminder.
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    expect((g.resources.get(key)!.messages as Array<Record<string, any>>)[0]).toMatchObject({ header: "Links reset" });
+  });
+
+  it("without messageFor, notifyUpdate leaves the message list alone", async () => {
+    const { g, p } = setup();
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ primary: [{ key: "bal", label: "BALANCE", value: "13" }] })));
+    expect(g.resources.get(`genericObject/${id}`)!.messages).toBeUndefined();
   });
 
   it("falls back to a fat link when the REST upsert fails, and reports it", async () => {

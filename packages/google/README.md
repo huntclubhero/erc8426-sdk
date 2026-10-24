@@ -34,7 +34,7 @@ export const google = googleFormatProvider({
 });
 ```
 
-When the issuer resolves a manifest it calls `google.acquisitionUrl({ token, owner, content })` and puts the result under `formats.google`. The object is upserted through the REST API and the returned link references it by id, so the link is short and constant in size, expires after an hour by default, and is minted fresh on every manifest resolution (the spec allows acquisition URLs to be short-lived). `google.notifyUpdate(...)` patches the object; Google pushes object changes to every device that saved it, and `messageFor` can attach a message. A message is card-only text unless it sets `notify: true` (Google `TEXT_AND_NOTIFY`), which is what raises an Android notification; use it for anything the holder must act on, and expect Google's per-object daily cap on notifying messages (three at the time of writing).
+When the issuer resolves a manifest it calls `google.acquisitionUrl({ token, owner, content })` and puts the result under `formats.google`. The object is upserted through the REST API and the returned link references it by id, so the link is short and constant in size, expires after an hour by default, and is minted fresh on every manifest resolution (the spec allows acquisition URLs to be short-lived). `google.notifyUpdate(...)` patches the object; Google pushes object changes to every device that saved it, and `messageFor` sets the card's one message (the list is replaced on every update and cleared when `messageFor` returns null, with a display end of `messageTtlSeconds`, default a day). A message is card-only text unless it sets `notify: true` (Google `TEXT_AND_NOTIFY`), which is what raises an Android notification; use it for anything the holder must act on, and expect Google's per-object daily cap on notifying messages (three at the time of writing).
 
 ## Transfers
 
@@ -80,7 +80,7 @@ Google fetches the callback URL as Googlebot, so your `robots.txt` must allow Go
 
 ## Building blocks
 
-- `googleWalletClient({ serviceAccount, issuerId, fetch?, timeoutMs? })`: JWT bearer token exchange, cached until a minute before expiry, one shared exchange for concurrent callers, dropped at once on a 401. `get` (null on 404), `insert`, `patch`, `upsert` (insert on 404, patch when present or on a 409 race), `addMessage`, `saveUrl`.
+- `googleWalletClient({ serviceAccount, issuerId, fetch?, timeoutMs? })`: JWT bearer token exchange, cached until a minute before expiry, one shared exchange for concurrent callers, dropped at once on a 401. `get` (null on 404), `insert`, `patch`, `upsert` (insert on 404, patch when present or on a 409 race), `setMessages` (replace the list, optional display end), `addMessage` (append; Google keeps ten, unordered), `saveUrl`.
 - `toGoogleObject(content, { issuerId, classSuffix, objectSuffix? })`: `generic` to `genericObject` (card title, header, subheader, logo, hero, color), `eventTicket` to `eventTicketObject`, `storeCard` to `loyaltyObject` (points from the first two primary fields), `coupon` to `offerObject`. Remaining fields become text modules (Google shows at most ten) and links become the links module, the only tappable surface on a Google pass.
 - `toGoogleClass(content, options)`: the matching class, with `overrides` for fields PassContent does not carry.
 - `createSaveUrl({ serviceAccount, origins, objectIds | objects, classes?, ttlSeconds? })`: returns a link beginning `https://pay.google.com/gp/v/save/`. Prefer `objectIds`; embedded objects make long links that fail on Android past roughly 1800 characters.
