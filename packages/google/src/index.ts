@@ -8,6 +8,8 @@ export {
   classIdFor,
   objectIdFor,
   assertPublicImageUrl,
+  passConstraintsFor,
+  viewUnlockRequirementFor,
   GoogleImageError,
   MAX_TEXT_MODULES,
 } from "./objects.js";
@@ -21,6 +23,7 @@ export type {
   GoogleClass,
   MappingOptions,
   ClassOptions,
+  GoogleViewOptions,
 } from "./objects.js";
 export { createSaveUrl, saveOrigins, importServiceAccountKey, SAVE_URL_SOFT_LIMIT } from "./save.js";
 export type { SaveUrlOptions, ServiceAccount, ObjectReference } from "./save.js";

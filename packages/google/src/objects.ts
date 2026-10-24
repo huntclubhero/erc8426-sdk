@@ -86,9 +86,55 @@ export function assertPublicImageUrl(source: ImageSource | undefined, slot: stri
   return url.toString();
 }
 
+/// Android view constraints. Apple Wallet has no equivalent. They narrow
+///  how a saved pass can be shown or copied on the device, which narrows the
+///  on-screen exposure of the capability links the pass carries; they do not
+///  replace the documented bound and rotation (Security Considerations), and
+///  Google applies them only on Wallet versions that support them.
+export interface GoogleViewOptions {
+  /// "refuse" sets `passConstraints.screenshotEligibility: INELIGIBLE`, so
+  ///  current Wallet versions refuse a screenshot of the pass (older ones
+  ///  may still allow it). "allow" emits ELIGIBLE explicitly. Left out, the
+  ///  field is omitted (Google's default is ELIGIBLE).
+  screenshots?: "allow" | "refuse";
+  /// Class field `viewUnlockRequirement`: true requires the device to be
+  ///  unlocked each time the pass is viewed (UNLOCK_REQUIRED_TO_VIEW), false
+  ///  emits UNLOCK_NOT_REQUIRED explicitly, left out omits the field.
+  unlockToView?: boolean;
+  /// `passConstraints.nfcConstraint`: "payment" blocks BLOCK_PAYMENT,
+  ///  "closedLoopTransit" blocks BLOCK_CLOSED_LOOP_TRANSIT.
+  nfcBlock?: Array<"payment" | "closedLoopTransit">;
+}
+
+const NFC_CONSTRAINTS: Record<NonNullable<GoogleViewOptions["nfcBlock"]>[number], string> = {
+  payment: "BLOCK_PAYMENT",
+  closedLoopTransit: "BLOCK_CLOSED_LOOP_TRANSIT",
+};
+
+/// The object's `passConstraints`, or undefined when nothing was asked for.
+export function passConstraintsFor(view: GoogleViewOptions | undefined): Record<string, unknown> | undefined {
+  if (!view) return undefined;
+  const out: Record<string, unknown> = {};
+  if (view.screenshots === "refuse") out.screenshotEligibility = "INELIGIBLE";
+  else if (view.screenshots === "allow") out.screenshotEligibility = "ELIGIBLE";
+  if (view.nfcBlock && view.nfcBlock.length > 0) {
+    const seen = new Set<string>();
+    out.nfcConstraint = view.nfcBlock.map((k) => NFC_CONSTRAINTS[k]).filter((v) => (seen.has(v) ? false : (seen.add(v), true)));
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/// The class's `viewUnlockRequirement`, or undefined when not asked for.
+export function viewUnlockRequirementFor(view: GoogleViewOptions | undefined): "UNLOCK_REQUIRED_TO_VIEW" | "UNLOCK_NOT_REQUIRED" | undefined {
+  if (!view || view.unlockToView === undefined) return undefined;
+  return view.unlockToView ? "UNLOCK_REQUIRED_TO_VIEW" : "UNLOCK_NOT_REQUIRED";
+}
+
 export interface MappingOptions {
   issuerId: string;
   classSuffix: string;
+  /// Android view constraints, emitted on every object (and the class).
+  view?: GoogleViewOptions;
   /// Defaults to a suffix derived from the serial.
   objectSuffix?: string;
   /// BCP 47 language of every localized string. Defaults to "en-US".
@@ -223,10 +269,14 @@ export function toGoogleObject(content: PassContent, opts: MappingOptions): Goog
   if (content.locations?.length) {
     resource.locations = content.locations.slice(0, 10).map((l) => ({ latitude: l.latitude, longitude: l.longitude }));
   }
+  // On every object, superseded ones included, so a rotated card keeps the
+  // same constraints as the live one.
+  const constraints = passConstraintsFor(opts.view);
+  if (constraints) resource.passConstraints = constraints;
   return { vertical, resource };
 }
 
-export interface ClassOptions extends Pick<MappingOptions, "issuerId" | "classSuffix" | "language" | "unhostedImages"> {
+export interface ClassOptions extends Pick<MappingOptions, "issuerId" | "classSuffix" | "language" | "unhostedImages" | "view"> {
   /// Merged over the generated class, for fields PassContent does not carry
   ///  (callbackOptions, classTemplateInfo, a venue address, and so on).
   overrides?: Record<string, unknown>;
@@ -249,6 +299,8 @@ export function toGoogleClass(content: PassContent, opts: ClassOptions): GoogleC
     // another account.
     multipleDevicesAndHoldersAllowedStatus: "ONE_USER_ALL_DEVICES",
   };
+  const unlock = viewUnlockRequirementFor(opts.view);
+  if (unlock) resource.viewUnlockRequirement = unlock;
   if (vertical !== "generic") {
     resource.issuerName = content.organizationName;
     resource.reviewStatus = "UNDER_REVIEW";

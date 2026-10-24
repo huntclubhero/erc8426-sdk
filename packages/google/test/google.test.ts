@@ -143,6 +143,35 @@ describe("object mapping", () => {
     expect(o.resource.validTimeInterval).toEqual({ end: { date: "2029-12-31T00:00:00.000Z" } });
   });
 
+  it("emits no view constraints unless asked", () => {
+    const { resource } = toGoogleObject(content(), opts);
+    expect(resource.passConstraints).toBeUndefined();
+    expect(toGoogleClass(content(), opts).resource.viewUnlockRequirement).toBeUndefined();
+    expect(toGoogleObject(content(), { ...opts, view: {} }).resource.passConstraints).toBeUndefined();
+    expect(toGoogleClass(content(), { ...opts, view: {} }).resource.viewUnlockRequirement).toBeUndefined();
+    expect(toGoogleObject(content(), { ...opts, view: { nfcBlock: [] } }).resource.passConstraints).toBeUndefined();
+  });
+
+  it("maps each view option to Google's exact enum", () => {
+    expect(toGoogleObject(content(), { ...opts, view: { screenshots: "refuse" } }).resource.passConstraints).toEqual({ screenshotEligibility: "INELIGIBLE" });
+    expect(toGoogleObject(content(), { ...opts, view: { screenshots: "allow" } }).resource.passConstraints).toEqual({ screenshotEligibility: "ELIGIBLE" });
+    expect(toGoogleObject(content(), { ...opts, view: { nfcBlock: ["payment"] } }).resource.passConstraints).toEqual({ nfcConstraint: ["BLOCK_PAYMENT"] });
+    expect(toGoogleObject(content(), { ...opts, view: { nfcBlock: ["closedLoopTransit", "payment", "payment"] } }).resource.passConstraints).toEqual({
+      nfcConstraint: ["BLOCK_CLOSED_LOOP_TRANSIT", "BLOCK_PAYMENT"],
+    });
+    expect(toGoogleObject(content(), { ...opts, view: { screenshots: "refuse", nfcBlock: ["payment"] } }).resource.passConstraints).toEqual({
+      screenshotEligibility: "INELIGIBLE",
+      nfcConstraint: ["BLOCK_PAYMENT"],
+    });
+    // unlockToView is a class field, not an object field.
+    expect(toGoogleObject(content(), { ...opts, view: { unlockToView: true } }).resource.passConstraints).toBeUndefined();
+    expect(toGoogleClass(content(), { ...opts, view: { unlockToView: true } }).resource.viewUnlockRequirement).toBe("UNLOCK_REQUIRED_TO_VIEW");
+    expect(toGoogleClass(content(), { ...opts, view: { unlockToView: false } }).resource.viewUnlockRequirement).toBe("UNLOCK_NOT_REQUIRED");
+    expect(toGoogleClass(content({ style: "storeCard" }), { ...opts, view: { unlockToView: true } }).resource.viewUnlockRequirement).toBe("UNLOCK_REQUIRED_TO_VIEW");
+    // The one-holder rule stays alongside.
+    expect(toGoogleClass(content(), { ...opts, view: { unlockToView: true } }).resource.multipleDevicesAndHoldersAllowedStatus).toBe("ONE_USER_ALL_DEVICES");
+  });
+
   it("caps text modules at Google's limit", () => {
     const back = Array.from({ length: 20 }, (_, i) => ({ key: `b${i}`, label: `B${i}`, value: i }));
     const o = toGoogleObject(content({ back }), opts);
@@ -507,6 +536,39 @@ describe("googleFormatProvider", () => {
     expect(obj.linksModuleData).toEqual({ uris: [] });
     expect(obj.textModulesData).toEqual([]);
     expect(obj.state).toBe("ACTIVE");
+  });
+
+  it("view constraints ride on every object and the class, and survive supersede, transfer and rotate", async () => {
+    const view = { screenshots: "refuse" as const, unlockToView: true, nfcBlock: ["payment" as const] };
+    const { g, p } = setup({ view });
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    expect(g.resources.get(`genericObject/${id}`)!.passConstraints).toEqual({ screenshotEligibility: "INELIGIBLE", nfcConstraint: ["BLOCK_PAYMENT"] });
+    expect(g.resources.get(`genericClass/${ISSUER}.collection_v1`)!.viewUnlockRequirement).toBe("UNLOCK_REQUIRED_TO_VIEW");
+    // Superseded (voided) content: expired, links gone, constraints kept.
+    await p.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [] })));
+    const superseded = g.resources.get(`genericObject/${id}`)!;
+    expect(superseded.state).toBe("EXPIRED");
+    expect(superseded.passConstraints).toEqual({ screenshotEligibility: "INELIGIBLE", nfcConstraint: ["BLOCK_PAYMENT"] });
+    // Transfer: the previous owner's object is expired by PATCH with the constraints in the PATCH body.
+    const q = setup({ view });
+    const a = await verifySaveJwt(await q.p.acquisitionUrl(ctx(OWNER_A)));
+    const oldId = (a.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    await q.p.acquisitionUrl(ctx(OWNER_B));
+    const expirePatch = q.g.calls.find((c) => c.method === "PATCH" && c.path === `genericObject/${oldId}`)!;
+    expect(expirePatch.body).toEqual({ state: "EXPIRED", linksModuleData: { uris: [] }, passConstraints: { screenshotEligibility: "INELIGIBLE", nfcConstraint: ["BLOCK_PAYMENT"] } });
+    // Rotate on request: same.
+    await q.p.rotate("s3r1al");
+    const rotatePatches = q.g.calls.filter((c) => c.method === "PATCH" && c.body?.state === "EXPIRED");
+    expect(rotatePatches.every((c) => c.body.passConstraints?.screenshotEligibility === "INELIGIBLE")).toBe(true);
+    // Without the option, nothing is emitted anywhere.
+    const plain = setup();
+    const b = await verifySaveJwt(await plain.p.acquisitionUrl(ctx(OWNER_A)));
+    const plainId = (b.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    expect(plain.g.resources.get(`genericObject/${plainId}`)!.passConstraints).toBeUndefined();
+    expect(plain.g.resources.get(`genericClass/${ISSUER}.collection_v1`)!.viewUnlockRequirement).toBeUndefined();
+    await plain.p.rotate("s3r1al");
+    expect(plain.g.calls.find((c) => c.method === "PATCH" && c.body?.state === "EXPIRED")!.body).toEqual({ state: "EXPIRED", linksModuleData: { uris: [] } });
   });
 
   it("falls back to a fat link when the REST upsert fails, and reports it", async () => {

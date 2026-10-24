@@ -42,6 +42,23 @@ A Google object is shared by every account that saved it, so a new owner gets a 
 
 Pass content maps to `state` as well: `voided` becomes `INACTIVE` and a past `expiresAt` becomes `EXPIRED`, which moves the pass out of the holder's active list.
 
+## Android view constraints
+
+Google Wallet can narrow how a saved pass is shown or copied on the device. Set `view` on the provider (or `MappingOptions.view` and `ClassOptions.view` when mapping by hand) and the fields go on every generated object and on the class, superseded and expired objects included, so a rotated card keeps the same constraints as the live one:
+
+```ts
+googleFormatProvider({
+  ...options,
+  view: {
+    screenshots: "refuse",          // passConstraints.screenshotEligibility: INELIGIBLE
+    unlockToView: true,             // class viewUnlockRequirement: UNLOCK_REQUIRED_TO_VIEW
+    nfcBlock: ["payment"],          // passConstraints.nfcConstraint: [BLOCK_PAYMENT]
+  },
+});
+```
+
+Left out, the fields are omitted and Google's defaults apply (screenshots allowed, no unlock required). `screenshots: "refuse"` is honoured by current Wallet versions; older ones may still allow a screenshot. `nfcBlock` also accepts `"closedLoopTransit"` (`BLOCK_CLOSED_LOOP_TRANSIT`). Apple Wallet has no equivalent to any of these (`sharingProhibited` on the Apple side is the nearest neighbour). These constraints narrow the on-screen exposure of the capability links a pass carries; they do not replace the documented bound and rotation on request, which the spec's Security Considerations name as what limits a leaked link.
+
 ## Building blocks
 
 - `googleWalletClient({ serviceAccount, issuerId, fetch?, timeoutMs? })`: JWT bearer token exchange, cached until a minute before expiry, one shared exchange for concurrent callers, dropped at once on a 401. `get` (null on 404), `insert`, `patch`, `upsert` (insert on 404, patch when present or on a 409 race), `addMessage`, `saveUrl`.

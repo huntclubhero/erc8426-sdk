@@ -6,11 +6,13 @@ import { GoogleWalletApiError, type GoogleMessage, type GoogleWalletClient } fro
 import { suffixForSerial } from "./ids.js";
 import {
   classIdFor,
+  passConstraintsFor,
   toGoogleClass,
   toGoogleObject,
   type ClassOptions,
   type GoogleObject,
   type GoogleVertical,
+  type GoogleViewOptions,
 } from "./objects.js";
 
 /// The Google format provider. Every acquisition upserts the object through
@@ -59,6 +61,10 @@ export interface GoogleFormatProviderOptions {
   store?: GoogleObjectStore;
   language?: string;
   unhostedImages?: "throw" | "omit";
+  /// Android view constraints (screenshots, unlock to view, NFC), emitted on
+  ///  every object and on the class. Left out, the fields are omitted. See
+  ///  the README, "Android view constraints".
+  view?: GoogleViewOptions;
   /// Save link lifetime. Defaults to one hour.
   ttlSeconds?: number | null;
   /// Extra class fields, merged over the generated class on first insert.
@@ -147,6 +153,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
         unhostedImages: opts.unhostedImages,
         overrides: opts.classOverrides,
         redemptionChannel: opts.redemptionChannel,
+        view: opts.view,
       });
       classReady = (async () => {
         const type = `${cls.vertical}Class` as const;
@@ -181,17 +188,20 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
   async function expire(serial: string, record: GoogleObjectRecord, reason: SupersededReason): Promise<void> {
     const id = `${client.issuerId}.${record.objectSuffix}`;
     const type = `${record.vertical}Object` as const;
+    // The constraints ride along, so the expired card keeps them.
+    const constraints = passConstraintsFor(opts.view);
+    const expired = { state: "EXPIRED", linksModuleData: { uris: [] }, ...(constraints ? { passConstraints: constraints } : {}) };
     try {
       // One retry on a transient failure: the caller forgets this object id once it
       // returns, so an expire that never lands leaves every saved copy ACTIVE. A
       // definite answer (404, 400, 403) is not retried: it would only fail again.
       try {
-        await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
+        await client.patch(type, id, expired);
       } catch (first) {
         if (!isTransient(first)) throw first;
         report(first, `expire superseded object ${id} for ${serial} (retrying)`);
         await new Promise((r) => setTimeout(r, EXPIRE_RETRY_DELAY_MS));
-        await client.patch(type, id, { state: "EXPIRED", linksModuleData: { uris: [] } });
+        await client.patch(type, id, expired);
       }
       const msg = supersededMessageFor(reason);
       if (msg) await client.addMessage(type, id, msg);
@@ -214,6 +224,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       objectSuffix: record?.objectSuffix ?? newSuffix(serial),
       language: opts.language,
       unhostedImages: opts.unhostedImages,
+      view: opts.view,
     });
     // PATCH merges: a field left out keeps its old value on Google's side.
     // So the modules that can carry links or live values are always sent,
@@ -279,6 +290,7 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
         unhostedImages: opts.unhostedImages,
         overrides: opts.classOverrides,
         redemptionChannel: opts.redemptionChannel,
+        view: opts.view,
       });
       return client.saveUrl({ origins: opts.origins, classes: [cls], objects: [object], ttlSeconds: opts.ttlSeconds });
     },
