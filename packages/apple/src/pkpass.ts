@@ -1,6 +1,15 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 
-import { MAX_FEATURED_ACTIONS, type BarcodeFormat, type FeaturedAction, type ImageSource, type PassContent, type PassField, type PassLink, type PassStyle } from "@erc8426/core";
+import {
+  FEATURED_ACTION_TYPES,
+  MAX_FEATURED_ACTIONS,
+  type BarcodeFormat,
+  type ImageSource,
+  type PassContent,
+  type PassField,
+  type PassLink,
+  type PassStyle,
+} from "@erc8426/core";
 import { PKPass } from "passkit-generator";
 
 import { resolveImage, type ImageFetchOptions } from "./images.js";
@@ -130,19 +139,37 @@ const POSTER_MAX_FOOTER = 1;
 ///  so it rotates with the pass. On voided (superseded) content the entries
 ///  that point at links are dropped: the old pass must not keep offering
 ///  the retired capability on its face.
-export function featuredActionsFor(content: PassContent): Array<{ identifier: string; type: string; url: string }> | undefined {
+export type PassJsonFeaturedAction = { identifier: string; type: string; url: string } | { identifier: string; type: "place"; placeIdentifier: string };
+
+export function featuredActionsFor(content: PassContent): PassJsonFeaturedAction[] | undefined {
   const actions = content.featuredActions;
   if (!actions || actions.length === 0) return undefined;
   if (actions.length > MAX_FEATURED_ACTIONS) {
     throw new Error(`Apple Wallet shows at most ${MAX_FEATURED_ACTIONS} featured actions; ${actions.length} given`);
   }
   const ids = new Set<string>();
-  const out: Array<{ identifier: string; type: string; url: string }> = [];
-  for (const a of actions as FeaturedAction[]) {
+  const out: PassJsonFeaturedAction[] = [];
+  // Validated field by field, so a value that slipped past the types (JSON
+  // from a store, a looser caller) is refused with a message, not a crash.
+  for (const a of actions as ReadonlyArray<{ id: string; type: string; url?: string; link?: string; placeIdentifier?: string }>) {
     if (typeof a.id !== "string" || a.id === "") throw new Error("a featured action needs a non-empty id");
     if (ids.has(a.id)) throw new Error(`duplicate featured action id "${a.id}"`);
     ids.add(a.id);
-    if (typeof a.type !== "string" || a.type === "") throw new Error(`featured action "${a.id}" needs a type (for example "membershipBenefits")`);
+    if (typeof a.type !== "string" || !(FEATURED_ACTION_TYPES as readonly string[]).includes(a.type)) {
+      throw new Error(
+        `featured action "${a.id}" has type "${String(a.type)}", which Apple Wallet does not define (the signing library would refuse it with "type is missing"); use one of ${FEATURED_ACTION_TYPES.join(", ")}`,
+      );
+    }
+    if (a.type === "place") {
+      // A place action opens Apple Maps at a place id; it carries no URL.
+      if (a.url !== undefined || a.link !== undefined) throw new Error(`featured action "${a.id}" of type "place" takes a placeIdentifier, not a url or link`);
+      if (typeof a.placeIdentifier !== "string" || a.placeIdentifier.trim() === "") {
+        throw new Error(`featured action "${a.id}" of type "place" needs a placeIdentifier (an Apple Maps place id)`);
+      }
+      out.push({ identifier: a.id, type: "place", placeIdentifier: a.placeIdentifier });
+      continue;
+    }
+    if (a.placeIdentifier !== undefined) throw new Error(`featured action "${a.id}" of type "${a.type}" takes a url or link, not a placeIdentifier (that is for "place")`);
     let url: string;
     if (a.link !== undefined) {
       if (content.voided) continue;
