@@ -140,7 +140,28 @@ export interface CorsConfig {
   maxAgeSeconds?: number;
 }
 
+/// Chains the issuer treats as mainnets when deciding whether to warn that
+///  production mode is undetermined: Ethereum, Optimism, Polygon, Base,
+///  Arbitrum One. Kept short on purpose; any other chain id is neither
+///  assumed production nor test.
+export const MAINNET_CHAIN_IDS: readonly number[] = [1, 10, 137, 8453, 42161];
+
+export function isKnownMainnet(chainId: number): boolean {
+  return MAINNET_CHAIN_IDS.includes(chainId);
+}
+
+export type IssuerEnvironment = "production" | "development";
+
 export interface IssuerConfig {
+  /// Whether this issuer is the real thing. "production" refuses every
+  ///  setup that only works for one process or one session (today: the
+  ///  in-memory store fallback); "development" allows them with a warning.
+  ///  When set it decides; when left out, NODE_ENV=production means
+  ///  production and any other NODE_ENV means development. When neither is
+  ///  set and `chainId` is a known mainnet (MAINNET_CHAIN_IDS) the issuer
+  ///  warns once that production mode is undetermined, because a guard keyed
+  ///  on a variable nobody set protects nothing. Set it explicitly.
+  environment?: IssuerEnvironment;
   /// Verifier identity: the SIWE `domain` every challenge names and every
   ///  proof is checked against, for example "issuer.example". An authority,
   ///  with no scheme or path.
@@ -199,6 +220,9 @@ export interface IssuerConfig {
 }
 
 export interface ResolvedIssuerConfig {
+  /// The explicit option, or what NODE_ENV implied, or "unknown" when
+  ///  neither was set.
+  environment: IssuerEnvironment | "unknown";
   domain: string;
   baseUrl: string;
   basePath: string;
@@ -239,7 +263,23 @@ function positiveInt(name: string, value: number | undefined, fallback: number):
 
 /// Validate a configuration and fill defaults. Every refusal here is a rule
 ///  of the standard or a setup that would fail at the first request.
+/// The environment the issuer runs in: the explicit option wins; NODE_ENV is
+///  only the fallback when it is unset. Guarded so the issuer still runs
+///  where there is no `process`.
+export function resolveEnvironment(explicit: IssuerEnvironment | undefined): IssuerEnvironment | "unknown" {
+  if (explicit !== undefined) {
+    if (explicit !== "production" && explicit !== "development") {
+      throw new IssuerConfigError(`environment must be "production" or "development", got "${String(explicit)}"`);
+    }
+    return explicit;
+  }
+  const nodeEnv = typeof process !== "undefined" ? process.env?.NODE_ENV : undefined;
+  if (nodeEnv === undefined || nodeEnv === "") return "unknown";
+  return nodeEnv === "production" ? "production" : "development";
+}
+
 export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
+  const environment = resolveEnvironment(config.environment);
   if (typeof config.domain !== "string" || !DOMAIN_RE.test(config.domain)) {
     throw new IssuerConfigError(
       `domain must be a bare authority such as "issuer.example" or "localhost:8787" (no scheme, no path), got "${String(config.domain)}"`,
@@ -350,6 +390,7 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
   }
 
   return {
+    environment,
     domain: config.domain,
     baseUrl,
     basePath,

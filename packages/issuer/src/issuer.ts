@@ -20,7 +20,7 @@ import {
 import { authorize as runFloor, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
 import { newLinkToken, newSerial, isLinkTokenShape } from "./capability.js";
 import { publicClientChainReader, type ChainReader, type ReadBlockTag, type ReadContractClient } from "./chain.js";
-import { IssuerConfigError, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
+import { IssuerConfigError, isKnownMainnet, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
 import { checkEntitlement, ownerOnly, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
 import { IssuerError } from "./errors.js";
 import { createRouter } from "./http.js";
@@ -193,7 +193,8 @@ export interface IssuerInternals {
 type RotationReason = "transfer" | "claim" | "owner_request";
 
 /// True under NODE_ENV=production. Guarded so the issuer still runs where
-///  there is no `process` (Workers, Deno without Node compatibility).
+///  there is no `process` (Workers, Deno without Node compatibility). The
+///  `environment` option, when set, overrides this; see resolveEnvironment.
 export function isProductionEnv(): boolean {
   return typeof process !== "undefined" && process.env?.NODE_ENV === "production";
 }
@@ -203,18 +204,26 @@ export function isProductionEnv(): boolean {
 ///  another, and every pass record and link would vanish on restart, so a
 ///  deployment that reaches production without naming its stores almost
 ///  certainly did not mean to. An explicit `stores: memoryStores()` passes,
-///  since every store is then named.
-function resolveStores(options: CreateIssuerOptions, now: () => number): IssuerStores {
+///  since every store is then named. Production is `config.environment`
+///  (explicit option first, NODE_ENV as the fallback); when neither says and
+///  the chain is a known mainnet, one warning says the guard is undecided.
+function resolveStores(options: CreateIssuerOptions, config: ResolvedIssuerConfig, now: () => number): IssuerStores {
+  const warn = options.onWarning ?? ((message: string) => console.warn(message));
+  if (config.environment === "unknown" && isKnownMainnet(config.chainId)) {
+    warn(
+      `[erc8426/issuer] production mode is undetermined: chain ${config.chainId} is a mainnet but neither the environment option nor NODE_ENV is set, so the production guards (the in-memory store refusal) cannot tell this is real. Set environment: "production" (or "development") in createIssuer.`,
+    );
+  }
   const given = options.stores ?? {};
   const missing = (["nonces", "passes", "links"] as const).filter((k) => !given[k]);
   if (missing.length === 0) return { nonces: given.nonces!, passes: given.passes!, links: given.links! };
   const names = missing.join(", ");
-  if (isProductionEnv()) {
+  if (config.environment === "production") {
+    const how = options.environment === "production" ? 'environment is "production"' : "NODE_ENV is production";
     throw new IssuerConfigError(
-      `NODE_ENV is production but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv, { chainId, contract }) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
+      `${how} but no ${names} store${missing.length > 1 ? "s were" : " was"} configured: the in-memory fallback serves one process and loses every nonce, pass record and link on restart. Pass stores: kvStores(kv, { chainId, contract }) (Redis, Upstash, Vercel KV), or stores: memoryStores() to run one instance deliberately.`,
     );
   }
-  const warn = options.onWarning ?? ((message: string) => console.warn(message));
   warn(
     `[erc8426/issuer] no ${names} store${missing.length > 1 ? "s" : ""} configured: falling back to the in-memory store${missing.length > 1 ? "s" : ""} (one process, lost on restart). Production refuses this; pass stores: kvStores(kv, { chainId, contract }) or an explicit memoryStores().`,
   );
@@ -252,7 +261,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   if (!chain) throw new IssuerConfigError("pass publicClient or chain: check (2), the fresh entitlement read, needs a chain reader");
   const verifier = options.verifier ?? (options.publicClient ? publicClientSignatureVerifier(options.publicClient) : eoaSignatureVerifier());
   const entitlement = options.entitlement ?? ownerOnly();
-  const stores = resolveStores(options, now);
+  const stores = resolveStores(options, config, now);
   const onError =
     options.onError ?? ((error: unknown, ctx: IssuerErrorContext) => console.error(`[erc8426/issuer] ${ctx.operation} failed`, error));
   const fileProviders = providers.filter(isFileProvider);
