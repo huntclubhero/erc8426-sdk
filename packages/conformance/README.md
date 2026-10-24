@@ -30,9 +30,9 @@ Each check has a stable id, the spec section it enforces, and its level.
 | `contract.passuri-nonexistent` | MUST | Contract interface | `passURI` reverts for a nonexistent token |
 | `manifest.reachable` | MUST | Pass manifest | the endpoint answers 200 (public) or 401 (gated) |
 | `manifest.media-type` | MUST | Pass manifest | the manifest is served as `application/json` |
-| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, `google` is a Save link, `updatedAt` integer seconds; `version` optional (1) |
-| `manifest.lint` | SHOULD | Pass manifest | https URLs, `updatedAt` not in milliseconds |
-| `manifest.apple-media-type` | MUST | Pass manifest | the `apple` URL is served as `application/vnd.apple.pkpass` |
+| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, https acquisition URLs, `updatedAt` integer seconds; `version` optional (1) |
+| `manifest.lint` | SHOULD | Pass manifest | likely mistakes: `updatedAt` in milliseconds, a `google` URL that is not a Save link, an unknown `version` |
+| `manifest.apple-media-type` | SHOULD | Pass manifest | the `apple` URL is served as `application/vnd.apple.pkpass`; advisory, since the standard leaves the media type to the platform, but Apple devices expect it |
 | `manifest.apple-reachable` | SHOULD | Pass manifest | reported only when the `apple` URL cannot be fetched |
 | `mirror.valid` | MUST | Metadata mirror | a `wallet_pass` in `tokenURI` metadata is a valid manifest |
 | `mirror.gated-no-urls` | MUST | Metadata mirror | a gated issuer mirrors no acquisition URLs |
