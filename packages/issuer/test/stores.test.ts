@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getAddress } from "viem";
-import { kvKeyNamespace, kvStores, memoryKv, memoryStores, type IssuerStores, type KeyValueStore, type NonceRecord } from "@erc8426/issuer";
+import { kvKeyNamespace, kvStores, linkDigest, memoryKv, memoryStores, type IssuerStores, type KeyValueStore, type NonceRecord } from "@erc8426/issuer";
 
 import { CONTRACT, buildHarness, createClock, issuePassTo, newSigner, TOKEN_ID } from "./helpers.js";
 
@@ -217,7 +217,7 @@ describe("pass records", () => {
     // Simulate a lost race: the binding survives but the record moved on.
     const rec = (await h.issuer.stores.passes.get(TOKEN_ID))!;
     await h.issuer.stores.passes.put({ ...rec, links: { ...rec.links, feed: "somethingelse" } });
-    expect(await h.issuer.stores.links.get(token)).not.toBeNull();
+    expect(await h.issuer.stores.links.get(await linkDigest(token))).not.toBeNull();
     expect((await h.post(links.feed!)).status).toBe(404);
   });
 });

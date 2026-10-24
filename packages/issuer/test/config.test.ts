@@ -134,6 +134,7 @@ describe("createIssuer validation", () => {
 describe("stores at startup", () => {
   const minimal = (): CreateIssuerOptions => ({
     ...base,
+    linkSecret: "a test secret that is at least thirty-two bytes long",
     chain: new FakeChain(),
     providers: fakeProviders([]),
     render: () => ({ serial: "s", organizationName: "o", description: "d", title: "t" }),

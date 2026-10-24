@@ -3,6 +3,7 @@ import { getAddress, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { GOOGLE_SAVE_URL_PREFIX, PKPASS_MEDIA_TYPE, proofHeaders, type PassContext, type TokenRef } from "@erc8426/core";
 import {
+  LinkKeyring,
   createIssuer,
   type ActionContext,
   type ChainReader,
@@ -14,6 +15,13 @@ import {
 export const CONTRACT = getAddress("0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1");
 export const BASE = "https://issuer.example";
 export const TOKEN_ID = "412";
+export const HARNESS_LINK_SECRET = "harness link secret, thirty-two bytes or more of it";
+
+/// The URL token the harness issuer derives for a stored seed (links and
+///  downloads hold seeds, never tokens).
+export function linkTokenFor(seed: string): Promise<string> {
+  return new LinkKeyring(new TextEncoder().encode(HARNESS_LINK_SECRET)).token(seed);
+}
 
 /// A controllable clock, starting at the instant of the spec's worked
 ///  example, 2026-08-07T15:04:05Z.
@@ -152,6 +160,9 @@ export function buildHarness(overrides: Partial<CreateIssuerOptions> = {}): Harn
       errors.push(e);
     },
     onWarning: () => undefined,
+    // Links are derived from this; tests that build two issuers over one
+    // store share it so both resolve the same links.
+    linkSecret: HARNESS_LINK_SECRET,
     ...overrides,
   });
   const url = (path: string) => (path.startsWith("http") ? path : `${BASE}${path}`);

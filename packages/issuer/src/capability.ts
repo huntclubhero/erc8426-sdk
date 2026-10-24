@@ -16,9 +16,60 @@ function randomBase64Url(bytes: number): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/// A fresh 256-bit capability token (43 base64url characters).
+/// A fresh 256-bit random value (43 base64url characters). Since 0.3.0 this
+///  is the SEED a capability token is derived from, never the token itself:
+///  see LinkKeyring.
 export function newLinkToken(): string {
   return randomBase64Url(32);
+}
+
+/// Alias that says what the value is for.
+export const newLinkSeed = newLinkToken;
+
+/// Lowercase hex SHA-256 of a capability token: the key a link record is
+///  stored under. A store holds digests and seeds, never a token, so a read
+///  of the store alone yields no usable capability (Security
+///  Considerations, store contents).
+export async function linkDigest(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// Derives capability tokens from stored seeds with a secret held outside
+///  the store (HMAC-SHA256), the spec's second way of keeping a store dump
+///  from being a pile of live links. The token in a holder's URL is
+///  `base64url(HMAC(secret, seed))`; the pass record keeps the seed and the
+///  link store is keyed by the token's digest. Without the secret, neither
+///  the seed nor the digest becomes a token; with it, every push can render
+///  the holder's links again without storing them.
+export class LinkKeyring {
+  private readonly key: Promise<CryptoKey>;
+  constructor(secret: Uint8Array) {
+    if (secret.byteLength < 32) throw new Error("linkSecret must be at least 32 bytes");
+    // A fresh copy, so the key material sits in its own ArrayBuffer.
+    this.key = crypto.subtle.importKey("raw", new Uint8Array(secret).buffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  }
+
+  /// The 43-character token for a stored seed.
+  async token(seed: string): Promise<string> {
+    const mac = await crypto.subtle.sign("HMAC", await this.key, new TextEncoder().encode(seed));
+    let binary = "";
+    for (const b of new Uint8Array(mac)) binary += String.fromCharCode(b);
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  /// The store key for a stored seed: the digest of its token.
+  async digestOfSeed(seed: string): Promise<string> {
+    return linkDigest(await this.token(seed));
+  }
+}
+
+/// A fresh random secret for a LinkKeyring, for deployments that have not
+///  configured one (development only: links die with the process).
+export function ephemeralLinkSecret(): Uint8Array {
+  const buf = new Uint8Array(32);
+  crypto.getRandomValues(buf);
+  return buf;
 }
 
 /// A fresh random pass serial (128 bits). Random rather than derived from the

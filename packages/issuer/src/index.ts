@@ -105,7 +105,17 @@ export {
 } from "./signature.js";
 export { MAX_BODY_BYTES } from "./http.js";
 export { authorize, type AuthorizeDeps, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
-export { LINK_PAGE_HEADERS, defaultConfirmPage, newLinkToken, newSerial, withLinkPageHeaders } from "./capability.js";
+export {
+  LINK_PAGE_HEADERS,
+  LinkKeyring,
+  defaultConfirmPage,
+  ephemeralLinkSecret,
+  linkDigest,
+  newLinkSeed,
+  newLinkToken,
+  newSerial,
+  withLinkPageHeaders,
+} from "./capability.js";
 export { watchPassUpdates, watchTransfers, type WatchEventClient, type WatchOptions } from "./watcher.js";
 export {
   expressMiddleware,

@@ -13,7 +13,7 @@ import {
   type RateLimiter,
 } from "@erc8426/issuer";
 
-import { CONTRACT, TOKEN_ID, buildHarness, createClock, issuePassTo, newSigner, signChallenge, type Harness } from "./helpers.js";
+import { CONTRACT, TOKEN_ID, buildHarness, createClock, issuePassTo, linkTokenFor, newSigner, signChallenge, type Harness } from "./helpers.js";
 
 const CHALLENGE = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}/challenge?address=${newSigner().address}`;
 const MANIFEST = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}`;
@@ -223,7 +223,7 @@ describe("rate limiting on the HTTP surface", () => {
     expect(page.headers.get("referrer-policy")).toBe("no-referrer");
     // Downloads.
     const record = await h.issuer.stores.passes.get(TOKEN_ID);
-    const download = `/wallet-pass/passes/${record!.downloads.apple}`;
+    const download = `/wallet-pass/passes/${await linkTokenFor(record!.downloads.apple!)}`;
     for (let i = 0; i < RULE.limit; i++) expect((await h.get(download)).status).toBe(200);
     await expectLimited(await h.get(download), "capability");
     const head = await h.issuer.handler(new Request(`https://issuer.example${download}`, { method: "HEAD" }));

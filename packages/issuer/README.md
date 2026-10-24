@@ -142,7 +142,8 @@ Off unless configured. With no `cors` the issuer sends no `Access-Control` heade
 | Rotate used to take a pass | The rotate route never returns the manifest, never changes the holder of record, and requires the holder of record or an account entitled to acquire, so an owner excluded by an exclusive rental cannot disturb the renter's pass. |
 | Unbounded pre-auth input | Bodies are read with a running byte count and cut at 64 KiB (`MAX_BODY_BYTES`), in the fetch handler and the Node adapter alike; oversized proof headers and token ids are refused before parsing. |
 | A revert read as a burn | Only a nonexistent-token revert (`ERC721NonexistentToken`, or the OpenZeppelin 4 strings) or a zero owner means "no owner". Any other revert (a paused contract) is `read_failed`, never a burn. |
-| Guessable links | 256-bit random link tokens, bound server-side to one token and one action or format. Serials are random. |
+| Guessable links | 256-bit link tokens derived with `linkSecret` from a random seed, bound server-side to one token and one action or format. Serials are random. |
+| A store read yielding live links | The store holds seeds and token digests, never a token: link records are keyed by SHA-256 of the token, and the token is `HMAC(linkSecret, seed)`, computed at render time and on lookup. A dump of the KV is useless without the secret, which lives in the environment, not the store. |
 | Capability link reaching a dangerous action | Config validation refuses capability actions without a documented `bound`, flagged `transfersOrBurns`, or outside the gated configuration. |
 | Prefetching crawlers triggering actions | `GET` on a link never executes or reads; only `POST` does. |
 
@@ -193,6 +194,10 @@ Anyone can ask the challenge endpoint for a nonce. The in-memory store sweeps un
 ## Identical repeats
 
 An identical repeat is not a replay. iOS in-app browsers send a GET, then a POST the phone aborts, then the same POST again, on every tap, and proxies retry a timed-out POST the same way. Following the spec revision, the issuer answers a repeat of an identical `POST /links/:link` (same link, same body bytes) or `POST /:tokenId/actions/:action` (same nonce, message, signature and body) that arrives while the first is in flight, or within `repeat.windowSeconds` (default 30) after it completed, with the first request's outcome: the action runs once and both callers get the same status and body (the repeat carries `X-Wallet-Pass-Repeat: true`). Only a presentation that differs is judged on its own: a different body on the same link is a new request, and a different request carrying a spent nonce is still `nonce_invalid`. Only a success is replayed: a refusal had no side effect, so a repeat of one is judged afresh (a 503 retries, a 404 before a claim becomes a 200 after it; on the nonce path it meets `nonce_invalid`, since the failed attempt spent the nonce). Outcomes live in `memoryRepeatStore()` (one process, bounded) by default; pass `repeat: { store: kvRepeatStore(kv) }` so instances share completed outcomes (in-flight sharing stays per process), or `repeat: false` to turn it off.
+
+## Link secret
+
+Capability links and pass download links are not stored. The pass record keeps a random seed per link, the link store is keyed by the SHA-256 digest of the token, and the token in the holder's URL is `HMAC-SHA256(linkSecret, seed)` (43 base64url characters). The issuer derives it again on every render and hashes the presented token before every lookup, so a read of the store yields no usable capability (Security Considerations). Set `linkSecret` to at least 32 bytes (`openssl rand -base64 32`), the same on every instance; rotating it retires every link at once, and the holders re-add their passes. Production refuses to start without it. In development a random one is used with a warning, and every link dies with the process.
 
 ## Rate limiting
 

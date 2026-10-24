@@ -18,7 +18,7 @@ import {
 } from "@erc8426/core";
 
 import { authorize as runFloor, type AuthorizeInput, type AuthorizeResult } from "./authorize.js";
-import { newLinkToken, newSerial, isLinkTokenShape } from "./capability.js";
+import { LinkKeyring, ephemeralLinkSecret, isLinkTokenShape, linkDigest, newLinkSeed, newSerial } from "./capability.js";
 import { publicClientChainReader, type ChainReader, type ReadBlockTag, type ReadContractClient } from "./chain.js";
 import { IssuerConfigError, isKnownMainnet, resolveConfig, type IssuerConfig, type ResolvedIssuerConfig } from "./config.js";
 import { checkEntitlement, ownerOnly, type EntitlementPolicy, type EntitlementResult } from "./entitlement.js";
@@ -207,6 +207,25 @@ export function isProductionEnv(): boolean {
 ///  since every store is then named. Production is `config.environment`
 ///  (explicit option first, NODE_ENV as the fallback); when neither says and
 ///  the chain is a known mainnet, one warning says the guard is undecided.
+/// The keyring links are derived with. A configured secret is used as is;
+///  without one, production refuses (a store read would otherwise be the
+///  only thing standing between a dump and every live link, and an
+///  ephemeral secret would kill every link on restart) and anything else
+///  gets a random secret and one warning.
+function resolveLinkKeyring(options: CreateIssuerOptions, config: ResolvedIssuerConfig): LinkKeyring {
+  if (config.linkSecret) return new LinkKeyring(config.linkSecret);
+  if (config.environment === "production") {
+    throw new IssuerConfigError(
+      `${options.environment === "production" ? 'environment is "production"' : "NODE_ENV is production"} but no linkSecret was configured: capability and download links are derived from it, so a store read alone yields no link and every instance renders the same links. Set linkSecret to at least 32 bytes ("openssl rand -base64 32"), the same on every instance.`,
+    );
+  }
+  const warn = options.onWarning ?? ((message: string) => console.warn(message));
+  warn(
+    "[erc8426/issuer] no linkSecret configured: using a random one for this process, so every capability and download link stops resolving when it restarts. Production refuses this; set linkSecret to at least 32 bytes, the same on every instance.",
+  );
+  return new LinkKeyring(ephemeralLinkSecret());
+}
+
 function resolveStores(options: CreateIssuerOptions, config: ResolvedIssuerConfig, now: () => number): IssuerStores {
   const warn = options.onWarning ?? ((message: string) => console.warn(message));
   if (config.environment === "unknown" && isKnownMainnet(config.chainId)) {
@@ -262,6 +281,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   const verifier = options.verifier ?? (options.publicClient ? publicClientSignatureVerifier(options.publicClient) : eoaSignatureVerifier());
   const entitlement = options.entitlement ?? ownerOnly();
   const stores = resolveStores(options, config, now);
+  const keyring = resolveLinkKeyring(options, config);
   const onError =
     options.onError ?? ((error: unknown, ctx: IssuerErrorContext) => console.error(`[erc8426/issuer] ${ctx.operation} failed`, error));
   const fileProviders = providers.filter(isFileProvider);
@@ -274,28 +294,34 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     `${passUri(tokenId)}/challenge${action === ACQUIRE_ACTION ? "" : `?action=${encodeURIComponent(action)}`}`;
   const linkUrl = (t: string) => `${base}/links/${t}`;
   const downloadUrl = (t: string) => `${base}/passes/${t}`;
-  const linkUrls = (record: PassRecord) => {
+  // The record holds seeds; the URL carries the token derived from each.
+  const linkUrls = async (record: PassRecord) => {
     const out: Record<string, string> = {};
-    for (const [action, t] of Object.entries(record.links)) out[action] = linkUrl(t);
+    for (const [action, seed] of Object.entries(record.links)) out[action] = linkUrl(await keyring.token(seed));
     return out;
   };
+  // The store keys of every link and download the record currently holds.
+  const digestsOf = (record: PassRecord) => Promise.all([...Object.values(record.links), ...Object.values(record.downloads)].map((seed) => keyring.digestOfSeed(seed)));
 
-  // Mint link tokens for whatever the record is missing: every capability
-  // action and every file format. Tokens already present are kept.
+  // Mint links for whatever the record is missing: every capability action
+  // and every file format. A link is a random seed in the record plus a
+  // binding stored under the digest of the token derived from that seed;
+  // the token itself is never written anywhere. Links already present are
+  // kept.
   async function fill(record: PassRecord): Promise<boolean> {
     let changed = false;
     for (const action of config.capabilityActions) {
       if (record.links[action]) continue;
-      const t = newLinkToken();
-      await stores.links.put(t, { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
-      record.links[action] = t;
+      const seed = newLinkSeed();
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
+      record.links[action] = seed;
       changed = true;
     }
     for (const p of fileProviders) {
       if (record.downloads[p.format]) continue;
-      const t = newLinkToken();
-      await stores.links.put(t, { kind: "download", tokenId: record.tokenId, name: p.format, generation: record.generation });
-      record.downloads[p.format] = t;
+      const seed = newLinkSeed();
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "download", tokenId: record.tokenId, name: p.format, generation: record.generation });
+      record.downloads[p.format] = seed;
       changed = true;
     }
     return changed;
@@ -319,7 +345,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       token: token(record.tokenId),
       owner,
       serial: record.serial,
-      links: superseded ? {} : linkUrls(record),
+      links: superseded ? {} : await linkUrls(record),
       superseded: Boolean(superseded),
       ...(superseded ? { supersededReason: superseded } : {}),
       updatedAt: record.updatedAt,
@@ -380,7 +406,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // is written first: from this moment the old tokens resolve to nothing
     // even if deleting them below fails.
     await stores.passes.put(next);
-    await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
+    await stores.links.delete(await digestsOf(record));
     // A new account's claim is a change of hands like an observed transfer;
     // only the owner's own request keeps the holder, and its pass says so.
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, reason === "owner_request" ? "reset" : "transfer", "supersede");
@@ -401,7 +427,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       rotatedAt: nowSeconds(),
     };
     await stores.passes.put(next);
-    await stores.links.delete([...Object.values(record.links), ...Object.values(record.downloads)]);
+    await stores.links.delete(await digestsOf(record));
     const holder = record.lastIssuedTo;
     if (!holder) return;
     const targets = providers.filter((p) => typeof p.notifyUpdate === "function");
@@ -520,7 +546,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const content = await renderContent(record, owner, false);
       const ctx: PassContext = { token: token(record.tokenId), owner, content };
       const entries = await Promise.all(
-        providers.map(async (p) => [p.format, isFileProvider(p) ? downloadUrl(record.downloads[p.format]!) : await p.acquisitionUrl(ctx)] as const),
+        providers.map(
+          async (p) => [p.format, isFileProvider(p) ? downloadUrl(await keyring.token(record.downloads[p.format]!)) : await p.acquisitionUrl(ctx)] as const,
+        ),
       );
       return createManifest(Object.fromEntries(entries) as PassManifest["formats"], record.updatedAt);
     },
@@ -530,14 +558,19 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // A link resolves only while the pass record still lists it as current:
     // rotation rewrites the record first, so a rotated link is dead even if
     // its store entry lingers.
+    // The presented token is hashed before lookup; the raw token is never
+    // compared against anything stored. The record's current seed must
+    // derive to the presented token, so a binding left behind by a racing
+    // rotation resolves to nothing.
     async resolveLink(linkToken, kind) {
       if (!isLinkTokenShape(linkToken)) return null;
-      const binding = await stores.links.get(linkToken);
+      const binding = await stores.links.get(await linkDigest(linkToken));
       if (!binding || binding.kind !== kind) return null;
       const record = await stores.passes.get(binding.tokenId);
       if (!record) return null;
-      const current = kind === "action" ? record.links[binding.name] : record.downloads[binding.name];
-      return current === linkToken ? { binding, record } : null;
+      const seed = kind === "action" ? record.links[binding.name] : record.downloads[binding.name];
+      if (!seed) return null;
+      return (await keyring.token(seed)) === linkToken ? { binding, record } : null;
     },
 
     async onPassUpdate(fromTokenId, toTokenId) {
@@ -649,7 +682,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     onPassUpdate: internals.onPassUpdate,
     async capabilityLinksFor(tokenId) {
       const record = await stores.passes.get(normalizeTokenId(tokenId));
-      return record ? linkUrls(record) : {};
+      return record ? await linkUrls(record) : {};
     },
   };
 }

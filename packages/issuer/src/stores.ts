@@ -38,10 +38,12 @@ export interface PassRecord {
   ///  and after an observed transfer. A proven claim by any other account is
   ///  that account's first claim (Gated acquisition).
   lastIssuedTo: Address | null;
-  /// Capability action name to its current link token.
+  /// Capability action name to the SEED of its current link. The token in
+  ///  the holder's URL is derived from the seed with `linkSecret` and is
+  ///  never stored, so a read of this record yields no link.
   links: Record<string, string>;
-  /// Format key to its current download token, for providers the issuer
-  ///  serves pass files for.
+  /// Format key to the seed of its current download link, for providers the
+  ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
   /// Unix seconds of the last content change (the manifest's `updatedAt`).
   updatedAt: number;
@@ -57,9 +59,11 @@ export interface PassStore {
   tokenIds?(): Promise<string[]>;
 }
 
-/// What a link token resolves to. `authorize` never trusts this alone: the
-///  pass record must still list the token as current, so an orphaned entry
-///  (for example from two racing rotations) resolves to nothing.
+/// What a link resolves to. Stored under the SHA-256 digest of the token
+///  (`linkDigest`), never under the token, so a dump of the link store is a
+///  list of hashes. `authorize` never trusts this alone: the pass record's
+///  seed must still derive to the presented token, so an orphaned entry (for
+///  example from two racing rotations) resolves to nothing.
 export interface LinkBinding {
   kind: "action" | "download";
   tokenId: string;
@@ -68,10 +72,11 @@ export interface LinkBinding {
   generation: number;
 }
 
+/// Keyed by link digest (lowercase hex SHA-256 of the token), not by token.
 export interface LinkStore {
-  get(linkToken: string): Promise<LinkBinding | null>;
-  put(linkToken: string, binding: LinkBinding): Promise<void>;
-  delete(linkTokens: string[]): Promise<void>;
+  get(linkDigest: string): Promise<LinkBinding | null>;
+  put(linkDigest: string, binding: LinkBinding): Promise<void>;
+  delete(linkDigests: string[]): Promise<void>;
 }
 
 export interface IssuerStores {

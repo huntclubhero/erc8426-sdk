@@ -162,6 +162,15 @@ export interface IssuerConfig {
   ///  warns once that production mode is undetermined, because a guard keyed
   ///  on a variable nobody set protects nothing. Set it explicitly.
   environment?: IssuerEnvironment;
+  /// Secret the capability and download link tokens are derived from (HMAC
+  ///  over a random seed kept in the pass record), so that a read of the
+  ///  store alone yields no usable link: the store holds seeds and token
+  ///  digests, never a token. At least 32 bytes (`openssl rand -base64 32`),
+  ///  the same on every instance, and rotated only when every link should
+  ///  die at once. REQUIRED in production. Left out in development, the
+  ///  issuer makes a random one and warns: links then stop resolving when
+  ///  the process restarts.
+  linkSecret?: string | Uint8Array;
   /// Verifier identity: the SIWE `domain` every challenge names and every
   ///  proof is checked against, for example "issuer.example". An authority,
   ///  with no scheme or path.
@@ -223,6 +232,8 @@ export interface ResolvedIssuerConfig {
   /// The explicit option, or what NODE_ENV implied, or "unknown" when
   ///  neither was set.
   environment: IssuerEnvironment | "unknown";
+  /// The configured link secret as bytes, or null when none was given.
+  linkSecret: Uint8Array | null;
   domain: string;
   baseUrl: string;
   basePath: string;
@@ -280,6 +291,15 @@ export function resolveEnvironment(explicit: IssuerEnvironment | undefined): Iss
 
 export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
   const environment = resolveEnvironment(config.environment);
+  let linkSecret: Uint8Array | null = null;
+  if (config.linkSecret !== undefined) {
+    if (typeof config.linkSecret === "string") linkSecret = new TextEncoder().encode(config.linkSecret);
+    else if (config.linkSecret instanceof Uint8Array) linkSecret = config.linkSecret;
+    else throw new IssuerConfigError("linkSecret must be a string or a Uint8Array");
+    if (linkSecret.byteLength < 32) {
+      throw new IssuerConfigError(`linkSecret must be at least 32 bytes (got ${linkSecret.byteLength}); generate one with "openssl rand -base64 32"`);
+    }
+  }
   if (typeof config.domain !== "string" || !DOMAIN_RE.test(config.domain)) {
     throw new IssuerConfigError(
       `domain must be a bare authority such as "issuer.example" or "localhost:8787" (no scheme, no path), got "${String(config.domain)}"`,
@@ -391,6 +411,7 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
 
   return {
     environment,
+    linkSecret,
     domain: config.domain,
     baseUrl,
     basePath,
