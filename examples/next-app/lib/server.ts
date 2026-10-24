@@ -19,6 +19,7 @@ import { assetId, erc721Abi, walletPassAbi, type PassContent } from "@erc8426/co
 import {
   ActionError,
   createIssuer,
+  kvRateLimiter,
   kvStores,
   watchPassUpdates,
   watchTransfers,
@@ -275,6 +276,14 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
     // (32+ bytes, the same on every instance) before deploying as production.
     ...(process.env.ISSUER_LINK_SECRET ? { linkSecret: process.env.ISSUER_LINK_SECRET } : {}),
     ...(redis ? { stores: kvStores(upstashKv(redis), { chainId: config.chainId, contract: config.contract, prefix: `${prefix}issuer:` }) } : {}),
+    // One rate limit across every instance (the in-memory limiter counts per
+    // lambda), keyed by the address Vercel puts in x-real-ip. The CDN
+    // headers Vercel passes through from the client (cf-connecting-ip,
+    // true-client-ip) are spoofable and are not consulted.
+    rateLimit: {
+      ...(redis ? { limiter: kvRateLimiter(upstashKv(redis), { prefix: `${prefix}rl:` }) } : {}),
+      ...(process.env.VERCEL ? { trustProxy: "vercel" as const } : {}),
+    },
     providers,
     render,
     capability: { enabled: true },

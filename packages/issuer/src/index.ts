@@ -49,9 +49,12 @@ export {
 export {
   REMOTE_ADDRESS_HEADER,
   defaultClientKey,
+  TRUSTED_PROXY_HEADERS,
   forwardedClientKey,
+  proxyClientKey,
   trustedHeaderClientKey,
   type ClientKeyFn,
+  type TrustedProxy,
   kvRateLimiter,
   memoryRateLimiter,
   unlimited,

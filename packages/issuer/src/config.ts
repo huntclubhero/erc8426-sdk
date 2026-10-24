@@ -1,7 +1,18 @@
 import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
-import { defaultClientKey, memoryRateLimiter, unlimited, type ClientKeyFn, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+import {
+  defaultClientKey,
+  forwardedClientKey,
+  memoryRateLimiter,
+  proxyClientKey,
+  trustedHeaderClientKey,
+  unlimited,
+  type ClientKeyFn,
+  type RateLimitRule,
+  type RateLimiter,
+  type TrustedProxy,
+} from "./rateLimit.js";
 import type { RepeatStore } from "./repeat.js";
 
 /// The two configurations the standard defines under Acquisition URLs.
@@ -115,10 +126,18 @@ export interface RateLimitConfig {
   perClient?: RateLimitRule | false;
   /// The client identity a request is counted under. Default
   ///  `defaultClientKey`: the socket address the Node adapter recorded, and
-  ///  nothing a client can send. Behind a proxy use `forwardedClientKey(n)`
-  ///  or `trustedHeaderClientKey(name)`. Return null to count every unknown
-  ///  client together.
+  ///  nothing a client can send. Behind a proxy use `trustProxy`, or give
+  ///  `forwardedClientKey(n)` or `trustedHeaderClientKey(name)` here. Return
+  ///  null to count every unknown client together. Wins over `trustProxy`.
   clientKey?: ClientKeyFn;
+  /// The proxy that fronts the issuer, by name or by the header it
+  ///  overwrites or the number of X-Forwarded-For hops it appends. Sets
+  ///  `clientKey` accordingly. REQUIRED behind any proxy, or every client
+  ///  shares the proxy's bucket; and it must name the proxy that actually
+  ///  sits in front, since a CDN header the platform passes through from the
+  ///  client (`cf-connecting-ip` on Vercel) is spoofable and lets one client
+  ///  rotate buckets or burn a victim's.
+  trustProxy?: TrustedProxy | { header: string } | { forwardedHops: number };
 }
 
 export interface ResolvedRateLimitConfig {
@@ -504,6 +523,18 @@ function resolveRateLimit(config: RateLimitConfig | false | undefined): Resolved
   const c = config ?? {};
   if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
   if (c.clientKey !== undefined && typeof c.clientKey !== "function") throw new IssuerConfigError("rateLimit.clientKey must be a function");
+  let clientKey: ClientKeyFn | undefined = c.clientKey;
+  if (clientKey === undefined && c.trustProxy !== undefined) {
+    const tp = c.trustProxy;
+    try {
+      if (typeof tp === "string") clientKey = proxyClientKey(tp);
+      else if (typeof tp === "object" && tp !== null && "header" in tp) clientKey = trustedHeaderClientKey(tp.header);
+      else if (typeof tp === "object" && tp !== null && "forwardedHops" in tp) clientKey = forwardedClientKey(tp.forwardedHops);
+      else throw new Error(`rateLimit.trustProxy must be a proxy name, { header }, or { forwardedHops }`);
+    } catch (e) {
+      throw new IssuerConfigError((e as Error).message);
+    }
+  }
   return {
     limiter: c.limiter ?? memoryRateLimiter(),
     challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
@@ -512,6 +543,6 @@ function resolveRateLimit(config: RateLimitConfig | false | undefined): Resolved
     action: rule("action", c.action, DEFAULT_RATE_LIMITS.action),
     rotate: rule("rotate", c.rotate, DEFAULT_RATE_LIMITS.rotate),
     perClient: rule("perClient", c.perClient, DEFAULT_RATE_LIMITS.perClient),
-    clientKey: c.clientKey ?? defaultClientKey,
+    clientKey: clientKey ?? defaultClientKey,
   };
 }

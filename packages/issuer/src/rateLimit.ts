@@ -171,6 +171,30 @@ export function forwardedClientKey(trustedHops: number): ClientKeyFn {
   };
 }
 
+/// The proxies this SDK knows the client-address header of. Each is a
+///  header the platform OVERWRITES on every request, so a client cannot set
+///  it: Vercel rewrites `x-real-ip` (and passes `cf-connecting-ip` and
+///  `true-client-ip` through from the client untouched, so those are NOT
+///  trustworthy there); Cloudflare sets `cf-connecting-ip`; Fly sets
+///  `fly-client-ip`; Akamai sets `true-client-ip`. Pick the one for the
+///  proxy that actually fronts the issuer, never for a CDN that might.
+export type TrustedProxy = "vercel" | "cloudflare" | "fly" | "akamai";
+
+export const TRUSTED_PROXY_HEADERS: Readonly<Record<TrustedProxy, string>> = {
+  vercel: "x-real-ip",
+  cloudflare: "cf-connecting-ip",
+  fly: "fly-client-ip",
+  akamai: "true-client-ip",
+};
+
+/// `clientKey` for a known proxy: `trustedHeaderClientKey` of the header
+///  that proxy overwrites.
+export function proxyClientKey(proxy: TrustedProxy): ClientKeyFn {
+  const header = TRUSTED_PROXY_HEADERS[proxy];
+  if (!header) throw new Error(`proxyClientKey: unknown proxy "${String(proxy)}" (vercel, cloudflare, fly, akamai)`);
+  return trustedHeaderClientKey(header);
+}
+
 /// Client address from one named header a trusted proxy sets, for example
 ///  `trustedHeaderClientKey("cf-connecting-ip")` behind Cloudflare or
 ///  `"fly-client-ip"` on Fly. Opt-in by name: the operator knows which

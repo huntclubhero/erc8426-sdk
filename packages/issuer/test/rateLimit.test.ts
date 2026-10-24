@@ -3,9 +3,11 @@ import {
   DEFAULT_RATE_LIMITS,
   IssuerConfigError,
   REMOTE_ADDRESS_HEADER,
+  TRUSTED_PROXY_HEADERS,
   defaultClientKey,
   forwardedClientKey,
   kvRateLimiter,
+  proxyClientKey,
   memoryKv,
   memoryRateLimiter,
   resolveConfig,
@@ -21,6 +23,7 @@ import { kvRepeatStore } from "@erc8426/issuer";
 const CHALLENGE = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}/challenge?address=${newSigner().address}`;
 const MANIFEST = (tokenId = TOKEN_ID) => `/wallet-pass/${tokenId}`;
 const RULE = { limit: 3, windowSeconds: 60 };
+const baseConfig = { domain: "issuer.example", baseUrl: "https://issuer.example", chainId: 1, contract: CONTRACT, mode: "gated" as const };
 
 async function expectLimited(res: Response, family: string) {
   expect(res.status).toBe(429);
@@ -391,6 +394,28 @@ describe("rate limiting on the HTTP surface", () => {
       if (r.status === 200) ok++;
     }
     expect(ok).toBe(RULE.limit);
+  });
+
+  it("trustProxy names the proxy that fronts the issuer: on Vercel that is x-real-ip, and CDN headers it passes through are ignored", async () => {
+    const h = buildHarness({ rateLimit: { challenge: RULE, perClient: false, trustProxy: "vercel" } });
+    const addr = newSigner().address;
+    let ok = 0;
+    // The attacker rotates cf-connecting-ip and true-client-ip (Vercel passes them through from the client) while Vercel's x-real-ip stays theirs.
+    for (let i = 0; i < 20; i++) {
+      const r = await h.get(`/wallet-pass/1/challenge?address=${addr}`, { "cf-connecting-ip": `10.0.${i}.1`, "true-client-ip": `10.1.${i}.1`, "x-real-ip": "203.0.113.7" });
+      if (r.status === 200) ok++;
+    }
+    expect(ok).toBe(RULE.limit);
+    // Another real client is its own bucket.
+    expect((await h.get(`/wallet-pass/1/challenge?address=${addr}`, { "x-real-ip": "203.0.113.8" })).status).toBe(200);
+    expect(TRUSTED_PROXY_HEADERS).toEqual({ vercel: "x-real-ip", cloudflare: "cf-connecting-ip", fly: "fly-client-ip", akamai: "true-client-ip" });
+    expect(proxyClientKey("cloudflare")(new Request("https://issuer.example/", { headers: { "cf-connecting-ip": "192.0.2.1" } }))).toBe("192.0.2.1");
+    expect(resolveConfig({ ...baseConfig, rateLimit: { trustProxy: { header: "x-client" } } }).rateLimit.clientKey(new Request("https://x/", { headers: { "x-client": "a" } }))).toBe("a");
+    expect(resolveConfig({ ...baseConfig, rateLimit: { trustProxy: { forwardedHops: 1 } } }).rateLimit.clientKey(new Request("https://x/", { headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" } }))).toBe("2.2.2.2");
+    expect(() => resolveConfig({ ...baseConfig, rateLimit: { trustProxy: "nope" as unknown as "vercel" } })).toThrowError(IssuerConfigError);
+    // An explicit clientKey wins over trustProxy.
+    const custom = resolveConfig({ ...baseConfig, rateLimit: { trustProxy: "vercel", clientKey: () => "fixed" } });
+    expect(custom.rateLimit.clientKey(new Request("https://x/", { headers: { "x-real-ip": "203.0.113.7" } }))).toBe("fixed");
   });
 
   it("trustedHeaderClientKey reads only the named header, then the socket", () => {
