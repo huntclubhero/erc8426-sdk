@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.1 (issuer and google)
+## 0.3.1 (issuer, google, core and apple)
+
+- `@erc8426/core` 0.3.1 and `@erc8426/apple` 0.3.1 carry the Featured Action changes in this release (a closed `FeaturedActionType` union with `FEATURED_ACTION_TYPES`, the `place` shape with `placeIdentifier`, type validation by name) and the legacy pass faces' field caps; client, react and conformance are unchanged at 0.3.0, contracts at 0.2.0.
 
 Two fixes to the identical-repeat handling introduced in 0.3.0, found by the hosted demo's smoke run, and the findings of an independent adversarial review of 0.3.0.
 
