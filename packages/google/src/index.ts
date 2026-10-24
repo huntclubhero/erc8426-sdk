@@ -29,4 +29,26 @@ export { createSaveUrl, saveOrigins, importServiceAccountKey, SAVE_URL_SOFT_LIMI
 export type { SaveUrlOptions, ServiceAccount, ObjectReference } from "./save.js";
 export { assertIssuerId, assertSuffix, resourceId, suffixForSerial } from "./ids.js";
 export { googleFormatProvider, defaultSupersededMessage, MemoryGoogleObjectStore } from "./provider.js";
+export {
+  CALLBACK_PROTOCOL_VERSION,
+  GOOGLE_PAY_PASSES_SENDER_ID,
+  GOOGLE_ROOT_KEYS_URL,
+  callbackHandler,
+  createCallbackVerifier,
+  maxAgeOf,
+  memoryCallbackNonceStore,
+  toSignedString,
+} from "./callback.js";
+export type {
+  CallbackEvent,
+  CallbackEventType,
+  CallbackNonceStore,
+  CallbackRefusal,
+  CallbackVerification,
+  CallbackVerifier,
+  CallbackVerifierOptions,
+  GoogleRootKey,
+  GoogleRootKeys,
+  SignedCallbackBody,
+} from "./callback.js";
 export type { GoogleFormatProvider, GoogleFormatProviderOptions, GoogleObjectStore, GoogleObjectRecord } from "./provider.js";

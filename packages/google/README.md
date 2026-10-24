@@ -59,6 +59,25 @@ googleFormatProvider({
 
 Left out, the fields are omitted and Google's defaults apply (screenshots allowed, no unlock required). `screenshots: "refuse"` is honoured by current Wallet versions; older ones may still allow a screenshot. `nfcBlock` also accepts `"closedLoopTransit"` (`BLOCK_CLOSED_LOOP_TRANSIT`). Apple Wallet has no equivalent to any of these (`sharingProhibited` on the Apple side is the nearest neighbour). These constraints narrow the on-screen exposure of the capability links a pass carries; they do not replace the documented bound and rotation on request, which the spec's Security Considerations name as what limits a leaked link.
 
+## Save and delete callbacks
+
+Set `callbackOptions: { url: "https://issuer.example/google/callback" }` on the class (through `classOverrides`) and Google POSTs a signed message to that URL every time a holder saves (`"save"`) or removes (`"del"`) an object of the class. `createCallbackVerifier` checks it the way Google's own library does: a root key fetched from `https://pay.google.com/gp/m/issuer/keys` (cached by its `Cache-Control` max-age, else `keyCacheSeconds`) signs an intermediate key, the intermediate key signs the message for sender `GooglePayPasses` and recipient = your issuer id, both ECDSA P-256 over SHA-256, and the message must not be expired. `callbackHandler` wraps it as a fetch handler (serve it on Node through `toNodeHandler` from `@erc8426/issuer`):
+
+```ts
+import { callbackHandler, createCallbackVerifier, memoryCallbackNonceStore } from "@erc8426/google";
+
+const verifier = createCallbackVerifier({ issuerId, nonceStore: memoryCallbackNonceStore() }); // or your KeyValueStore
+export const handleGoogleCallback = callbackHandler(verifier, async ({ objectId, eventType }) => {
+  await markSaved(objectId, eventType === "save");
+});
+```
+
+The handler answers 200 for a verified event, 400 for a message that will never verify, 503 when Google's keys could not be fetched or your `onEvent` threw (Google retries), and 200 for a redelivered nonce (`nonce_replayed`, the event was already handled). `verify(bodyText, headers?)` is available on its own and returns `{ ok: true, event }` or `{ ok: false, reason }` with one of `invalid_body`, `unsupported_protocol`, `keys_unavailable`, `intermediate_key_unverified`, `intermediate_key_expired`, `signature_invalid`, `message_invalid`, `message_expired`, `nonce_replayed`. A `User-Agent` other than `Googlebot` or `Google-Valuables` is logged (`onWarning`), not refused.
+
+What a verified event proves: Google says an object of yours was saved to, or removed from, some Google account. What it does not prove: who that account is (no account identity is included), that the pass is on a device right now (delivery is best effort; events can arrive late or out of order, so a `del` after a `save` may describe an older state), or anything about on-chain entitlement. Use it for display state (a "saved" badge, install counts, tidying stores), never for authorization: the fresh entitlement read stays the only boundary.
+
+Google fetches the callback URL as Googlebot, so your `robots.txt` must allow Googlebot on the callback path (a `Disallow` there and the callbacks never arrive). The nonce store is structurally a subset of `@erc8426/issuer`'s `KeyValueStore` (`set` with `onlyIfAbsent` and a TTL), so Redis or Upstash serve both; the TTL is the time left on the message.
+
 ## Building blocks
 
 - `googleWalletClient({ serviceAccount, issuerId, fetch?, timeoutMs? })`: JWT bearer token exchange, cached until a minute before expiry, one shared exchange for concurrent callers, dropped at once on a 401. `get` (null on 404), `insert`, `patch`, `upsert` (insert on 404, patch when present or on a 409 race), `addMessage`, `saveUrl`.
