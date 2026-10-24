@@ -192,8 +192,12 @@ describe("manifest", () => {
     expect(parseManifest({ formats: {} }).ok).toBe(false);
     expect(parseManifest({}).ok).toBe(false);
   });
-  it("requires the google format to be a Save to Google Wallet link", () => {
-    expect(parseManifest({ formats: { google: "https://evil.example/save" } }).ok).toBe(false);
+  it("keeps a google URL that is not a Save to Google Wallet link, with a warning", () => {
+    const r = parseManifest({ formats: { google: "https://issuer.example/passes/google/7" } });
+    expect(r).toMatchObject({ ok: true, manifest: { formats: { google: "https://issuer.example/passes/google/7" } } });
+    expect(r.issues).toEqual([expect.objectContaining({ level: "warning", path: "formats.google" })]);
+    const save = parseManifest({ formats: { google: "https://pay.google.com/gp/v/save/abc" } });
+    expect(save.issues).toEqual([]);
   });
   it("refuses acquisition URLs a client could not safely navigate to", () => {
     for (const url of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "http://evil.example/p.pkpass"]) {
