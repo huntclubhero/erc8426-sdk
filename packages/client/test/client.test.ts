@@ -122,8 +122,15 @@ describe("public manifest", () => {
   });
 
   it("rejects an invalid manifest with invalid_manifest", async () => {
-    const { client } = setup("public", { faults: { badGoogleLink: true } });
+    const { client } = setup("public", { faults: { insecureGoogleLink: true } });
     await expect(client.getManifest({ contract: CONTRACT, tokenId: 7 })).rejects.toMatchObject({ code: "invalid_manifest" });
+  });
+
+  it("keeps a google URL that is not a Save link, with a warning", async () => {
+    const { client } = setup("public", { faults: { badGoogleLink: true } });
+    const r = await client.getManifest({ contract: CONTRACT, tokenId: 7 });
+    expect(r.manifest.formats.google).toBe("https://example.com/not-google");
+    expect(r.issues).toEqual([expect.objectContaining({ level: "warning", path: "formats.google" })]);
   });
 
   it("accepts an inline data: manifest", async () => {

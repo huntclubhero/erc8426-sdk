@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2 (core, issuer) and 0.3.1 (conformance)
+
+ERC-8426 now defines format keys by function: `apple` obtains an Apple Wallet pass and `google` a Google Wallet pass. The pkpass media type and the Save to Google Wallet link shape are described as platform behavior, not requirements. The SDK follows, and two proof header details now match the standard and its reference server. Other packages are unchanged; client and react pick up the core change through their `^0.3.0` range.
+
+- `@erc8426/core` 0.3.2: `parseManifest` keeps a `google` URL that is not a Save to Google Wallet link and reports a warning on `formats.google`, instead of dropping it with an error. An issuer that routes the Google URL through its own endpoint first is conformant, and the Google button no longer disappears in clients built on the SDK.
+- `@erc8426/conformance` 0.3.1: `manifest.apple-media-type` is reported at SHOULD level, so a wrong media type warns without failing conformance. `manifest.valid` no longer requires a Save link; a `google` URL of another shape shows up under `manifest.lint`.
+- `@erc8426/core` 0.3.2: `decodeBase64Url` accepts correct trailing padding (one or two `=` at the end, only where they complete a group of four), since the standard asks a Pass Issuer to accept a padded proof; `=` elsewhere and the `+/` alphabet are still refused, and `encodeBase64Url` still never pads.
+- `@erc8426/core` 0.3.2, `@erc8426/issuer` 0.3.2: `readProofHeaders` reads each name form as a pair. A complete `Wallet-Pass-*` pair wins, a complete `X-Wallet-Pass-*` pair is used otherwise, a proof under one form with a signature under the other is refused (`malformed` with reason `mixed`, which the issuer answers 400 `invalid_request`), and anything else short of a complete pair, a lone header included, is `absent` (401 `proof_required` with the challenge URI). Before, a mixed pair was stitched into one proof and a lone header was a 400. The `partial` reason is no longer returned.
+
 ## 0.3.1 (issuer, google, core and apple)
 
 - `@erc8426/core` 0.3.1 and `@erc8426/apple` 0.3.1 carry the Featured Action changes in this release (a closed `FeaturedActionType` union with `FEATURED_ACTION_TYPES`, the `place` shape with `placeIdentifier`, type validation by name) and the legacy pass faces' field caps; client, react and conformance are unchanged at 0.3.0, contracts at 0.2.0.

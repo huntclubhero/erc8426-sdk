@@ -78,9 +78,16 @@ export function parseManifest(value: unknown): ManifestParseResult {
         issues.push({ level: "error", path, message: "acquisition URL must be https (http only on localhost)" });
         continue;
       }
+      // The standard defines `google` by function (the URL obtains a Google
+      // Wallet pass) and leaves the link shape to the platform, so a URL that
+      // is not a Save to Google Wallet link is kept: an issuer may route
+      // through its own endpoint first. It is only flagged.
       if (key === FORMAT_GOOGLE && !url.startsWith(GOOGLE_SAVE_URL_PREFIX)) {
-        issues.push({ level: "error", path, message: `the google format MUST be a Save to Google Wallet link (${GOOGLE_SAVE_URL_PREFIX}...)` });
-        continue;
+        issues.push({
+          level: "warning",
+          path,
+          message: `the google URL is not a Save to Google Wallet link (${GOOGLE_SAVE_URL_PREFIX}...); the standard does not require one, but check that it reaches Google Wallet`,
+        });
       }
       out[key] = url;
     }

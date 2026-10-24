@@ -8,7 +8,7 @@
    { "formats": { "apple": "https://issuer.example/...", "google": "https://pay.google.com/gp/v/save/..." }, "updatedAt": 1754500000 }
    ```
 
-   `apple` must be served as `application/vnd.apple.pkpass`; `google` must be a Save to Google Wallet link. Clients ignore keys they do not know. `updatedAt` is content freshness, not URL validity.
+   The standard defines each format key by what its URL does: `apple` obtains an Apple Wallet pass, `google` a Google Wallet pass. How each platform delivers it is the platform's business, not a requirement of the standard: today an Apple pass is served as `application/vnd.apple.pkpass` (Apple devices expect that type to hand the file to Wallet), and a Google pass is reached through a Save to Google Wallet link. The SDK's issuer produces both; `parseManifest` warns, without dropping the URL, when a `google` URL is not a Save link. Clients ignore keys they do not know. `updatedAt` is content freshness, not URL validity.
 
 2. **Freshness.** `PassUpdate(tokenId)` and `BatchPassUpdate(from, to)` (inclusive range) say the pass content changed. Distributors regenerate and push.
 

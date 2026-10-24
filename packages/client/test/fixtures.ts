@@ -206,6 +206,7 @@ export interface IssuerFaults {
   noGate?: boolean;
   /// Invalid manifest (google URL not a Save link).
   badGoogleLink?: boolean;
+  insecureGoogleLink?: boolean;
 }
 
 export interface FakeIssuerOptions {
@@ -241,7 +242,11 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
     ...(faults.manifestVersion !== undefined ? { version: faults.manifestVersion } : {}),
     formats: {
       apple: `${base}/files/${tokenId}-${rotation}.pkpass`,
-      google: faults.badGoogleLink ? "https://example.com/not-google" : `https://pay.google.com/gp/v/save/jwt${tokenId}r${rotation}`,
+      google: faults.insecureGoogleLink
+        ? "http://example.com/not-https"
+        : faults.badGoogleLink
+          ? "https://example.com/not-google"
+          : `https://pay.google.com/gp/v/save/jwt${tokenId}r${rotation}`,
     },
     updatedAt: 1754500000,
   });
