@@ -1,7 +1,7 @@
 import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
-import { defaultClientKey, memoryRateLimiter, unlimited, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+import { defaultClientKey, memoryRateLimiter, unlimited, type ClientKeyFn, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
 import type { RepeatStore } from "./repeat.js";
 
 /// The two configurations the standard defines under Acquisition URLs.
@@ -102,10 +102,18 @@ export interface RateLimitConfig {
   /// GET and POST /links/:link and GET /passes/:link, keyed by client and
   ///  link. Default 60 per 60 s. A POST costs a chain read and an action.
   capability?: RateLimitRule | false;
+  /// A second bucket per family keyed by the client ALONE, with no token in
+  ///  the key, so a client cannot start a fresh bucket for every token id or
+  ///  link it names and mint nonces or chain reads without bound. Default
+  ///  120 per 60 s per family. `false` disables it (the per-token buckets
+  ///  stay).
+  perClient?: RateLimitRule | false;
   /// The client identity a request is counted under. Default
-  ///  `defaultClientKey` (proxy headers, then the socket address the Node
-  ///  adapter recorded). Return null to count every unknown client together.
-  clientKey?: (request: Request) => string | null;
+  ///  `defaultClientKey`: the socket address the Node adapter recorded, and
+  ///  nothing a client can send. Behind a proxy use `forwardedClientKey(n)`
+  ///  or `trustedHeaderClientKey(name)`. Return null to count every unknown
+  ///  client together.
+  clientKey?: ClientKeyFn;
 }
 
 export interface ResolvedRateLimitConfig {
@@ -113,7 +121,8 @@ export interface ResolvedRateLimitConfig {
   challenge: RateLimitRule | false;
   manifest: RateLimitRule | false;
   capability: RateLimitRule | false;
-  clientKey: (request: Request) => string | null;
+  perClient: RateLimitRule | false;
+  clientKey: ClientKeyFn;
 }
 
 /// Identical repeats answered with the first outcome (see repeat.ts). iOS
@@ -443,10 +452,11 @@ function resolveRepeat(config: RepeatConfig | false | undefined): ResolvedRepeat
   return { windowSeconds: positiveInt("repeat.windowSeconds", c.windowSeconds, DEFAULT_REPEAT_WINDOW_SECONDS), ...(c.store ? { store: c.store } : {}) };
 }
 
-export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability", RateLimitRule>> = {
+export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability" | "perClient", RateLimitRule>> = {
   challenge: { limit: 30, windowSeconds: 60 },
   manifest: { limit: 60, windowSeconds: 60 },
   capability: { limit: 60, windowSeconds: 60 },
+  perClient: { limit: 120, windowSeconds: 60 },
 };
 
 function rule(name: string, value: RateLimitRule | false | undefined, fallback: RateLimitRule): RateLimitRule | false {
@@ -458,7 +468,7 @@ function rule(name: string, value: RateLimitRule | false | undefined, fallback: 
 
 function resolveRateLimit(config: RateLimitConfig | false | undefined): ResolvedRateLimitConfig {
   if (config === false) {
-    return { limiter: unlimited, challenge: false, manifest: false, capability: false, clientKey: defaultClientKey };
+    return { limiter: unlimited, challenge: false, manifest: false, capability: false, perClient: false, clientKey: defaultClientKey };
   }
   const c = config ?? {};
   if (c.limiter !== undefined && typeof c.limiter.hit !== "function") throw new IssuerConfigError("rateLimit.limiter must implement hit()");
@@ -468,6 +478,7 @@ function resolveRateLimit(config: RateLimitConfig | false | undefined): Resolved
     challenge: rule("challenge", c.challenge, DEFAULT_RATE_LIMITS.challenge),
     manifest: rule("manifest", c.manifest, DEFAULT_RATE_LIMITS.manifest),
     capability: rule("capability", c.capability, DEFAULT_RATE_LIMITS.capability),
+    perClient: rule("perClient", c.perClient, DEFAULT_RATE_LIMITS.perClient),
     clientKey: c.clientKey ?? defaultClientKey,
   };
 }

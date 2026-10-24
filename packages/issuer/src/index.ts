@@ -46,6 +46,9 @@ export {
 export {
   REMOTE_ADDRESS_HEADER,
   defaultClientKey,
+  forwardedClientKey,
+  trustedHeaderClientKey,
+  type ClientKeyFn,
   kvRateLimiter,
   memoryRateLimiter,
   unlimited,

@@ -203,10 +203,17 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // issuer nothing but the count. Null when the request may proceed.
   async function throttle(request: Request, family: "challenge" | "manifest" | "capability", pathToken: string): Promise<Response | null> {
     const rule: RateLimitRule | false = config.rateLimit[family];
-    if (rule === false) return null;
+    const perClient = config.rateLimit.perClient;
+    if (rule === false && perClient === false) return null;
     const client = config.rateLimit.clientKey(request) ?? "unknown";
-    const decision = await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, x.now());
-    if (decision.allowed) return null;
+    const now = x.now();
+    // Two buckets: the client alone (so naming a new token id or link does
+    // not start a fresh bucket) and the client with the path token (so one
+    // token hammered from one place is bounded tighter still). The client
+    // bucket is checked first, so a client past it costs one counter write.
+    const perClientDecision = perClient === false ? null : await config.rateLimit.limiter.hit(`${family}:client:${client}`, perClient, now);
+    const decision = perClientDecision && !perClientDecision.allowed ? perClientDecision : rule === false ? null : await config.rateLimit.limiter.hit(`${family}:${client}:${pathToken}`, rule, now);
+    if (!decision || decision.allowed) return null;
     return json(429, { error: "rate_limited", message: `too many ${family} requests; retry after ${decision.retryAfterSeconds} s` }, { "Retry-After": String(decision.retryAfterSeconds) });
   }
 
