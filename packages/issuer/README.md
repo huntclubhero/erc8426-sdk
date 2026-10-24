@@ -214,6 +214,8 @@ createIssuer({ ...config, rateLimit: false });        // off entirely
 - `clientKey` defaults to `defaultClientKey`: `CF-Connecting-IP`, `True-Client-IP`, `X-Real-IP`, `Fly-Client-IP`, the first `X-Forwarded-For` hop, then the socket address the Node adapter records (`toNodeHandler` and `expressMiddleware` set it from `req.socket.remoteAddress`, dropping any client-sent value). Behind no proxy `X-Forwarded-For` is client-supplied, so pass a `clientKey` that reads the socket address only.
 - Any object with `hit(key, rule, nowMs)` is a `RateLimiter`.
 
+Why the token is in every key: holders share addresses. A school's Wi-Fi, an office, a stadium, or a carrier's address translation puts many people behind one address, each presenting a different token (a class adding their student cards in the same minute, a venue's ticket holders at the door). A limit keyed by address alone refuses that crowd and does nothing against an attacker who spreads across addresses. Keyed by client and token together, thirty honest holders on one network are thirty keys, and the pattern the limit exists for, many requests for one token from one place, is still bounded. If you supply a `clientKey`, keep it per client; the issuer adds the token.
+
 `kvStores(kv, { chainId, contract, prefix? })` builds all three stores on this interface. Every key is scoped by chain id and lowercased contract (`${prefix}${chainId}:${contract}:pass:${tokenId}`, and `:link:`, `:nonce:` alongside; `prefix` defaults to `erc8426:`), so two collections on one Redis never share a row even when they share token ids. Rows written by 0.2.x (`${prefix}pass:${tokenId}`) are not read; see the 0.3.0 changelog for the one-off rekey.
 
 ```ts
