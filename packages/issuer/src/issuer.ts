@@ -303,13 +303,34 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // The store keys of every link and download the record currently holds.
   const digestsOf = (record: PassRecord) => Promise.all([...Object.values(record.links), ...Object.values(record.downloads)].map((seed) => keyring.digestOfSeed(seed)));
 
+  // A record bound under another linkSecret (a rotation, a dev restart with
+  // an ephemeral secret, or a 0.3.0 record with no stamp) has link rows the
+  // current keyring can never reach: the digests it computes from the seeds
+  // differ from the ones stored, so every link and download would answer
+  // unknown_capability forever. Rewrite the bindings under the current
+  // secret and stamp the record. The seeds themselves stay, so the URLs
+  // the holder sees change (a secret rotation retires every old link, as
+  // documented) but the record stays whole and the next claim works.
+  async function rebind(record: PassRecord): Promise<boolean> {
+    const id = await keyring.id();
+    if (record.linkKeyring === id) return false;
+    for (const [action, seed] of Object.entries(record.links)) {
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "action", tokenId: record.tokenId, name: action, generation: record.generation });
+    }
+    for (const [format, seed] of Object.entries(record.downloads)) {
+      await stores.links.put(await keyring.digestOfSeed(seed), { kind: "download", tokenId: record.tokenId, name: format, generation: record.generation });
+    }
+    record.linkKeyring = id;
+    return true;
+  }
+
   // Mint links for whatever the record is missing: every capability action
   // and every file format. A link is a random seed in the record plus a
   // binding stored under the digest of the token derived from that seed;
   // the token itself is never written anywhere. Links already present are
-  // kept.
+  // kept (and re-bound first if the secret changed under them).
   async function fill(record: PassRecord): Promise<boolean> {
-    let changed = false;
+    let changed = await rebind(record);
     for (const action of config.capabilityActions) {
       if (record.links[action]) continue;
       const seed = newLinkSeed();
@@ -392,6 +413,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //  - "claim": a new account's first claim; it becomes the holder.
   //  - "owner_request": the holder of record is unchanged.
   async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
+    // So the deletes below hit the rows that exist under the current secret.
+    if (await rebind(record)) await stores.passes.put(record);
     const next: PassRecord = {
       ...record,
       generation: record.generation + 1,
@@ -417,6 +440,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // (render would read a token that no longer exists) and retire every link
   // and download. Nothing is minted in their place; a re-mint starts over.
   async function burnRecord(record: PassRecord): Promise<void> {
+    if (await rebind(record)) await stores.passes.put(record);
     const next: PassRecord = {
       ...record,
       generation: record.generation + 1,

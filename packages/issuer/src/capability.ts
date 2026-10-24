@@ -44,10 +44,22 @@ export async function linkDigest(token: string): Promise<string> {
 ///  the holder's links again without storing them.
 export class LinkKeyring {
   private readonly key: Promise<CryptoKey>;
+  private readonly keyId: Promise<string>;
   constructor(secret: Uint8Array) {
     if (secret.byteLength < 32) throw new Error("linkSecret must be at least 32 bytes");
     // A fresh copy, so the key material sits in its own ArrayBuffer.
-    this.key = crypto.subtle.importKey("raw", new Uint8Array(secret).buffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const bytes = new Uint8Array(secret);
+    this.key = crypto.subtle.importKey("raw", bytes.buffer, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    // A short fingerprint of the secret, stamped on each pass record so a
+    // record bound under another secret (a rotation, a dev restart with an
+    // ephemeral one) is recognized and re-bound. Reveals nothing usable: 64
+    // bits of a hash of at least 256 bits of key material.
+    this.keyId = crypto.subtle.digest("SHA-256", bytes).then((d) => Array.from(new Uint8Array(d).slice(0, 8), (b) => b.toString(16).padStart(2, "0")).join(""));
+  }
+
+  /// Fingerprint of the secret (16 hex characters).
+  id(): Promise<string> {
+    return this.keyId;
   }
 
   /// The 43-character token for a stored seed.

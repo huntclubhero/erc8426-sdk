@@ -45,6 +45,14 @@ export interface PassRecord {
   /// Format key to the seed of its current download link, for providers the
   ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
+  /// Fingerprint (`LinkKeyring.id`) of the `linkSecret` the link bindings
+  ///  were last written under. When it differs from the running issuer's
+  ///  (the secret was rotated, or a development process restarted with an
+  ///  ephemeral one), the bindings are rewritten under the current secret
+  ///  on the next load, so the holder's next claim gets working links
+  ///  instead of a record whose links are dead forever. Absent on records
+  ///  written before 0.3.1, which are re-bound the same way.
+  linkKeyring?: string;
   /// Unix seconds of the last content change (the manifest's `updatedAt`).
   updatedAt: number;
   /// Unix seconds of the last rotation, or of creation.
