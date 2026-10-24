@@ -189,6 +189,9 @@ describe("capability links (The capability configuration)", () => {
     // limits what repetition can do, and rotation on the owner's request is
     // the remedy (next test).
     expect((await h.post(links.feed!)).status).toBe(200);
+    // Past the repeat window, so this is a second request and not the
+    // owner's own phone asking again (repeat.test.ts covers that).
+    h.clock.advance(31_000);
     const forwarded = await h.post(links.feed!);
     expect(forwarded.status).toBe(200);
     expect(h.executed).toHaveLength(2);

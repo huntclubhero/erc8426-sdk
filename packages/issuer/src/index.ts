@@ -13,6 +13,7 @@ export {
 export { isPassFileProvider, type PassDeliveryProvider, type PassFile, type PassFileProvider } from "@erc8426/core";
 export {
   DEFAULT_RATE_LIMITS,
+  DEFAULT_REPEAT_WINDOW_SECONDS,
   IssuerConfigError,
   resolveConfig,
   type ActionContext,
@@ -23,9 +24,22 @@ export {
   type IssuerMode,
   type LinkPageContext,
   type RateLimitConfig,
+  type RepeatConfig,
   type ResolvedIssuerConfig,
   type ResolvedRateLimitConfig,
+  type ResolvedRepeatConfig,
 } from "./config.js";
+export {
+  RepeatCoalescer,
+  isReplayableOutcome,
+  kvRepeatStore,
+  memoryRepeatStore,
+  sha256Hex,
+  type KvRepeatStoreOptions,
+  type MemoryRepeatStoreOptions,
+  type RecordedOutcome,
+  type RepeatStore,
+} from "./repeat.js";
 export {
   REMOTE_ADDRESS_HEADER,
   defaultClientKey,

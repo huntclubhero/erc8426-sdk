@@ -89,6 +89,10 @@ beforeAll(async () => {
     chainId: chain.publicClient.chain!.id,
     contract: petPass.address,
     mode: "gated",
+    // This suite re-presents byte-identical requests on purpose (bounded
+    // repetition, refusals after a rotation); repeat semantics are covered
+    // in packages/issuer/test/repeat.test.ts.
+    repeat: false,
     publicClient: chain.publicClient,
     providers: [apple, google.provider],
     capability: { enabled: true },

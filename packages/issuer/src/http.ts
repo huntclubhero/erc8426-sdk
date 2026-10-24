@@ -4,6 +4,7 @@ import {
   PROOF_HEADER_NAMES,
   ROTATE_ACTION,
   normalizeTokenId,
+  parseChallenge,
   readProofHeaders,
   type AuthError,
   type ControlProof,
@@ -13,6 +14,7 @@ import {
 import { defaultConfirmPage, resultPage, withLinkPageHeaders } from "./capability.js";
 import type { ActionDefinition, LinkPageContext } from "./config.js";
 import type { RateLimitRule } from "./rateLimit.js";
+import { RepeatCoalescer, memoryRepeatStore, sha256Hex } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
 
@@ -97,6 +99,11 @@ async function readText(request: Request): Promise<string | null> {
 async function readBody(request: Request): Promise<Json | null> {
   const text = await readText(request);
   if (text === null) return null;
+  return parseBodyText(request, text);
+}
+
+/// The body text as a JSON object (or a form), or null when it is neither.
+function parseBodyText(request: Request, text: string): Json | null {
   if (text.trim() === "") return {};
   if ((request.headers.get("Content-Type") ?? "").includes("application/x-www-form-urlencoded")) {
     return Object.fromEntries(new URLSearchParams(text));
@@ -132,6 +139,17 @@ function readProof(request: Request, body: Json | null): ProofRead {
 
 export function createRouter(x: IssuerInternals): (request: Request) => Promise<Response | null> {
   const { config } = x;
+  // Identical repeats of a POST get the first outcome (repeat.ts). The key
+  // covers the link or nonce and a hash of every byte that matters, so only
+  // a presentation that differs from the first is a new request (or, on the
+  // nonce path, a replay).
+  const repeats = config.repeat ? new RepeatCoalescer(config.repeat.store ?? memoryRepeatStore({ now: x.now }), config.repeat.windowSeconds) : null;
+  async function coalesce(key: string | null, run: () => Promise<Response>): Promise<Response> {
+    if (!repeats || key === null) return run();
+    const { response, repeated } = await repeats.run(key, run);
+    if (repeated) response.headers.set("X-Wallet-Pass-Repeat", "true");
+    return response;
+  }
 
   function error(code: IssuerErrorCode, extra: Json = {}): Response {
     const status = statusForIssuerError(code);
@@ -282,15 +300,25 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // can never be spent here, and a rotate proof only on the rotate route.
     const def = Object.hasOwn(config.actions, action) ? config.actions[action] : undefined;
     if (!def) return error("unknown_action", { message: `unknown action: ${action}` });
-    const body = await readBody(request);
+    const text = await readText(request);
+    if (text === null) return error("invalid_request", { message: "body must be a JSON object" });
+    const body = parseBodyText(request, text);
     if (body === null) return error("invalid_request", { message: "body must be a JSON object" });
     const challengeUri = x.challengeUri(tokenId, action);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
     if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
-    const result = await x.authorize({ ...proof.proof, tokenId, action });
-    if (!result.ok) return refuse(result.error, challengeUri);
-    return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+    // Keyed by the nonce and every byte of the presentation: an identical
+    // repeat (the phone resending an aborted POST) gets the first outcome
+    // instead of nonce_invalid; a different request carrying the same nonce
+    // keys differently and is refused by the floor as the replay it is.
+    const nonce = parseChallenge(proof.proof.message)?.nonce ?? "-";
+    const key = `nonce:${tokenId}:${action}:${nonce}:${await sha256Hex(`${proof.proof.message}\n${proof.proof.signature}\n${text}`)}`;
+    return coalesce(key, async () => {
+      const result = await x.authorize({ ...proof.proof, tokenId, action });
+      if (!result.ok) return refuse(result.error, challengeUri);
+      return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
+    });
   }
 
   // POST {base}/:tokenId/rotate
@@ -370,36 +398,44 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // check (2), the fresh entitlement read of the holder the link was issued
   // to, runs unconditionally.
   async function followLink(request: Request, linkToken: string): Promise<Response> {
-    const resolved = await resolveActionLink(linkToken);
-    if (!resolved) return error("unknown_capability");
-    const { binding, record, def } = resolved;
-    const body = await readBody(request);
-    if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
-    // The link decides the action. A request naming another is refused, as
-    // a proof for action A is refused for action B.
-    if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
-    const holder = record.lastIssuedTo;
-    // A link minted since a transfer and not yet issued to anyone authorizes
-    // no one. It is not a verified non-entitled account, so not a 403.
-    if (!holder) return error("unknown_capability");
-    let entitled;
-    try {
-      entitled = await x.entitled(binding.tokenId, holder, binding.name);
-    } catch {
-      return error("read_failed");
-    }
-    // A sold token behind a still-live link stops acting here, before any
-    // rotation catches up. What this does NOT close is forwarding under an
-    // unchanged owner: the residual the capability configuration discloses.
-    if (!entitled.entitled) return error("not_owner");
-    return execute(def, {
-      tokenId: binding.tokenId,
-      action: binding.name,
-      account: holder,
-      via: entitled.via,
-      path: "capability",
-      params: body.params,
-      request,
+    const text = await readText(request);
+    if (text === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
+    // Keyed by the link and a hash of the body: the phone resending an
+    // aborted POST runs the action once and gets one answer twice. A body
+    // that differs is a new request.
+    const key = `link:${linkToken}:${await sha256Hex(text)}`;
+    return coalesce(key, async () => {
+      const resolved = await resolveActionLink(linkToken);
+      if (!resolved) return error("unknown_capability");
+      const { binding, record, def } = resolved;
+      const body = parseBodyText(request, text);
+      if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
+      // The link decides the action. A request naming another is refused, as
+      // a proof for action A is refused for action B.
+      if (body.action !== undefined && body.action !== binding.name) return error("binding_mismatch");
+      const holder = record.lastIssuedTo;
+      // A link minted since a transfer and not yet issued to anyone authorizes
+      // no one. It is not a verified non-entitled account, so not a 403.
+      if (!holder) return error("unknown_capability");
+      let entitled;
+      try {
+        entitled = await x.entitled(binding.tokenId, holder, binding.name);
+      } catch {
+        return error("read_failed");
+      }
+      // A sold token behind a still-live link stops acting here, before any
+      // rotation catches up. What this does NOT close is forwarding under an
+      // unchanged owner: the residual the capability configuration discloses.
+      if (!entitled.entitled) return error("not_owner");
+      return execute(def, {
+        tokenId: binding.tokenId,
+        action: binding.name,
+        account: holder,
+        via: entitled.via,
+        path: "capability",
+        params: body.params,
+        request,
+      });
     });
   }
 

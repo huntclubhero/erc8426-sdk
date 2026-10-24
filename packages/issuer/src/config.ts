@@ -2,6 +2,7 @@ import { getAddress, isAddress, type Address } from "viem";
 import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
 
 import { defaultClientKey, memoryRateLimiter, unlimited, type RateLimitRule, type RateLimiter } from "./rateLimit.js";
+import type { RepeatStore } from "./repeat.js";
 
 /// The two configurations the standard defines under Acquisition URLs.
 ///
@@ -115,6 +116,24 @@ export interface ResolvedRateLimitConfig {
   clientKey: (request: Request) => string | null;
 }
 
+/// Identical repeats answered with the first outcome (see repeat.ts). iOS
+///  in-app browsers resend a POST the phone aborted, so without this every
+///  tap on a pass link could run an action twice or meet `nonce_invalid`.
+export interface RepeatConfig {
+  /// How long after a request completes an identical repeat still gets its
+  ///  outcome. Default 30 seconds.
+  windowSeconds?: number;
+  /// Where outcomes live. Default `memoryRepeatStore()` (one process). Pass
+  ///  `kvRepeatStore(kv)` so instances share completed outcomes.
+  store?: RepeatStore;
+}
+
+export interface ResolvedRepeatConfig {
+  windowSeconds: number;
+  /// Absent means the in-memory store, built by the issuer on its own clock.
+  store?: RepeatStore;
+}
+
 export interface CorsConfig {
   /// "*" or an explicit allowlist of origins (scheme://host[:port]).
   origins: "*" | string[];
@@ -172,6 +191,11 @@ export interface IssuerConfig {
   ///  default with an in-process limiter and the defaults in
   ///  `RateLimitConfig`; `false` turns limiting off entirely.
   rateLimit?: RateLimitConfig | false;
+  /// Answer an identical repeat of a POST (same link or nonce, same bytes)
+  ///  with the first request's outcome instead of running it again or
+  ///  refusing it. On by default with a 30 second window; `false` turns it
+  ///  off, so every presentation is judged on its own.
+  repeat?: RepeatConfig | false;
 }
 
 export interface ResolvedIssuerConfig {
@@ -193,6 +217,7 @@ export interface ResolvedIssuerConfig {
   cors: CorsConfig | false;
   maxBatchRange: number;
   rateLimit: ResolvedRateLimitConfig;
+  repeat: ResolvedRepeatConfig | false;
 }
 
 /// Thrown by `createIssuer` for a configuration the spec does not allow or
@@ -268,6 +293,7 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
   const retryAfterSeconds = positiveInt("retryAfterSeconds", config.retryAfterSeconds, 5);
   const maxBatchRange = positiveInt("maxBatchRange", config.maxBatchRange, 10_000);
   const rateLimit = resolveRateLimit(config.rateLimit);
+  const repeat = resolveRepeat(config.repeat);
 
   const capability: CapabilityConfig = config.capability ?? { enabled: false };
   if (capability.enabled && config.mode !== "gated") {
@@ -340,7 +366,19 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     cors,
     maxBatchRange,
     rateLimit,
+    repeat,
   };
+}
+
+export const DEFAULT_REPEAT_WINDOW_SECONDS = 30;
+
+function resolveRepeat(config: RepeatConfig | false | undefined): ResolvedRepeatConfig | false {
+  if (config === false) return false;
+  const c = config ?? {};
+  if (c.store !== undefined && (typeof c.store.get !== "function" || typeof c.store.put !== "function")) {
+    throw new IssuerConfigError("repeat.store must implement get() and put()");
+  }
+  return { windowSeconds: positiveInt("repeat.windowSeconds", c.windowSeconds, DEFAULT_REPEAT_WINDOW_SECONDS), ...(c.store ? { store: c.store } : {}) };
 }
 
 export const DEFAULT_RATE_LIMITS: Readonly<Record<"challenge" | "manifest" | "capability", RateLimitRule>> = {

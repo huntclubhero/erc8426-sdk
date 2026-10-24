@@ -190,6 +190,7 @@ describe("kvStores", () => {
     const links = await issuePassTo(h, owner);
     expect((await h.post(links.feed!)).status).toBe(200);
     await h.issuer.onTransfer(TOKEN_ID, owner.address, newSigner().address);
+    h.clock.advance(31_000); // past the repeat window: a new request, not the holder's phone asking again
     expect((await h.post(links.feed!)).status).toBe(404);
   });
 });

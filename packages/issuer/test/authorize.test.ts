@@ -137,9 +137,21 @@ describe("signed action (the two-check floor)", () => {
     const h = buildHarness();
     const { message, signature } = await primed(h);
     expect((await h.post(ACTION_PATH("feed"), { message, signature })).status).toBe(200);
-    const replay = await h.post(ACTION_PATH("feed"), { message, signature });
+    // A byte-identical repeat inside the repeat window is the phone asking
+    // again: it gets the first outcome and runs nothing (repeat.test.ts).
+    const identical = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(identical.status).toBe(200);
+    expect(identical.headers.get("x-wallet-pass-repeat")).toBe("true");
+    expect(h.executed).toHaveLength(1);
+    // Any presentation that differs is a replay and finds the nonce spent.
+    const replay = await h.post(ACTION_PATH("feed"), { message, signature, params: { again: true } });
     expect(replay.status).toBe(401);
     expect(((await replay.json()) as { error: string }).error).toBe("nonce_invalid");
+    // And so is the identical one once the window has passed.
+    h.clock.advance(31_000);
+    const late = await h.post(ACTION_PATH("feed"), { message, signature });
+    expect(late.status).toBe(401);
+    expect(((await late.json()) as { error: string }).error).toBe("nonce_invalid");
     expect(h.executed).toHaveLength(1);
   });
 
