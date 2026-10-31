@@ -1,8 +1,12 @@
 import { isAddress, isAddressEqual, type Address, type Hex } from "viem";
 import {
   ACQUIRE_ACTION,
+  LEGACY_PROOF_HEADER,
+  LEGACY_SIGNATURE_HEADER,
+  PROOF_HEADER,
   PROOF_HEADER_NAMES,
   ROTATE_ACTION,
+  SIGNATURE_HEADER,
   normalizeTokenId,
   parseChallenge,
   readProofHeaders,
@@ -126,31 +130,40 @@ type ProofRead =
   | { kind: "malformed"; error: "invalid_message" | "invalid_request"; message: string }
   | { kind: "present"; proof: ControlProof };
 
-const PROOF_TOO_LARGE = { kind: "malformed", error: "invalid_message", message: "proof header too large" } as const;
-
 /// A proof from the proof headers (the Gated acquisition transport, under
 ///  the RFC 6648 names or the X- names), or, for POST routes, from a JSON
-///  body `{ message, signature }`.
-function proofHeadersTooLarge(headers: Headers): boolean {
-  return PROOF_HEADER_NAMES.some((name) => (headers.get(name)?.length ?? 0) > MAX_PROOF_HEADER_CHARS);
-}
-
+///  body `{ message, signature }`. The pair is selected first, as the
+///  reference server does, so a bad value under the pair that is not used
+///  changes nothing and a lone header is still a missing proof. The size
+///  bound then applies to the selected pair only: an oversize proof is a
+///  message past the bound (invalid_message), an oversize signature a
+///  malformed request (invalid_request), refused before any verifier runs.
 function readHeaderProof(headers: Headers): ProofRead {
-  if (proofHeadersTooLarge(headers)) return PROOF_TOO_LARGE;
   const read = readProofHeaders(headers);
-  if (read.kind !== "malformed") return read;
-  switch (read.reason) {
-    case "mixed":
-      return {
-        kind: "malformed",
-        error: "invalid_request",
-        message: "the proof headers mix the Wallet-Pass and X-Wallet-Pass name forms; send one complete pair",
-      };
-    case "encoding":
-      return { kind: "malformed", error: "invalid_message", message: "the proof header is not base64url" };
-    default:
-      return { kind: "malformed", error: "invalid_request", message: `proof headers could not be decoded (${read.reason})` };
+  if (read.kind === "absent") return read;
+  if (read.kind === "malformed" && read.reason === "mixed") {
+    return {
+      kind: "malformed",
+      error: "invalid_request",
+      message: "the proof headers mix the Wallet-Pass and X-Wallet-Pass name forms; send one complete pair",
+    };
   }
+  if (read.kind === "malformed" && read.reason !== "encoding") {
+    return { kind: "malformed", error: "invalid_request", message: `proof headers could not be decoded (${read.reason})` };
+  }
+  const unprefixed = Boolean(headers.get(PROOF_HEADER) && headers.get(SIGNATURE_HEADER));
+  const proofLength = headers.get(unprefixed ? PROOF_HEADER : LEGACY_PROOF_HEADER)?.length ?? 0;
+  const signatureLength = headers.get(unprefixed ? SIGNATURE_HEADER : LEGACY_SIGNATURE_HEADER)?.length ?? 0;
+  if (proofLength > MAX_PROOF_HEADER_CHARS) {
+    return { kind: "malformed", error: "invalid_message", message: "proof header too large" };
+  }
+  if (signatureLength > MAX_PROOF_HEADER_CHARS) {
+    return { kind: "malformed", error: "invalid_request", message: "signature header too large" };
+  }
+  if (read.kind === "malformed") {
+    return { kind: "malformed", error: "invalid_message", message: "the proof header is not base64url" };
+  }
+  return read;
 }
 
 function readProof(request: Request, body: Json | null): ProofRead {

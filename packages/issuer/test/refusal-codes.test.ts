@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { LEGACY_PROOF_HEADER, LEGACY_SIGNATURE_HEADER, PROOF_HEADER, SIGNATURE_HEADER, encodeBase64Url } from "@erc8426/core";
 
-import { TOKEN_ID, buildHarness, newSigner } from "./helpers.js";
+import { TOKEN_ID, buildHarness, newSigner, signChallenge } from "./helpers.js";
 
 // The spec's refusal table: a presented message that is not a parseable
 // challenge, or exceeds the size bound, is invalid_message; a request that is
@@ -49,11 +49,43 @@ describe.each(routes)("refusal codes on the %s route", (_name, send) => {
     expect(await errorOf(res)).toBe("invalid_request");
   });
 
+  it("an oversize signature is invalid_request, hex or not, and the hex check comes first", async () => {
+    const h = buildHarness();
+    for (const signature of ["z".repeat(9000), `0x${"ab".repeat(4500)}`]) {
+      const res = await send(h, { [PROOF_HEADER]: encodeBase64Url("x"), [SIGNATURE_HEADER]: signature });
+      expect(res.status).toBe(400);
+      expect(await errorOf(res)).toBe("invalid_request");
+    }
+  });
+
+  it("a lone oversize proof header is a missing proof", async () => {
+    const h = buildHarness();
+    const res = await send(h, { [PROOF_HEADER]: "a".repeat(9000) });
+    expect(res.status).toBe(401);
+    expect(await errorOf(res)).toBe("proof_required");
+  });
+
   it("a mixed header pair stays invalid_request", async () => {
     const h = buildHarness();
     const res = await send(h, { [PROOF_HEADER]: encodeBase64Url("x"), [LEGACY_SIGNATURE_HEADER]: "0x00" });
     expect(res.status).toBe(400);
     expect(await errorOf(res)).toBe("invalid_request");
+  });
+});
+
+describe("the pair that is not used changes nothing", () => {
+  it("a valid unprefixed pair resolves the manifest beside an oversize X- proof", async () => {
+    const h = buildHarness();
+    const owner = newSigner();
+    h.chain.setOwner(TOKEN_ID, owner.address);
+    const p = await signChallenge(h, owner);
+    const res = await h.get(MANIFEST, {
+      [PROOF_HEADER]: encodeBase64Url(p.message),
+      [SIGNATURE_HEADER]: p.signature,
+      [LEGACY_PROOF_HEADER]: "a".repeat(9000),
+      [LEGACY_SIGNATURE_HEADER]: "0xab",
+    });
+    expect(res.status).toBe(200);
   });
 });
 
