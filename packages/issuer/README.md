@@ -100,8 +100,8 @@ Refusals carry the `error` codes of the spec's refusal table (Refusal responses)
 
 | `error` | Status | When | Retry |
 | :- | :- | :- | :- |
-| `invalid_request` | 400 | Malformed request: a bad token id or `address`, a proof header that cannot be decoded, a body that is not JSON | After correcting it |
-| `invalid_message` | 400 | The presented message is not a parseable challenge, or exceeds the size bound | Fresh challenge |
+| `invalid_request` | 400 | Malformed request: a bad token id or `address`, a mixed proof header pair, a signature that is not hex, a body that is not JSON | After correcting it |
+| `invalid_message` | 400 | The presented message is not a parseable challenge, or exceeds the size bound (a proof header that is not base64url, or past the size bound, included) | Fresh challenge |
 | `domain_mismatch` | 400 | The challenge names another verifier | Fresh challenge |
 | `binding_mismatch` | 400 | The proof or link does not bind this exact token and action | Fresh challenge |
 | `unknown_action` | 400 | The action is not registered (SDK code, outside the table) | No |

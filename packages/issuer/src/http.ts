@@ -118,7 +118,15 @@ function parseBodyText(request: Request, text: string): Json | null {
   }
 }
 
-type ProofRead = { kind: "absent" } | { kind: "malformed" } | { kind: "present"; proof: ControlProof };
+/// `error` is the refusal code per the spec table: a presented message that
+///  cannot be decoded or exceeds the size bound is `invalid_message`; a mixed
+///  header pair or a signature that is not hex is `invalid_request`.
+type ProofRead =
+  | { kind: "absent" }
+  | { kind: "malformed"; error: "invalid_message" | "invalid_request"; message: string }
+  | { kind: "present"; proof: ControlProof };
+
+const PROOF_TOO_LARGE = { kind: "malformed", error: "invalid_message", message: "proof header too large" } as const;
 
 /// A proof from the proof headers (the Gated acquisition transport, under
 ///  the RFC 6648 names or the X- names), or, for POST routes, from a JSON
@@ -127,14 +135,31 @@ function proofHeadersTooLarge(headers: Headers): boolean {
   return PROOF_HEADER_NAMES.some((name) => (headers.get(name)?.length ?? 0) > MAX_PROOF_HEADER_CHARS);
 }
 
+function readHeaderProof(headers: Headers): ProofRead {
+  if (proofHeadersTooLarge(headers)) return PROOF_TOO_LARGE;
+  const read = readProofHeaders(headers);
+  if (read.kind !== "malformed") return read;
+  switch (read.reason) {
+    case "mixed":
+      return {
+        kind: "malformed",
+        error: "invalid_request",
+        message: "the proof headers mix the Wallet-Pass and X-Wallet-Pass name forms; send one complete pair",
+      };
+    case "encoding":
+      return { kind: "malformed", error: "invalid_message", message: "the proof header is not base64url" };
+    default:
+      return { kind: "malformed", error: "invalid_request", message: `proof headers could not be decoded (${read.reason})` };
+  }
+}
+
 function readProof(request: Request, body: Json | null): ProofRead {
-  if (proofHeadersTooLarge(request.headers)) return { kind: "malformed" };
-  const fromHeaders = readProofHeaders(request.headers);
-  if (fromHeaders.kind !== "absent") return fromHeaders.kind === "present" ? fromHeaders : { kind: "malformed" };
+  const fromHeaders = readHeaderProof(request.headers);
+  if (fromHeaders.kind !== "absent") return fromHeaders;
   if (!body || (body.message === undefined && body.signature === undefined)) return { kind: "absent" };
   const { message, signature } = body;
   if (typeof message !== "string" || typeof signature !== "string" || !/^0x([0-9a-fA-F]{2})+$/.test(signature)) {
-    return { kind: "malformed" };
+    return { kind: "malformed", error: "invalid_request", message: "the proof could not be decoded" };
   }
   return { kind: "present", proof: { message, signature: signature as Hex } };
 }
@@ -294,17 +319,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
     // Gated configuration.
     const challenge = x.challengeUri(tokenId);
-    if (proofHeadersTooLarge(request.headers)) return error("invalid_request", { message: "proof header too large" });
-    const proof = readProofHeaders(request.headers);
+    const proof = readHeaderProof(request.headers);
     // No proof: 401, the challenge URI, and no acquisition URLs.
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge });
-    if (proof.kind === "malformed") {
-      const message =
-        proof.reason === "mixed"
-          ? "the proof headers mix the Wallet-Pass and X-Wallet-Pass name forms; send one complete pair"
-          : `proof headers could not be decoded (${proof.reason})`;
-      return error("invalid_request", { message });
-    }
+    if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
@@ -343,7 +361,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const challengeUri = x.challengeUri(tokenId, action);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
+    if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // Keyed by the nonce, every byte of the presentation, and the fresh
     // entitlement read for the claimed account: an identical repeat (the
     // phone resending an aborted POST) gets the first outcome instead of
@@ -383,7 +401,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     const challengeUri = x.challengeUri(tokenId, ROTATE_ACTION);
     const proof = readProof(request, body);
     if (proof.kind === "absent") return json(401, { error: "proof_required", challenge: challengeUri });
-    if (proof.kind === "malformed") return error("invalid_request", { message: "the proof could not be decoded" });
+    if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
     if (!result.ok) return refuse(result.error, challengeUri);
