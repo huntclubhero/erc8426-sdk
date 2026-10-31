@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3 (issuer)
+
+Refusal codes for a proof that cannot be read now match the ERC-8426 refusal table and the reference server. Other packages are unchanged.
+
+- `@erc8426/issuer` 0.3.3: a proof header past the size bound, and a `Wallet-Pass-Proof` (or `X-Wallet-Pass-Proof`) value that is not base64url, are refused 400 `invalid_message` (the presented message is not a parseable challenge, or exceeds the size bound) instead of 400 `invalid_request`, on the gated manifest, signed action and rotate routes. A mixed header pair, a signature that is not hex, a signature header past the size bound, and a body proof whose fields are not strings stay 400 `invalid_request`. The header pair is now selected before the size bound is applied, as in the reference server: a bad value under the pair that is not used changes nothing, and a lone header past the bound is a missing proof (401 `proof_required`), not a 400. The refusal table pairs `invalid_message` with a retry on a fresh challenge, which is the right recovery for both cases.
+
 ## 0.3.2 (core, issuer) and 0.3.1 (conformance)
 
 ERC-8426 now defines format keys by function: `apple` obtains an Apple Wallet pass and `google` a Google Wallet pass. The pkpass media type and the Save to Google Wallet link shape are described as platform behavior, not requirements. The SDK follows, and two proof header details now match the standard and its reference server. Other packages are unchanged; client and react pick up the core change through their `^0.3.0` range.
