@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (core)
+
+- `@erc8426/core`: `parseManifest` refuses a manifest whose `version` is present and is not `1` with an error on `version`, instead of accepting it with a warning. ERC-8426 says a Client MUST NOT act on a manifest whose `version` it does not understand, and clients built on the SDK (`getManifest`, `getAcquisitionUrl`, `addToWallet`) used its acquisition URLs. A manifest without `version` is still read as version `1`.
+
 ## 0.3.3 (issuer)
 
 Refusal codes for a proof that cannot be read now match the ERC-8426 refusal table and the reference server. Other packages are unchanged.

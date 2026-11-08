@@ -190,6 +190,12 @@ describe("public manifest", () => {
     await expect(broken.client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "invalid_manifest" });
   });
 
+  it("does not act on a manifest whose version it does not understand", async () => {
+    const { client } = setup("public", { faults: { manifestVersion: 2 } });
+    await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "invalid_manifest" });
+    await expect(client.getAcquisitionUrl({ contract: CONTRACT, tokenId: 1 }, "apple")).rejects.toMatchObject({ code: "invalid_manifest" });
+  });
+
   it("reports a 0.2.x issuer's retired code names under the spec's names, keeping the sent string in serverCode", async () => {
     const issuer = fakeIssuer({ contract: CONTRACT, mode: "public", ownerOf: () => null, faults: { legacyCodes: true } });
     const chain = fakeChain({ contracts: { [CONTRACT]: { passURI: (id) => issuer.passUri(id) } } });

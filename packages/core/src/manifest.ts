@@ -107,19 +107,21 @@ export function parseManifest(value: unknown): ManifestParseResult {
     }
   }
 
-  // version is OPTIONAL: absent is the common case for issuers built before
-  // it was defined, and MUST be tolerated. Present, it is a positive integer;
-  // a value this SDK does not know is a warning, since the manifest shape it
-  // understands is still what it parsed.
+  // An absent version is read as version 1 (a Client SHOULD), so manifests
+  // from issuers built before it was defined still resolve. A present value
+  // this SDK does not understand is an error: a Client MUST NOT act on it.
   let version: number | undefined;
   if (value.version !== undefined) {
     const v = value.version;
     if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
       issues.push({ level: "error", path: "version", message: "version, when present, MUST be a positive integer (1)" });
+    } else if (v !== MANIFEST_VERSION) {
+      issues.push({
+        level: "error",
+        path: "version",
+        message: `manifest version ${v} is not understood by this SDK (${MANIFEST_VERSION}); a Client MUST NOT act on it`,
+      });
     } else {
-      if (v !== MANIFEST_VERSION) {
-        issues.push({ level: "warning", path: "version", message: `manifest version ${v} is newer than this SDK understands (${MANIFEST_VERSION})` });
-      }
       version = v;
     }
   }

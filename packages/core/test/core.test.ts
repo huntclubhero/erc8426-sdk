@@ -210,16 +210,17 @@ describe("manifest", () => {
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });
     expect(ms.ok && ms.issues.some((i) => i.level === "warning")).toBe(true);
   });
-  it("carries an optional integer version, tolerating its absence", () => {
+  it("carries an optional integer version, tolerating its absence and refusing unknown values", () => {
     expect(parseManifest(good)).toMatchObject({ ok: true, manifest: { formats: good.formats } });
     expect((parseManifest(good) as { manifest: { version?: number } }).manifest.version).toBeUndefined();
     const v1 = parseManifest({ ...good, version: 1 });
     expect(v1.ok && v1.manifest.version).toBe(1);
     expect(v1.issues).toEqual([]);
     for (const bad of ["1", 0, -1, 1.5, null, {}]) expect(parseManifest({ ...good, version: bad }).ok, String(bad)).toBe(false);
+    // ERC-8426: a Client MUST NOT act on a manifest whose version it does not understand.
     const newer = parseManifest({ ...good, version: 2 });
-    expect(newer.ok).toBe(true);
-    expect(newer.issues.some((i) => i.level === "warning" && i.path === "version")).toBe(true);
+    expect(newer.ok).toBe(false);
+    expect(newer.issues.some((i) => i.level === "error" && i.path === "version")).toBe(true);
     expect(MANIFEST_VERSION).toBe(1);
   });
   it("creates manifests and reads the metadata mirror", () => {
