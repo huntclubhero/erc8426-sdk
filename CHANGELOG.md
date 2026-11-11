@@ -47,8 +47,9 @@ ERC-8426 defines an OPTIONAL manifest member `issuer` (format keys to objects of
 
 - ERC-8426 is linked at eips.ethereum.org instead of the pull request, and `not_yet_valid` is no longer described as a pending addition to the refusal table.
 - WALLETCHI, the reference deployment, was a testnet experiment that closed on 2026-11-06; the README says so.
-- `docs/deployment-notes.md` is no longer about WALLETCHI alone: a section on session grants on a shared account (reproduced: concurrent grant requests can collide, sequential ones did not, a simulation does not catch the loser) and lessons 15 to 27 from a mainnet launch, each marked reproduced, measured or observed.
-- `docs/security.md`: checklist items for "a link is never a login", one session grant at a time per account, and the fresh read under RPC failure.
+- The README lists Pocket, a mainnet collection, as a second implementation of the standard (its own server code, not this SDK).
+- `docs/deployment-notes.md` is no longer about WALLETCHI alone: lessons 15 to 26 from a mainnet launch, each marked reproduced, measured or observed.
+- `docs/security.md`: checklist items for "a link is never a login" and the fresh read under RPC failure.
 
 ## 0.3.3 (issuer)
 
