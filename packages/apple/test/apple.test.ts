@@ -1096,6 +1096,51 @@ describe("appleFormatProvider", () => {
     expect(JSON.stringify(pass)).not.toContain("issuer.example/a?");
   });
 
+  it("expireSuperseded: a superseded pass also carries a past expirationDate; off by default", async () => {
+    const refreshOld = async (p: ReturnType<typeof provider>["p"], oldToken: string) => {
+      const res = await p.handle(
+        new Request(`https://issuer.example/apple/v1/passes/${PASS_TYPE}/s3r1al`, { headers: { authorization: `ApplePass ${oldToken}` } }),
+      );
+      expect(res.status).toBe(200);
+      return JSON.parse(unzip(new Uint8Array(await res.arrayBuffer()))["pass.json"]!.toString());
+    };
+    // Default: voided only, as before.
+    const plain = provider().p;
+    await plain.acquisitionUrl(ctx(OWNER_A));
+    const plainToken = (await plain.store.getPass("s3r1al"))!.authenticationToken;
+    await plain.acquisitionUrl(ctx(OWNER_B));
+    const voidedOnly = await refreshOld(plain, plainToken);
+    expect(voidedOnly.voided).toBe(true);
+    expect(voidedOnly.expirationDate).toBeUndefined();
+
+    // Opted in: a transfer (retired token) ...
+    const { p } = provider(fakeApns(), { expireSuperseded: true });
+    const liveUrl = await p.acquisitionUrl(ctx(OWNER_A));
+    const live = JSON.parse(unzip(new Uint8Array(await (await p.handle(new Request(liveUrl))).arrayBuffer()))["pass.json"]!.toString());
+    // ... never touches a live pass.
+    expect(live.voided).toBeUndefined();
+    expect(live.expirationDate).toBeUndefined();
+    const oldToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    const newUrl = await p.acquisitionUrl(ctx(OWNER_B));
+    const superseded = await refreshOld(p, oldToken);
+    expect(superseded.voided).toBe(true);
+    expect(Date.parse(superseded.expirationDate)).toBeLessThan(Date.now());
+    // The same date on every fetch, so a refresh does not look like a change.
+    expect((await refreshOld(p, oldToken)).expirationDate).toBe(superseded.expirationDate);
+    // The new holder's pass is live.
+    const next = JSON.parse(unzip(new Uint8Array(await (await p.handle(new Request(newUrl))).arrayBuffer()))["pass.json"]!.toString());
+    expect(next.expirationDate).toBeUndefined();
+
+    // ... and the issuer's voided serial (content that arrives voided).
+    const issuerMode = provider(fakeApns(), { expireSuperseded: true }).p;
+    await issuerMode.acquisitionUrl(ctx(OWNER_A));
+    const token = (await issuerMode.store.getPass("s3r1al"))!.authenticationToken;
+    await issuerMode.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    const reset = await refreshOld(issuerMode, token);
+    expect(reset.voided).toBe(true);
+    expect(Date.parse(reset.expirationDate)).toBeLessThan(Date.now());
+  });
+
   it("rotates on the owner's request and pushes", async () => {
     const { p, apns } = provider();
     const url = await p.acquisitionUrl(ctx(OWNER_A));

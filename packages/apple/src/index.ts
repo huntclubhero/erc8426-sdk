@@ -23,6 +23,6 @@ export { applePassKitWebService, defaultAuthenticate, MAX_LOG_BODY_BYTES, MAX_RE
 export type { PassKitWebServiceOptions, BuildPassArgs, PassAuthResult } from "./webservice.js";
 export { DEFAULT_APNS_RETRY, apnsRetryAdvice, createApnsClient } from "./apns.js";
 export type { ApnsClient, ApnsClientOptions, ApnsRetryOptions, ApnsTokenAuth, ApnsCertificateAuth, PushOutcome } from "./apns.js";
-export { appleFormatProvider, supersededContent } from "./provider.js";
+export { SUPERSEDED_EXPIRY_BACKDATE_MS, appleFormatProvider, supersededContent } from "./provider.js";
 export type { AppleFormatProvider, AppleFormatProviderOptions } from "./provider.js";
 export { randomToken } from "./util.js";
