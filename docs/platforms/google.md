@@ -39,7 +39,7 @@ Every manifest resolution upserts the object and mints a fresh, one-hour save li
 - **A saved object is shared.** Everyone who saved it sees the same object, so patching it for a new owner would keep the old owner's card live. The provider expires the old object and issues a new random object id on transfer, and classes set `ONE_USER_ALL_DEVICES` so a leaked link cannot save the live card to a second account.
 - **Quota.** Patch only when the rendered object changed; the provider hashes the last accepted body and skips identical patches.
 - **Access tokens** are cached until a minute before expiry, one exchange is shared by concurrent callers, and a 401 drops the cached token so a rotated key costs one failed call.
-- **Save and delete callbacks** (`callbackOptions` on the class, via `classOverrides`) are informational: this SDK does not verify Google's callback signature, so never gate anything on them.
+- **Save and delete callbacks** (`callbackOptions` on the class, via `classOverrides`) are signed by Google, and `createCallbackVerifier` and `callbackHandler` verify them (the ECv2SigningOnly envelope, Google's published keys, the message expiry, and the nonce when you give it a store). Handle only verified events. A callback says an account saved or deleted the pass; it says nothing about who owns the token, so it never stands in for the fresh ownership read.
 - **Persistent store.** `MemoryGoogleObjectStore` is per process. Implement `GoogleObjectStore` (three methods) over your database so object ids survive restarts.
 
 ## Notifications
