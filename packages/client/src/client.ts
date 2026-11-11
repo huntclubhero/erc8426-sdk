@@ -383,7 +383,19 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       return null;
     }
     if (!claims) return null;
-    const text = await readToken("passIssuer", () => readContract(publicClient, { address, abi: walletPassIssuerAbi, functionName: "passIssuer" }));
+    let text: string;
+    try {
+      text = await readContract(publicClient, { address, abi: walletPassIssuerAbi, functionName: "passIssuer" });
+    } catch (e) {
+      const err = errorFromChainRead(e, "passIssuer");
+      if (err.code === "network") throw err;
+      // Not a missing token: this read takes no token id.
+      throw new WalletPassClientError(
+        "invalid_manifest",
+        "the contract claims the issuer identity commitment (ERC-165 id 0x470be7e9) but passIssuer() reverted or returned nothing, so it commits to no identity",
+        { source: "chain" },
+      );
+    }
     const parsed = parsePassIssuerJson(text);
     if (!parsed.ok) {
       const detail = parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; ");
@@ -554,7 +566,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     opts: GetManifestOptions = {},
   ): Promise<string> {
     const { manifest } = await getManifest(token, opts);
-    const url = manifest.formats[platform];
+    const url = Object.hasOwn(manifest.formats, platform) ? manifest.formats[platform] : undefined;
     if (!url) {
       throw new WalletPassClientError("unsupported", `this pass has no ${platform} format`, { source: "client" });
     }

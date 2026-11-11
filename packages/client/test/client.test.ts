@@ -247,6 +247,38 @@ describe("public manifest", () => {
       await expect(committed({ revert: true }).client.getIssuerCommitment(CONTRACT)).rejects.toMatchObject({ source: "chain" });
     });
 
+    it("a manifest whose issuer or formats use names objects inherit resolves, and never throws a raw error", async () => {
+      for (const key of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+        const hostile = JSON.parse(`{${JSON.stringify(key)}:{"partnerId":"p1"}}`) as unknown;
+        const { client } = committed({ inManifest: hostile });
+        const r = await client.getManifest(t);
+        expect(Object.keys(r.manifest.issuer!), key).toEqual([key]);
+        expect((await client.addToWallet(t, { platform: "apple" })).url, key).toMatch(/\.pkpass$/);
+        // A platform name that is only inherited is not a format of the manifest.
+        await expect(client.getAcquisitionUrl(t, key), key).rejects.toMatchObject({ code: "unsupported", source: "client" });
+        await expect(client.addToWallet(t, { platform: key }), key).rejects.toMatchObject({ code: "unsupported" });
+      }
+    });
+
+    it("a malformed issuer member does not stop the manifest; under verifyIssuer it counts as no issuer member", async () => {
+      const malformed = { apple: { teamIdentifier: "A1B2C3D4E5" } };
+      const plain = committed({ inManifest: malformed });
+      const r = await plain.client.getManifest(t);
+      expect(r.manifest.issuer).toBeUndefined();
+      expect(r.issues.some((i) => i.level === "warning" && i.path === "issuer.apple.passTypeIdentifier")).toBe(true);
+      expect((await plain.client.getManifest(t, { verifyIssuer: true })).issuerCommitment).toBeNull();
+      const bound = committed({ onChain: identity, inManifest: malformed });
+      expect((await bound.client.getManifest(t)).manifest.issuer).toBeUndefined();
+      await expect(bound.client.getManifest(t, { verifyIssuer: true })).rejects.toMatchObject({ code: "invalid_manifest", source: "client" });
+    });
+
+    it("says so when a contract claims the commitment and passIssuer() reverts", async () => {
+      const err = await committed({ revert: true }).client.getIssuerCommitment(CONTRACT).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "invalid_manifest", source: "chain" });
+      expect((err as Error).message).toMatch(/passIssuer\(\) reverted/);
+      expect((err as Error).message).not.toMatch(/burned/);
+    });
+
     it("carries the manifest's issuer through without reading the contract unless asked", async () => {
       const { client } = committed({ onChain: identity, inManifest: { ...identity, google: { issuerId: "1111111111111111111" } } });
       const r = await client.getManifest(t);
