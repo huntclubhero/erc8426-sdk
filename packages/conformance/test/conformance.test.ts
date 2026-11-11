@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAddress, type Address, type Hex } from "viem";
+import { createPublicClient, custom, getAddress, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID, parseChallenge, readProofHeaders } from "@erc8426/core";
 import { formatReport, parseArgs, runCli, runConformance, type ConformanceReport } from "@erc8426/conformance";
@@ -156,20 +156,20 @@ describe("broken implementations are caught", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("a manifest without version is an advisory for the issuer, not a MUST failure", async () => {
-    // The standard makes `version` REQUIRED of a Pass Issuer and tells a
-    // Client to read its absence as version 1, so the manifest still resolves.
+  it("a manifest without version fails the issuer: the standard says version is REQUIRED", async () => {
+    // A Client still reads its absence as version 1 (the manifest parses and
+    // its other checks run), but the Pass Issuer that left it out does not conform.
     const pub = await world({ mode: "public", versionless: true }).run();
     expect(byId(pub, "manifest.valid").status).toBe("pass");
-    expect(byId(pub, "manifest.version")).toMatchObject({ level: "SHOULD", status: "fail" });
+    expect(byId(pub, "manifest.version")).toMatchObject({ level: "MUST", status: "fail" });
     expect(byId(pub, "manifest.version").detail).toMatch(/absent/);
-    expect(pub.ok).toBe(true);
+    expect(pub.ok).toBe(false);
     const gated = world({ mode: "gated", versionless: true });
     const g = await gated.run({ ownerPrivateKey: gated.ownerKey });
-    expect(byId(g, "gated.manifest.version")).toMatchObject({ level: "SHOULD", status: "fail" });
-    expect(g.ok).toBe(true);
+    expect(byId(g, "gated.manifest.version")).toMatchObject({ level: "MUST", status: "fail" });
+    expect(g.ok).toBe(false);
     const ok = await world({ mode: "public" }).run();
-    expect(byId(ok, "manifest.version")).toMatchObject({ level: "SHOULD", status: "pass", detail: "version: 1" });
+    expect(byId(ok, "manifest.version")).toMatchObject({ level: "MUST", status: "pass", detail: "version: 1" });
   });
 
   it("a manifest whose version is not understood fails", async () => {
@@ -292,6 +292,36 @@ describe("issuer identity commitment (optional)", () => {
     // Claims the interface, and the read reverts.
     const reverts = await world({ mode: "public", contract: { interfaces: [WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID] } }).run();
     expect(byId(reverts, "issuer.commitment")).toMatchObject({ status: "fail" });
+  });
+
+  it("a supportsInterface read that fails is a failure, not a contract that does not implement it", async () => {
+    const w = world({ mode: "public", contract: committing(JSON.stringify(identity)), manifestIssuer: identity });
+    // The node drops exactly the supportsInterface(0x470be7e9) call.
+    const flaky = createPublicClient({
+      transport: custom(
+        {
+          request: async (args: { method: string; params?: unknown }) => {
+            const data = ((args.params as Array<{ data?: string }> | undefined)?.[0]?.data ?? "").toLowerCase();
+            if (args.method === "eth_call" && data.startsWith("0x01ffc9a7470be7e9")) throw new Error("upstream timeout");
+            return w.chain.request(args);
+          },
+        },
+        { retryCount: 0 },
+      ),
+    });
+    const r = await runConformance({ publicClient: flaky, fetch: w.issuer.fetch, contract: CONTRACT, tokenId: 7, nonexistentTokenId: 999 });
+    expect(byId(r, "issuer.commitment")).toMatchObject({ level: "MUST", status: "fail" });
+    expect(byId(r, "issuer.commitment").detail).toMatch(/could not be read/);
+    expect(r.ok).toBe(false);
+    // A contract with no ERC-165 at all answered: it implements nothing optional.
+    const none = await world({ mode: "public", contract: { interfaces: null } }).run();
+    expect(byId(none, "issuer.commitment").status).toBe("skip");
+  });
+
+  it("names the fault when the contract claims the commitment and passIssuer() reverts", async () => {
+    const r = await world({ mode: "public", contract: { interfaces: [WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID] } }).run();
+    expect(byId(r, "issuer.commitment")).toMatchObject({ status: "fail" });
+    expect(byId(r, "issuer.commitment").detail).toMatch(/claims the interface.*passIssuer\(\) reverted/);
   });
 
   it("a gated manifest cannot be compared without the owner key, and says so", async () => {
