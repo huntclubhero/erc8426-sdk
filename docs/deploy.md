@@ -50,7 +50,7 @@ export const DELETE = apple.webService;
 - **Stores:** Upstash Redis (or Vercel KV, which is Upstash) through `kvStores`; the issuer README has the ten-line adapter. Use Postgres or Redis for the Apple and Google stores.
 - **Events:** serverless functions cannot hold a `watchTransfers` subscription. Use an indexer webhook (below), or a Vercel Cron job that reads `Transfer`, `PassUpdate` and `BatchPassUpdate` logs since the last processed block and calls the same hooks.
 - **Secrets:** Vercel environment variables, marked sensitive. Base64 PEM files to keep their newlines intact. `linkSecret` (the example reads `ISSUER_LINK_SECRET`) is one of them: 32+ bytes, the same on every instance, required in production; the links are derived from it, so a store dump yields none.
-- **APNs:** the client reuses its HTTP/2 session within a warm instance; a cold start reconnects once. That is fine at pass-update volumes.
+- **APNs:** the client reuses its HTTP/2 session within a warm instance; a cold start reconnects once. That is fine at pass-update volumes. Each push is sent once by default, and a serverless function has no queue of its own: a lost supersede push leaves the old pass stale until the device next fetches. Record failed outcomes from `onPush` and push the serial again from a cron job or a queue (see "A lost push" in the [Apple notes](platforms/apple.md)).
 - **Preview deployments:** Apple only calls `https` web services on public hosts, so test device updates on a deployed preview, not localhost.
 
 ## Node and Express
@@ -73,6 +73,8 @@ app.listen(3000);
 watchTransfers({ client: publicClient, issuer });
 watchPassUpdates({ client: publicClient, issuer });
 ```
+
+With the APNs client's `retry` off, which is the default, a lost supersede push leaves an installed pass stale until the device next fetches; a queue-backed caller should push a supersede again when `onPush` reports a `retryable` outcome.
 
 A long-running process is the best home for this SDK: watchers hold their subscriptions, APNs keeps one session open, and in-memory caches (Google access tokens, parsed keys) stay warm. Run more than one instance only with shared stores. `http.createServer(toNodeHandler(issuer))` works without Express.
 

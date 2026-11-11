@@ -12,6 +12,8 @@ import {
   featuredActionsFor,
   passImages,
   validateSignerCertificate,
+  APNS_RETRY_AFTER_SECONDS,
+  DEFAULT_APNS_RETRY,
   apnsRetryAdvice,
   createApnsClient,
   fetchImage,
@@ -891,71 +893,128 @@ describe("APNs client", () => {
     expect(out[0]!.reason).toMatch(/^connect/);
   });
 
-  // Apple, "Handling notification responses from APNs": "You can retry with a
-  // delay, if you get the error code TooManyRequests."
-  it("resends a push APNs answered 429 TooManyRequests, after a delay, and reports the sends it took", async () => {
+  // The default is one send per push, exactly as before 0.4.0.
+  it("sends each push once unless retry is asked for, and still says what a later push can fix", async () => {
     seen.length = 0;
-    const token = "1a".repeat(32);
-    script.set(token, [
-      { status: 429, reason: "TooManyRequests" },
-      { status: 429, reason: "TooManyRequests" },
-    ]);
-    const apns = client();
+    const token = "7a".repeat(32);
+    script.set(token, ["stall"]);
+    const apns = client({ retry: undefined, streamTimeoutMs: 150 });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, reason: "stream timeout", attempts: 1, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.noAnswer }]);
+    expect(sendsTo(token)).toBe(1);
+    const off = client({ retry: false, streamTimeoutMs: 150 });
+    script.set(token, ["stall"]);
+    expect((await off.send([token]))[0]).toMatchObject({ ok: false, attempts: 1 });
+    apns.close();
+    off.close();
+  });
+
+  it("with retry on, resends a push that got no answer", async () => {
+    seen.length = 0;
+    const token = "3c".repeat(32);
+    script.set(token, ["stall"]);
+    const apns = client({ retry: { baseDelayMs: 5 }, streamTimeoutMs: 150 });
     const out = await apns.send([token, PUSH_TOKEN]);
-    expect(out.find((o) => o.token === token)).toEqual({ token, ok: true, status: 200, attempts: 3 });
+    expect(out.find((o) => o.token === token)).toEqual({ token, ok: true, status: 200, attempts: 2 });
     // The token that landed first is not sent again.
     expect(out.find((o) => o.token === PUSH_TOKEN)).toEqual({ token: PUSH_TOKEN, ok: true, status: 200, attempts: 1 });
-    expect(sendsTo(token)).toBe(3);
     expect(sendsTo(PUSH_TOKEN)).toBe(1);
     apns.close();
   });
 
-  it("stops at the bound and says a later push may land", async () => {
+  it("an undefined member of retry means its default, never a single send", async () => {
     seen.length = 0;
     const token = "2b".repeat(32);
-    script.set(token, Array.from({ length: 10 }, () => ({ status: 429, reason: "TooManyRequests" })));
-    const apns = client({ retry: { attempts: 2, baseDelayMs: 5 } });
+    script.set(token, ["stall", "stall", "stall", "stall"]);
+    const apns = client({ retry: { attempts: undefined, baseDelayMs: 5, maxDelayMs: undefined, maxAddedMs: undefined }, streamTimeoutMs: 60 });
     const out = await apns.send([token]);
-    expect(out).toEqual([{ token, ok: false, status: 429, reason: "TooManyRequests", attempts: 2, retryable: true }]);
-    expect(sendsTo(token)).toBe(2);
+    expect(out[0]).toMatchObject({ ok: false, attempts: DEFAULT_APNS_RETRY.attempts, retryable: true });
+    expect(sendsTo(token)).toBe(3);
     script.delete(token);
     apns.close();
   });
 
-  it("resends a push that got no answer", async () => {
+  it("stops resending once the added time is spent", async () => {
     seen.length = 0;
-    const token = "3c".repeat(32);
-    script.set(token, ["stall"]);
-    const apns = client({ streamTimeoutMs: 150 });
+    const token = "8b".repeat(32);
+    script.set(token, ["stall", "stall", "stall", "stall", "stall", "stall"]);
+    // Ten attempts allowed, but only 100 ms of added time: the first resend
+    // (after 20 ms) starts, the next would start past the cap and is not made.
+    const apns = client({ retry: { attempts: 10, baseDelayMs: 20, maxAddedMs: 100 }, streamTimeoutMs: 120 });
+    const started = Date.now();
     const out = await apns.send([token]);
-    expect(out).toEqual([{ token, ok: true, status: 200, attempts: 2 }]);
+    expect(out[0]).toMatchObject({ ok: false, attempts: 2, retryable: true });
+    expect(Date.now() - started).toBeLessThan(1500);
+    script.delete(token);
+    apns.close();
+  });
+
+  // Apple, "Handling notification responses from APNs": 429 is "too many
+  // requests for the same device token", "You can retry with a delay", and "an
+  // error code beginning with 4XX slows down your ability to send". So a 429
+  // is never resent inside a send; it is handed to the caller's queue.
+  it("never resends a 429 in process: it settles for the caller's queue with a suggested delay", async () => {
+    seen.length = 0;
+    const token = "1a".repeat(32);
+    script.set(token, [{ status: 429, reason: "TooManyRequests" }]);
+    const apns = client({ retry: { baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    expect(out).toEqual([
+      { token, ok: false, status: 429, reason: "TooManyRequests", attempts: 1, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.tooManyRequests },
+    ]);
+    expect(sendsTo(token)).toBe(1);
     apns.close();
   });
 
   // Apple: "After 15 minutes, you can retry JSON payloads that receive
-  // response status codes that begin with 5XX." Too long to wait in a send,
-  // so it is reported for the caller's queue instead.
-  it("does not resend a 5xx at once, and marks it for a later push", async () => {
+  // response status codes that begin with 5XX."
+  it("does not resend a 5xx, and suggests Apple's 15 minutes", async () => {
     seen.length = 0;
     const token = "4d".repeat(32);
     script.set(token, [{ status: 503, reason: "ServiceUnavailable" }]);
-    const apns = client();
+    const apns = client({ retry: { baseDelayMs: 5 } });
     const out = await apns.send([token]);
-    expect(out).toEqual([{ token, ok: false, status: 503, reason: "ServiceUnavailable", attempts: 1, retryable: true }]);
+    expect(out).toEqual([{ token, ok: false, status: 503, reason: "ServiceUnavailable", attempts: 1, retryable: true, retryAfterSeconds: 900 }]);
     expect(sendsTo(token)).toBe(1);
     apns.close();
+  });
+
+  // Apple: "ExpiredProviderToken: The provider token is stale and a new token
+  // should be generated." The client drops its cached token on that answer.
+  it("resends once, with a new provider token, after 403 ExpiredProviderToken", async () => {
+    seen.length = 0;
+    const token = "9c".repeat(32);
+    script.set(token, [
+      { status: 403, reason: "ExpiredProviderToken" },
+      { status: 403, reason: "ExpiredProviderToken" },
+    ]);
+    const apns = client({ retry: { attempts: 5, baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    // One resend for this reason, however many attempts are allowed.
+    expect(out).toEqual([{ token, ok: false, status: 403, reason: "ExpiredProviderToken", attempts: 2, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.noAnswer }]);
+    const sent = seen.filter((s) => s.path.endsWith(token));
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.authorization).not.toBe(sent[0]!.authorization);
+    // The next send lands on the fresh token.
+    expect((await apns.send([token]))[0]).toMatchObject({ ok: true, attempts: 1 });
+    // With retry off it is reported as worth pushing again, and not resent.
+    script.set(token, [{ status: 403, reason: "ExpiredProviderToken" }]);
+    const once = client({ retry: undefined });
+    expect((await once.send([token]))[0]).toMatchObject({ ok: false, status: 403, attempts: 1, retryable: true });
+    apns.close();
+    once.close();
   });
 
   // Apple: "Don't retry notification responses with the error code
   // BadDeviceToken, DeviceTokenNotForTopic, Forbidden, ExpiredToken,
   // Unregistered, or PayloadTooLarge."
-  it("never resends a 400, a 403 or a 410", async () => {
+  it("never resends a 400, a 403 Forbidden or a 410", async () => {
     seen.length = 0;
     const bad = "5e".repeat(32);
     const forbidden = "6f".repeat(32);
     script.set(bad, [{ status: 400, reason: "BadDeviceToken" }]);
     script.set(forbidden, [{ status: 403, reason: "Forbidden" }]);
-    const apns = client();
+    const apns = client({ retry: { baseDelayMs: 5 } });
     const out = await apns.send([bad, forbidden, GONE]);
     expect(out.find((o) => o.token === bad)).toEqual({ token: bad, ok: false, status: 400, reason: "BadDeviceToken", attempts: 1, retryable: false });
     expect(out.find((o) => o.token === forbidden)).toMatchObject({ status: 403, attempts: 1, retryable: false });
@@ -964,26 +1023,17 @@ describe("APNs client", () => {
     apns.close();
   });
 
-  it("retry: false sends each push once", async () => {
-    seen.length = 0;
-    const token = "7a".repeat(32);
-    script.set(token, [{ status: 429, reason: "TooManyRequests" }]);
-    const apns = client({ retry: false });
-    const out = await apns.send([token]);
-    expect(out).toEqual([{ token, ok: false, status: 429, reason: "TooManyRequests", attempts: 1, retryable: true }]);
-    expect(sendsTo(token)).toBe(1);
-    script.delete(token);
-    apns.close();
-  });
-
   it("classifies an outcome by what Apple documents for its status", () => {
     expect(apnsRetryAdvice({ token: "t", ok: true, status: 200 })).toBe("never");
-    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyRequests" })).toBe("now");
     expect(apnsRetryAdvice({ token: "t", ok: false, reason: "stream timeout" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "ExpiredProviderToken" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyRequests" })).toBe("later");
     expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyProviderTokenUpdates" })).toBe("later");
     expect(apnsRetryAdvice({ token: "t", ok: false, status: 500, reason: "InternalServerError" })).toBe("later");
     expect(apnsRetryAdvice({ token: "t", ok: false, status: 503, reason: "Shutdown" })).toBe("later");
-    for (const status of [400, 403, 404, 405, 410, 413]) expect(apnsRetryAdvice({ token: "t", ok: false, status }), String(status)).toBe("never");
+    for (const status of [400, 404, 405, 410, 413]) expect(apnsRetryAdvice({ token: "t", ok: false, status }), String(status)).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "Forbidden" })).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "BadCertificate" })).toBe("never");
   });
 
   it("authenticates with the pass certificate over mutual TLS", async () => {

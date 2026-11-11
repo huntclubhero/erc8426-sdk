@@ -32,18 +32,24 @@ export interface PushOutcome {
   /// How many times this push was sent before it settled to this outcome.
   attempts?: number;
   /// On a failure: whether pushing again LATER can land. True for a push
-  ///  that got no answer, a 429 and a 5xx; false for an answer a resend
-  ///  cannot change (400, 403, 404, 405, 410, 413). A queue-backed caller
-  ///  re-pushes the serial when any outcome carries `retryable: true`.
+  ///  that got no answer, a 429, a 5xx and a stale provider token; false for
+  ///  an answer a resend cannot change (400, other 403s, 404, 405, 410, 413).
+  ///  A queue-backed caller re-pushes the serial when any outcome carries
+  ///  `retryable: true`.
   retryable?: boolean;
+  /// With `retryable: true`: how long to wait before pushing again, in
+  ///  seconds. 900 for a 5xx is Apple's figure; the others are this SDK's
+  ///  suggestions (see `APNS_RETRY_AFTER_SECONDS`).
+  retryAfterSeconds?: number;
 }
 
-/// Bounded resend of a push inside one `send`. Only what Apple documents as
-///  resendable after a short delay is resent here: a 429 `TooManyRequests`
-///  ("You can retry with a delay") and a push that got no HTTP answer at all
-///  (a failed connect, a stream error or timeout). A 5xx is NOT resent here:
-///  Apple asks for 15 minutes before retrying one, which is a job for the
-///  caller's queue, so it settles with `retryable: true`.
+/// Bounded resend of a push inside one `send`. OFF unless `retry` is given.
+///  Only a push that got no HTTP answer at all (a failed connect, a stream
+///  error or timeout) is resent, plus one resend after a stale provider
+///  token. A 429 and a 5xx are never resent here: Apple describes a 429 as
+///  too many consecutive requests to one device token, to be retried "with a
+///  delay", and asks for 15 minutes before retrying a 5xx. Both settle with
+///  `retryable: true` and a suggested delay for the caller's queue.
 export interface ApnsRetryOptions {
   /// Total sends per push token, the first included. Default 3.
   attempts?: number;
@@ -51,26 +57,49 @@ export interface ApnsRetryOptions {
   baseDelayMs?: number;
   /// Ceiling for one delay. Default 5000.
   maxDelayMs?: number;
+  /// No resend starts later than this after the first attempt settled.
+  ///  Default 10000. A resend already started still runs to its own connect
+  ///  and stream timeouts, so the most a failing `send` is lengthened by is
+  ///  `maxAddedMs + connectTimeoutMs + streamTimeoutMs` (25 seconds with the
+  ///  defaults).
+  maxAddedMs?: number;
 }
 
-export const DEFAULT_APNS_RETRY = { attempts: 3, baseDelayMs: 500, maxDelayMs: 5_000 } as const;
+export const DEFAULT_APNS_RETRY = { attempts: 3, baseDelayMs: 500, maxDelayMs: 5_000, maxAddedMs: 10_000 } as const;
+
+/// Suggested waits before pushing again, by kind of failure. `serverError`
+///  is Apple's ("After 15 minutes, you can retry ... 5XX") and
+///  `providerTokenUpdates` follows Apple's "no more than once every 20
+///  minutes". Apple gives no figure for `TooManyRequests` ("retry with a
+///  delay") or for a push that got no answer: those two are this SDK's choice.
+export const APNS_RETRY_AFTER_SECONDS = { noAnswer: 30, tooManyRequests: 60, providerTokenUpdates: 1200, serverError: 900 } as const;
 
 /// What Apple's documentation ("Handling notification responses from APNs")
-///  says about sending a push again, by its outcome:
-///  - "now": resend after a short delay. A 429 `TooManyRequests`, or no HTTP
-///    answer at all. A pass push is an empty payload that tells the device to
-///    ask the web service, so a duplicate costs the device one list call.
-///  - "later": do not resend at once, but a later push can land. A 5xx
-///    (Apple: retry after 15 minutes) and a 429 `TooManyProviderTokenUpdates`
-///    (the provider token is minted at most every 20 minutes).
-///  - "never": a resend cannot change the answer (400, 403, 404, 405, 410,
-///    413), or the push landed.
+///  supports about sending a push again, by its outcome:
+///  - "now": may be resent after a short delay. No HTTP answer at all, or a
+///    403 `ExpiredProviderToken` (the client has dropped its cached token, so
+///    the next send carries a new one). A pass push is an empty payload that
+///    tells the device to ask the web service, so a duplicate costs the
+///    device one list call.
+///  - "later": not at once, but a later push can land. Any 429 (Apple: too
+///    many requests for the same device token, and 4xx answers slow a
+///    provider's sending) and any 5xx (Apple: retry after 15 minutes).
+///  - "never": a resend cannot change the answer (400, other 403s, 404, 405,
+///    410, 413), or the push landed.
 export function apnsRetryAdvice(outcome: PushOutcome): "now" | "later" | "never" {
   if (outcome.ok) return "never";
   if (outcome.status === undefined || outcome.status === 0) return "now";
-  if (outcome.status === 429) return outcome.reason === "TooManyProviderTokenUpdates" ? "later" : "now";
-  if (outcome.status >= 500) return "later";
+  if (outcome.status === 403) return outcome.reason === "ExpiredProviderToken" ? "now" : "never";
+  if (outcome.status === 429 || outcome.status >= 500) return "later";
   return "never";
+}
+
+function retryAfterSecondsFor(outcome: PushOutcome): number {
+  if (outcome.status === 429) {
+    return outcome.reason === "TooManyProviderTokenUpdates" ? APNS_RETRY_AFTER_SECONDS.providerTokenUpdates : APNS_RETRY_AFTER_SECONDS.tooManyRequests;
+  }
+  if (outcome.status !== undefined && outcome.status >= 500) return APNS_RETRY_AFTER_SECONDS.serverError;
+  return APNS_RETRY_AFTER_SECONDS.noAnswer;
 }
 
 export interface ApnsTokenAuth {
@@ -98,9 +127,10 @@ export type ApnsClientOptions = (ApnsTokenAuth | ApnsCertificateAuth) & {
   connectTimeoutMs?: number;
   streamTimeoutMs?: number;
   idleCloseMs?: number;
-  /// Resend a push that was throttled or got no answer (see
-  ///  `ApnsRetryOptions`). On by default with `DEFAULT_APNS_RETRY`; `false`
-  ///  sends every push exactly once, as before 0.4.0.
+  /// Resend a push that got no answer (see `ApnsRetryOptions`). Off by
+  ///  default: without it every push is sent exactly once, as before 0.4.0,
+  ///  and a lost push stays lost unless the caller pushes again. Give an
+  ///  object to turn it on; a member left out or undefined takes its default.
   retry?: ApnsRetryOptions | false;
   /// Diagnostic hook: session drops, non-200 answers, token refreshes.
   onEvent?(event: { type: string; detail?: string; token?: string; status?: number }): void;
@@ -133,8 +163,14 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
   const streamTimeoutMs = options.streamTimeoutMs ?? 10_000;
   const idleCloseMs = options.idleCloseMs ?? 10 * 60_000;
   const emit = options.onEvent ?? (() => undefined);
-  const retry = options.retry === false ? { attempts: 1, baseDelayMs: 0, maxDelayMs: 0 } : { ...DEFAULT_APNS_RETRY, ...options.retry };
-  const maxAttempts = Math.max(1, Math.floor(retry.attempts));
+  const asked = options.retry ? options.retry : null;
+  const retry = {
+    attempts: asked?.attempts ?? DEFAULT_APNS_RETRY.attempts,
+    baseDelayMs: asked?.baseDelayMs ?? DEFAULT_APNS_RETRY.baseDelayMs,
+    maxDelayMs: asked?.maxDelayMs ?? DEFAULT_APNS_RETRY.maxDelayMs,
+    maxAddedMs: asked?.maxAddedMs ?? DEFAULT_APNS_RETRY.maxAddedMs,
+  };
+  const maxAttempts = asked ? Math.max(1, Math.floor(retry.attempts)) : 1;
   const tokenAuth = "privateKeyP8" in options ? options : null;
   const certAuth = "certificate" in options ? options.certificate : null;
 
@@ -324,20 +360,41 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
     const tokens = [...new Set(pushTokens)];
     if (tokens.length === 0) return [];
     const settled: PushOutcome[] = [];
+    const settle = (outcome: PushOutcome, attempts: number) => {
+      const advice = apnsRetryAdvice(outcome);
+      settled.push({
+        ...outcome,
+        attempts,
+        ...(outcome.ok ? {} : advice === "never" ? { retryable: false } : { retryable: true, retryAfterSeconds: retryAfterSecondsFor(outcome) }),
+      });
+    };
+    // The last outcome of each push still waiting for a resend.
+    const waiting = new Map<string, PushOutcome>();
+    // A stale provider token earns one resend per push, whatever `attempts` allows.
+    const refreshed = new Set<string>();
+    let firstSettledAt = 0;
     let pending = tokens;
     for (let attempt = 1; pending.length > 0; attempt++) {
       if (attempt > 1) {
         const delay = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 2));
+        if (Date.now() - firstSettledAt + delay > retry.maxAddedMs) {
+          for (const token of pending) settle(waiting.get(token)!, attempt - 1);
+          break;
+        }
         await new Promise((r) => setTimeout(r, delay));
       }
+      const outcomes = await sendOnce(pending, topic);
+      if (attempt === 1) firstSettledAt = Date.now();
       const again: string[] = [];
-      for (const outcome of await sendOnce(pending, topic)) {
-        const advice = apnsRetryAdvice(outcome);
-        if (advice === "now" && attempt < maxAttempts) {
+      for (const outcome of outcomes) {
+        const staleToken = outcome.status === 403;
+        if (apnsRetryAdvice(outcome) === "now" && attempt < maxAttempts && !(staleToken && refreshed.has(outcome.token))) {
+          if (staleToken) refreshed.add(outcome.token);
           emit({ type: "push_retry", token: outcome.token, status: outcome.status, detail: outcome.reason });
+          waiting.set(outcome.token, outcome);
           again.push(outcome.token);
         } else {
-          settled.push({ ...outcome, attempts: attempt, ...(outcome.ok ? {} : { retryable: advice !== "never" }) });
+          settle(outcome, attempt);
         }
       }
       pending = again;
