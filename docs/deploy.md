@@ -13,6 +13,19 @@ The issuer and the Apple web service are Fetch API handlers (`Request` in, `Resp
 
 The in-memory defaults are for tests and a single process only. `createIssuer` refuses them under `NODE_ENV=production` unless every store is named (`stores: kvStores(kv, { chainId, contract })`, or an explicit `stores: memoryStores()` for a deliberate single instance), and warns once outside production.
 
+## Apple signing cost under a burst
+
+Every pass file the Apple provider serves is built and signed at that moment: the images are fetched when they are given as URLs, the bundle's manifest is hashed, and the Pass Type ID key signs it. Nothing is cached between requests. That holds for a download and for every 200 answer of the web service's latest-pass route.
+
+What bounds it is the conditional fetch. The web service sends `Last-Modified` and answers a request whose `If-Modified-Since` is not older with 304, without building anything. Apple's Wallet Developer Guide (archived) asks for exactly that ("Support the If-Modified-Since caching mechanism on this endpoint"); the current endpoint reference lists only the `Authorization` header. Neither mentions `If-None-Match`, and this SDK has no evidence that Wallet sends it, so the web service issues no `ETag`.
+
+So the cost to plan for is one signature per registered device per real change, arriving as the devices answer the push. An update pushed to every pass of a collection at once asks the host for that many signatures at once.
+
+- Push a collection-wide change in batches, at a rate the host signs comfortably. Measure one `buildPkpass` on the production host first; the time depends on the key, the images and the CPU.
+- Give images as bytes, or serve their URLs from somewhere fast and close: a slow image origin is paid on every build.
+- A superseded pass is rebuilt on every fetch (a retired token is never answered 304). That is one build per old device per push, and pushes to superseded registrations stop after `SUPERSEDED_PUSH_WINDOW_MS`.
+- Do not push when nothing changed. `notifyUpdate` always pushes; call it for real changes only. ERC-8426 asks an issuer not to push unchanged content, because a platform can throttle updates for an issuer that does.
+
 ## Next.js on Vercel
 
 ```ts
