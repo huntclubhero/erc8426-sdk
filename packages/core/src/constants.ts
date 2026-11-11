@@ -21,7 +21,7 @@ export const ACQUIRE_ACTION = "acquire" as const;
 export const ROTATE_ACTION = "rotate" as const;
 
 /// Headers a client sends to resolve a gated manifest (Gated acquisition).
-///  Named without the X- prefix per RFC 6648 (ethereum/ERCs PR #2036). The
+///  Named without the X- prefix per RFC 6648, as the standard does. The
 ///  X- names of earlier drafts are still read by issuers, and `proofHeaders`
 ///  still sends them beside the new ones for this release, so a 0.3.0 client
 ///  resolves a 0.2.x issuer's manifest; a later minor stops sending them.

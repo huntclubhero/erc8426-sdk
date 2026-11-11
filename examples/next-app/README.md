@@ -1,6 +1,6 @@
 # ERC-8426 Pet Pass: a full example app
 
-An open source, end to end app for [ERC-8426](https://ethereum-magicians.org/t/erc-8426-wallet-pass-extension-for-nfts/29358), the Wallet Pass Extension for NFTs. Hatch a pet NFT, unlock its wallet pass with a signature, care for it through the links on the back of the pass, sell it, and watch the previous owner get refused. Use it to test the protocol, or fork it as the starting point for your own collection.
+An open source, end to end app for [ERC-8426](https://eips.ethereum.org/EIPS/eip-8426), the Wallet Pass Extension for NFTs. Hatch a pet NFT, unlock its wallet pass with a signature, care for it through the links on the back of the pass, sell it, and watch the previous owner get refused. Use it to test the protocol, or fork it as the starting point for your own collection.
 
 It runs with **no Apple or Google account**: the pass is drawn in the page from the exact content a wallet would receive. Add credentials and the same app serves real Apple Wallet and Google Wallet passes.
 

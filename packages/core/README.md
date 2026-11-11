@@ -1,6 +1,6 @@
 # @erc8426/core
 
-The shared, dependency-free building blocks of the [ERC-8426](https://ethereum-magicians.org/t/erc-8426-wallet-pass-extension-for-nfts/29358) SDK: the interface id and ABIs, CAIP-19 token ids, the manifest format, the SIWE challenge and proof headers, the error codes, and the delivery types the issuer and the Apple and Google packages share. The other `@erc8426/*` packages build on it; most apps install those and get this one with them.
+The shared, dependency-free building blocks of the [ERC-8426](https://eips.ethereum.org/EIPS/eip-8426) SDK: the interface id and ABIs, CAIP-19 token ids, the manifest format, the SIWE challenge and proof headers, the error codes, and the delivery types the issuer and the Apple and Google packages share. The other `@erc8426/*` packages build on it; most apps install those and get this one with them.
 
 ```sh
 npm install @erc8426/core viem
@@ -25,4 +25,4 @@ assetId(1, "0x...", 7); // "eip155:1/erc721:0x.../7"
 const result = parseManifest(json); // { ok, manifest, issues }
 ```
 
-0.x tracks the draft standard and may change with it. MIT licensed.
+ERC-8426 is merged as a Draft; 0.x tracks its text and may change with it. MIT licensed.

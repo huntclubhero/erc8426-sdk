@@ -1,6 +1,6 @@
 # @erc8426/contracts
 
-Solidity for [ERC-8426](https://github.com/ethereum/ERCs/pull/2036), the Wallet Pass Extension for NFTs: the interface, an OpenZeppelin base contract, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and seven worked use cases with full Foundry tests.
+Solidity for [ERC-8426](https://eips.ethereum.org/EIPS/eip-8426), the Wallet Pass Extension for NFTs (merged as a Draft): the interface, an OpenZeppelin base contract, the optional issuer identity commitment, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and seven worked use cases with full Foundry tests.
 
 ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wallet, Google Wallet). On chain it adds only discovery (`passURI`) and a freshness signal (`PassUpdate`, `BatchPassUpdate`); pass generation, signing, delivery and the authorization of pass actions live off chain (see the other packages in this SDK).
 

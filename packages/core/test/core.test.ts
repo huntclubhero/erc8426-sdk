@@ -409,7 +409,7 @@ describe("statuses", () => {
       read_failed: 503,
     };
     for (const [code, status] of Object.entries(table)) expect(statusForError(code as WalletPassErrorCode), code).toBe(status);
-    // Pending addition to the table (PR #2036): a Not Before in the future is a failed freshness check.
+    // A Not Before in the future is a failed freshness check.
     expect(statusForError("not_yet_valid")).toBe(401);
     for (const code of Object.keys(table)) expect(CANONICAL_WALLET_PASS_ERROR_CODES).toContain(code);
   });
