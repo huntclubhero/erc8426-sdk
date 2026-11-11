@@ -163,6 +163,22 @@ createIssuer({ ...config, entitlement: anyOf(rental4907(), delegateRegistry()) }
 - `delegateRegistry({ registry?, rights? })`: delegate.xyz v2 delegates of the current owner are entitled in addition to the owner. Because delegation is additive, a delegate's claim does not void the owner's pass: while the holder of record is still entitled, another entitled account shares that pass (same serial, same links, acting on the holder's entitlement). The residual: revoking a delegation does not retire links the delegate already holds; the owner rotates on request to cut them off, then re-adds the pass.
 - `anyOf(...)` precedence: any veto (an exclusive rental) wins, otherwise the first allow, otherwise refused.
 
+## Issuer identity (optional)
+
+The manifest may say who signs the passes, so a client can compare it with the pass it acquires. Set `manifestIssuer` and every manifest carries it as `issuer`:
+
+```ts
+createIssuer({
+  ...config,
+  manifestIssuer: {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  },
+});
+```
+
+Use the identifiers your providers sign with. If the contract implements the issuer identity commitment (`IERC721WalletPassIssuer`, `supportsInterface(0x470be7e9)`), the standard makes this member REQUIRED and equal, member for member, to what `passIssuer()` returns. The issuer does not read the contract: keep the two equal yourself, change them together on a migration, and let `@erc8426/conformance` check it (`issuer.manifest-equal`). A shape that is not the standard's is refused at startup.
+
 ## Chain events
 
 Rotate on transfer and push updates either from a live subscription:

@@ -6,12 +6,14 @@ import {
   createManifest,
   generateNonce,
   normalizeTokenId,
+  parsePassIssuer,
   tokenRef,
   isPassFileProvider,
   type PassContent,
   type PassContext,
   type PassDeliveryProvider,
   type PassFormatProvider,
+  type PassIssuerIdentity,
   type PassManifest,
   type SupersededReason,
   type TokenRef,
@@ -84,6 +86,15 @@ export interface CreateIssuerOptions extends IssuerConfig {
   verifier?: SignatureVerifier;
   /// Default `ownerOnly()`.
   entitlement?: EntitlementPolicy;
+  /// The manifest's OPTIONAL `issuer` member: who signs the passes of each
+  ///  format (`apple`: `teamIdentifier` and `passTypeIdentifier`; `google`:
+  ///  `issuerId`). Sent in every manifest when set. REQUIRED when the
+  ///  contract implements the issuer identity commitment
+  ///  (`IERC721WalletPassIssuer`, ERC-165 id 0x470be7e9), and then it MUST
+  ///  equal, member for member, the object `passIssuer()` returns: the
+  ///  issuer does not read the contract, so keeping the two equal is the
+  ///  integrator's job (`@erc8426/conformance` checks it).
+  manifestIssuer?: PassIssuerIdentity;
   /// Nonce, pass record and link stores. Any store left out falls back to
   ///  the in-memory one, which serves one process and forgets everything on
   ///  restart. With NODE_ENV=production the fallback is refused at startup
@@ -291,6 +302,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   if (!chain) throw new IssuerConfigError("pass publicClient or chain: check (2), the fresh entitlement read, needs a chain reader");
   const verifier = options.verifier ?? (options.publicClient ? publicClientSignatureVerifier(options.publicClient) : eoaSignatureVerifier());
   const entitlement = options.entitlement ?? ownerOnly();
+  let manifestIssuer: PassIssuerIdentity | undefined;
+  if (options.manifestIssuer !== undefined) {
+    const parsed = parsePassIssuer(options.manifestIssuer, "manifestIssuer");
+    if (!parsed.ok) throw new IssuerConfigError(parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; "));
+    manifestIssuer = parsed.issuer;
+  }
   const stores = resolveStores(options, config, now);
   const keyring = resolveLinkKeyring(options, config);
   const onError =
@@ -598,7 +615,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           async (p) => [p.format, isFileProvider(p) ? downloadUrl(await keyring.token(record.downloads[p.format]!)) : await p.acquisitionUrl(ctx)] as const,
         ),
       );
-      return createManifest(Object.fromEntries(entries) as PassManifest["formats"], record.updatedAt);
+      return createManifest(Object.fromEntries(entries) as PassManifest["formats"], record.updatedAt, manifestIssuer ? { issuer: manifestIssuer } : {});
     },
 
     renderContent,
