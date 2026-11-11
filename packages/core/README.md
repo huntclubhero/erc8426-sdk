@@ -10,10 +10,10 @@ npm install @erc8426/core viem
 
 | Module | Exports |
 | - | - |
-| Constants | `WALLET_PASS_INTERFACE_ID` (`0xef5f1e71`), `ACQUIRE_ACTION`, `ROTATE_ACTION`, `PROOF_HEADER`, `SIGNATURE_HEADER`, `PKPASS_MEDIA_TYPE`, `FORMAT_APPLE`, `FORMAT_GOOGLE` |
-| ABIs | `walletPassAbi` (`passURI`, `PassUpdate`, `BatchPassUpdate`), `erc165Abi`, `erc721Abi`, `erc4907Abi`, `erc4906Abi` |
+| Constants | `WALLET_PASS_INTERFACE_ID` (`0xef5f1e71`), `WALLET_PASS_ISSUER_INTERFACE_ID` (`0x470be7e9`), `ACQUIRE_ACTION`, `ROTATE_ACTION`, `PROOF_HEADER`, `SIGNATURE_HEADER`, `PKPASS_MEDIA_TYPE`, `FORMAT_APPLE`, `FORMAT_GOOGLE` |
+| ABIs | `walletPassAbi` (`passURI`, `PassUpdate`, `BatchPassUpdate`), `walletPassIssuerAbi` (`passIssuer`), `erc165Abi`, `erc721Abi`, `erc4907Abi`, `erc4906Abi` |
 | Token ids | `assetId`, `parseAssetId`, `tokenRef`, `sameToken`, `actionUrn`, `parseActionUrn` |
-| Manifest | `createManifest`, `parseManifest` (shape checks with typed issues), `manifestPlatforms`, `readMetadataMirror` |
+| Manifest | `createManifest`, `parseManifest` (shape checks with typed issues), `manifestPlatforms`, `readMetadataMirror`; the OPTIONAL `issuer` member and the issuer identity commitment: `PassIssuerIdentity`, `parsePassIssuer`, `parsePassIssuerJson`, `diffPassIssuer` |
 | Challenge and proof | `buildChallenge`, `parseChallenge`, `generateNonce`, `proofHeaders`, `readProofHeaders` |
 | Errors | `WalletPassError`, `WALLET_PASS_ERROR_CODES`, `statusForError`, `isProofRequiredBody` |
 | Delivery types | `PassContent`, `PassContext`, `PassFormatProvider`, `PassFileProvider`, `isPassFileProvider` |

@@ -14,7 +14,33 @@ export interface PassManifest {
   ///  type because a Client reads a manifest without it as version 1, so a
   ///  parsed manifest from an older issuer may not carry it.
   version?: number;
+  /// OPTIONAL: who signs the passes of each format, so a Client can compare
+  ///  it with the signer identifiers of the pass it acquires (and with the
+  ///  contract's `passIssuer()`, when the contract commits to one).
+  issuer?: PassIssuerIdentity;
 }
+
+/// The manifest's `issuer` member, and the JSON object a contract returns
+///  from `passIssuer()` (Issuer identity commitment): format keys to objects
+///  of string members that identify the platform signer of that format's
+///  passes. For `apple` the members are the pass's `teamIdentifier` and
+///  `passTypeIdentifier`; for `google`, the `issuerId` every object id of the
+///  issuer account starts with. Members for other format keys are defined
+///  with those keys.
+export type PassIssuerIdentity = {
+  apple?: { teamIdentifier: string; passTypeIdentifier: string } & Record<string, string>;
+  google?: { issuerId: string } & Record<string, string>;
+} & Record<string, Record<string, string>>;
+
+/// The members the standard defines per format key.
+const ISSUER_MEMBERS: Record<string, readonly string[]> = {
+  [FORMAT_APPLE]: ["teamIdentifier", "passTypeIdentifier"],
+  [FORMAT_GOOGLE]: ["issuerId"],
+};
+
+export type PassIssuerParseResult =
+  | { ok: true; issuer: PassIssuerIdentity; issues: ManifestIssue[] }
+  | { ok: false; issues: ManifestIssue[] };
 
 export type ManifestIssueLevel = "error" | "warning";
 
@@ -39,6 +65,74 @@ function parseUrl(value: string): URL | null {
   } catch {
     return null;
   }
+}
+
+/// Validate a value against the shape of the manifest's `issuer` member: an
+///  object whose keys are format keys and whose values are objects of string
+///  members, with the members the standard defines for `apple` and `google`
+///  present. `path` prefixes the issue paths.
+export function parsePassIssuer(value: unknown, path = "issuer"): PassIssuerParseResult {
+  if (!isPlainObject(value)) {
+    return { ok: false, issues: [{ level: "error", path, message: "issuer must be an object whose keys are format keys" }] };
+  }
+  const issues: ManifestIssue[] = [];
+  const out: Record<string, Record<string, string>> = {};
+  for (const [format, members] of Object.entries(value)) {
+    const at = `${path}.${format}`;
+    if (!isPlainObject(members)) {
+      issues.push({ level: "error", path: at, message: "each issuer value must be an object of string members" });
+      continue;
+    }
+    const clean: Record<string, string> = {};
+    for (const [name, member] of Object.entries(members)) {
+      if (typeof member !== "string") {
+        issues.push({ level: "error", path: `${at}.${name}`, message: "issuer members must be strings" });
+        continue;
+      }
+      clean[name] = member;
+    }
+    for (const name of ISSUER_MEMBERS[format] ?? []) {
+      if (!Object.hasOwn(members, name)) {
+        issues.push({ level: "error", path: `${at}.${name}`, message: `issuer.${format} is defined by its ${name} member, which is missing` });
+      }
+    }
+    out[format] = clean;
+  }
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, issuer: out as PassIssuerIdentity, issues };
+}
+
+/// Parse the string a contract returns from `passIssuer()`: it MUST be a JSON
+///  object with the shape of the manifest's `issuer` member.
+export function parsePassIssuerJson(text: string, path = "passIssuer"): PassIssuerParseResult {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return { ok: false, issues: [{ level: "error", path, message: "passIssuer() must return a JSON object" }] };
+  }
+  return parsePassIssuer(value, path);
+}
+
+/// Compare two issuer objects member for member, as the standard asks of a
+///  manifest's `issuer` and the contract's `passIssuer()`. Returns the paths
+///  that differ (a format key or a member present on one side only, or a
+///  member whose values are not the same string); empty when they are equal.
+///  Key order is not a difference.
+export function diffPassIssuer(a: PassIssuerIdentity, b: PassIssuerIdentity): string[] {
+  const diffs: string[] = [];
+  for (const format of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+    const left = a[format];
+    const right = b[format];
+    if (!left || !right) {
+      diffs.push(format);
+      continue;
+    }
+    for (const name of [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()) {
+      if (!Object.hasOwn(left, name) || !Object.hasOwn(right, name) || left[name] !== right[name]) diffs.push(`${format}.${name}`);
+    }
+  }
+  return diffs;
 }
 
 /// Validate a value against the manifest shape. Errors are MUST violations;
@@ -128,10 +222,21 @@ export function parseManifest(value: unknown): ManifestParseResult {
     }
   }
 
+  // issuer is OPTIONAL. Present, it has the defined shape or the manifest is
+  // refused: a Client is asked not to install a pass whose signer differs
+  // from it, which it cannot judge against a member it cannot read.
+  let issuer: PassIssuerIdentity | undefined;
+  if (value.issuer !== undefined) {
+    const parsed = parsePassIssuer(value.issuer);
+    issues.push(...parsed.issues);
+    if (parsed.ok) issuer = parsed.issuer;
+  }
+
   if (issues.some((i) => i.level === "error")) return { ok: false, issues };
   const manifest: PassManifest = { formats: out as PassManifest["formats"] };
   if (updatedAt !== undefined) manifest.updatedAt = updatedAt;
   if (version !== undefined) manifest.version = version;
+  if (issuer !== undefined) manifest.issuer = issuer;
   return { ok: true, manifest, issues };
 }
 
@@ -140,14 +245,25 @@ function isLocalhost(url: URL): boolean {
 }
 
 /// Build a manifest from the URLs an issuer holds, dropping empty entries.
-///  Carries `version: 1`.
-export function createManifest(formats: PassManifest["formats"], updatedAt?: number | Date): PassManifest {
+///  Carries `version: 1`, and the OPTIONAL `issuer` member when one is given
+///  (its shape is checked; a contract that implements the issuer identity
+///  commitment obliges its Pass Issuer to send it in every manifest).
+export function createManifest(
+  formats: PassManifest["formats"],
+  updatedAt?: number | Date,
+  options: { issuer?: PassIssuerIdentity } = {},
+): PassManifest {
   const clean: Record<string, string> = {};
   for (const [k, v] of Object.entries(formats)) if (typeof v === "string" && v.length > 0) clean[k] = v;
   if (Object.keys(clean).length === 0) throw new Error("a manifest needs at least one format");
   const manifest: PassManifest = { version: MANIFEST_VERSION, formats: clean as PassManifest["formats"] };
   if (updatedAt !== undefined) {
     manifest.updatedAt = updatedAt instanceof Date ? Math.floor(updatedAt.getTime() / 1000) : Math.floor(updatedAt);
+  }
+  if (options.issuer !== undefined) {
+    const parsed = parsePassIssuer(options.issuer);
+    if (!parsed.ok) throw new Error(`invalid manifest issuer: ${parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; ")}`);
+    manifest.issuer = parsed.issuer;
   }
   return manifest;
 }

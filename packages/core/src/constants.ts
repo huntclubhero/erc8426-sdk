@@ -5,6 +5,10 @@
 ///  (`passURI(uint256)`, the only function in the interface).
 export const WALLET_PASS_INTERFACE_ID = "0xef5f1e71" as const;
 
+/// The ERC-165 identifier of `IERC721WalletPassIssuer`, the OPTIONAL issuer
+///  identity commitment (`passIssuer()`, the only function in the interface).
+export const WALLET_PASS_ISSUER_INTERFACE_ID = "0x470be7e9" as const;
+
 /// Prefix of the action URN carried as the second SIWE resource.
 export const ACTION_URN_PREFIX = "urn:wallet-pass:action:" as const;
 

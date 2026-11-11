@@ -12,12 +12,14 @@ import {
   SIGNATURE_HEADER,
   WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
+  WALLET_PASS_ISSUER_INTERFACE_ID,
   actionUrn,
   assetId,
   buildChallenge,
   canonicalErrorCode,
   createManifest,
   decodeBase64Url,
+  diffPassIssuer,
   encodeBase64Url,
   isDeprecatedWalletPassErrorCode,
   isWalletPassErrorCode,
@@ -26,6 +28,8 @@ import {
   parseAssetId,
   parseChallenge,
   parseManifest,
+  parsePassIssuer,
+  parsePassIssuerJson,
   proofHeaders,
   readMetadataMirror,
   readProofHeaders,
@@ -227,6 +231,67 @@ describe("manifest", () => {
     expect(createManifest({ apple: good.formats.apple }).version).toBe(1);
     expect(createManifest(good.formats, 1754500000).version).toBe(1);
     expect(createManifest(good.formats, new Date(1754500000000))).toEqual({ version: 1, formats: good.formats, updatedAt: 1754500000 });
+  });
+  // The spec's example manifest (Pass manifest).
+  const specIssuer = {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  };
+  it("carries the OPTIONAL issuer member: format keys to objects of string members", () => {
+    const r = parseManifest({ ...good, version: 1, issuer: specIssuer });
+    expect(r).toMatchObject({ ok: true, manifest: { issuer: specIssuer } });
+    expect(r.issues).toEqual([]);
+    // Absent stays absent, and one platform alone is fine.
+    expect((parseManifest(good) as { manifest: { issuer?: unknown } }).manifest.issuer).toBeUndefined();
+    expect(parseManifest({ ...good, issuer: { google: specIssuer.google } })).toMatchObject({ ok: true, manifest: { issuer: { google: specIssuer.google } } });
+    // Members for other format keys are defined with those keys: kept as given.
+    const other = parseManifest({ ...good, issuer: { ...specIssuer, samsung: { partnerId: "p1" } } });
+    expect(other).toMatchObject({ ok: true, manifest: { issuer: { samsung: { partnerId: "p1" } } } });
+  });
+  it("refuses an issuer member that does not have the defined shape", () => {
+    const bad: Array<[unknown, string]> = [
+      ["A1B2C3D4E5", "issuer"],
+      [[], "issuer"],
+      [null, "issuer"],
+      [{ apple: "A1B2C3D4E5" }, "issuer.apple"],
+      [{ apple: { teamIdentifier: 7, passTypeIdentifier: "pass.example.card" } }, "issuer.apple.teamIdentifier"],
+      [{ apple: { teamIdentifier: "A1B2C3D4E5" } }, "issuer.apple.passTypeIdentifier"],
+      [{ apple: { passTypeIdentifier: "pass.example.card" } }, "issuer.apple.teamIdentifier"],
+      [{ google: {} }, "issuer.google.issuerId"],
+      [{ google: { issuerId: 3388000000012345678 } }, "issuer.google.issuerId"],
+      [{ samsung: { partnerId: ["p1"] } }, "issuer.samsung.partnerId"],
+    ];
+    for (const [issuer, path] of bad) {
+      const r = parseManifest({ ...good, issuer });
+      expect(r.ok, JSON.stringify(issuer)).toBe(false);
+      expect(r.issues.some((i) => i.level === "error" && i.path === path), `${JSON.stringify(issuer)} at ${path}`).toBe(true);
+    }
+  });
+  it("createManifest emits issuer when given one, after checking its shape", () => {
+    expect(createManifest(good.formats, 1754500000, { issuer: specIssuer })).toEqual({ version: 1, formats: good.formats, updatedAt: 1754500000, issuer: specIssuer });
+    expect(createManifest(good.formats, undefined, { issuer: specIssuer })).toEqual({ version: 1, formats: good.formats, issuer: specIssuer });
+    expect(createManifest(good.formats)).not.toHaveProperty("issuer");
+    expect(() => createManifest(good.formats, undefined, { issuer: { apple: { teamIdentifier: "A1B2C3D4E5" } } as never })).toThrow(/passTypeIdentifier/);
+  });
+  it("reads the issuer identity commitment a contract returns from passIssuer()", () => {
+    expect(WALLET_PASS_ISSUER_INTERFACE_ID).toBe("0x470be7e9");
+    expect(toFunctionSelector("passIssuer()")).toBe(WALLET_PASS_ISSUER_INTERFACE_ID);
+    expect(parsePassIssuerJson(JSON.stringify(specIssuer))).toEqual({ ok: true, issuer: specIssuer, issues: [] });
+    expect(parsePassIssuerJson("not json").ok).toBe(false);
+    expect(parsePassIssuerJson("").ok).toBe(false);
+    expect(parsePassIssuerJson('"A1B2C3D4E5"').ok).toBe(false);
+    expect(parsePassIssuer(specIssuer)).toEqual({ ok: true, issuer: specIssuer, issues: [] });
+  });
+  it("compares two issuer objects member for member", () => {
+    expect(diffPassIssuer(specIssuer, JSON.parse(JSON.stringify(specIssuer)))).toEqual([]);
+    // Key order is not a difference.
+    expect(diffPassIssuer(specIssuer, { google: specIssuer.google, apple: { passTypeIdentifier: "pass.example.card", teamIdentifier: "A1B2C3D4E5" } })).toEqual([]);
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, apple: { ...specIssuer.apple, teamIdentifier: "ZZZZZZZZZZ" } })).toEqual(["apple.teamIdentifier"]);
+    expect(diffPassIssuer(specIssuer, { apple: specIssuer.apple })).toEqual(["google"]);
+    expect(diffPassIssuer({ apple: specIssuer.apple }, specIssuer)).toEqual(["google"]);
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, google: { issuerId: "3388000000012345678", extra: "x" } })).toEqual(["google.extra"]);
+    // Compared as strings, exactly: no case folding, no trimming.
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, apple: { ...specIssuer.apple, passTypeIdentifier: "pass.example.Card" } })).toEqual(["apple.passTypeIdentifier"]);
   });
   it("creates manifests and reads the metadata mirror", () => {
     const m = createManifest({ apple: "https://a.example/p.pkpass", google: "" }, new Date(1754500000000));

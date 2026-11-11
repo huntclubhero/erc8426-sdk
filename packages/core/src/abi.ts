@@ -26,6 +26,19 @@ export const walletPassAbi = [
   },
 ] as const;
 
+/// The OPTIONAL issuer identity commitment (`IERC721WalletPassIssuer`,
+///  ERC-165 id 0x470be7e9): a JSON object with the shape of the manifest's
+///  `issuer` member.
+export const walletPassIssuerAbi = [
+  {
+    type: "function",
+    name: "passIssuer",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+] as const;
+
 export const erc165Abi = [
   {
     type: "function",
