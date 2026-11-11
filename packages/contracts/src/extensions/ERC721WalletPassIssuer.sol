@@ -31,22 +31,22 @@ abstract contract ERC721WalletPassIssuer is ERC721WalletPass, IERC721WalletPassI
     /// @dev Not part of ERC-8426.
     event PassIssuerUpdated(string newPassIssuer);
 
-    /// @notice Raised by `passIssuer` while no identity is set: an empty
-    ///  string is not the JSON object the specification requires, so the view
-    ///  refuses rather than returning one.
+    /// @notice Raised when an empty identity is given: an empty string is not
+    ///  the JSON object the specification requires, and a contract that
+    ///  reports this interface must always have one to return.
     error ERC721WalletPassNoPassIssuer();
 
-    /// @param passIssuer_ Initial issuer identity JSON. May be empty and set
-    ///  later with `_setPassIssuer`; until then `passIssuer` reverts.
+    /// @param passIssuer_ Issuer identity JSON. Must not be empty: a contract
+    ///  that does not know its issuer identity yet should not inherit this
+    ///  extension, because inheriting it reports the interface at once.
     constructor(string memory passIssuer_) {
+        if (bytes(passIssuer_).length == 0) revert ERC721WalletPassNoPassIssuer();
         _passIssuer = passIssuer_;
     }
 
     /// @inheritdoc IERC721WalletPassIssuer
     function passIssuer() public view virtual returns (string memory) {
-        string memory identity = _passIssuer;
-        if (bytes(identity).length == 0) revert ERC721WalletPassNoPassIssuer();
-        return identity;
+        return _passIssuer;
     }
 
     /// @inheritdoc ERC721WalletPass
@@ -55,9 +55,10 @@ abstract contract ERC721WalletPassIssuer is ERC721WalletPass, IERC721WalletPassI
         return interfaceId == type(IERC721WalletPassIssuer).interfaceId || super.supportsInterface(interfaceId);
     }
 
-    /// @dev Replace the committed issuer identity. Gate the external setter
-    ///  in the inheriting contract.
+    /// @dev Replace the committed issuer identity. Reverts on an empty
+    ///  string. Gate the external setter in the inheriting contract.
     function _setPassIssuer(string memory newPassIssuer) internal virtual {
+        if (bytes(newPassIssuer).length == 0) revert ERC721WalletPassNoPassIssuer();
         _passIssuer = newPassIssuer;
         emit PassIssuerUpdated(newPassIssuer);
     }

@@ -100,7 +100,7 @@ contract Card is ERC721WalletPassIssuer, Ownable {
 // passIssuer_: {"apple":{"teamIdentifier":"A1B2C3D4E5","passTypeIdentifier":"pass.example.card"},"google":{"issuerId":"3388000000012345678"}}
 ```
 
-`supportsInterface(0x470be7e9)` is then true, and the standard obliges your Pass Issuer to send `issuer` in every manifest for the contract, equal member for member to what `passIssuer()` returns (`manifestIssuer` in `@erc8426/issuer`). The contract stores the string as given and does not parse it, so check it before you set it (`parsePassIssuerJson` in `@erc8426/core`). An issuer migration is a transaction: change the contract and the manifest together, since a client that sees them differ is asked not to install the pass. `passIssuer()` reverts while no identity is set.
+`supportsInterface(0x470be7e9)` is then true, and the standard obliges your Pass Issuer to send `issuer` in every manifest for the contract, equal member for member to what `passIssuer()` returns (`manifestIssuer` in `@erc8426/issuer`). The contract stores the string as given and does not parse it, so check it before you set it (`parsePassIssuerJson` in `@erc8426/core`). An issuer migration is a transaction: change the contract and the manifest together, since a client that sees them differ is asked not to install the pass. The constructor and `_setPassIssuer` refuse an empty string, so a contract that reports the interface always has an identity to return; do not inherit the extension before you know yours.
 
 ### Bounding a pass-reachable action
 

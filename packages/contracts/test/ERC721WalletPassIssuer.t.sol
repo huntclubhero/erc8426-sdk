@@ -54,13 +54,14 @@ contract ERC721WalletPassIssuerTest is Test {
         assertEq(pass.passIssuer(), next);
     }
 
-    /// Without a committed identity the view refuses rather than returning a
-    ///  string that is not the JSON object the specification requires.
-    function test_PassIssuerRevertsWhileUnset() public {
-        IssuerCommitmentHarness unset = new IssuerCommitmentHarness("https://p.example/", "");
+    /// A contract that claims the commitment always has one: an empty string
+    ///  is not the JSON object the specification requires, so it is refused at
+    ///  construction and by the setter, and the view can never return it.
+    function test_EmptyIdentityIsRefused() public {
         vm.expectRevert(abi.encodeWithSignature("ERC721WalletPassNoPassIssuer()"));
-        unset.passIssuer();
-        unset.setPassIssuer(IDENTITY);
-        assertEq(unset.passIssuer(), IDENTITY);
+        new IssuerCommitmentHarness("https://p.example/", "");
+        vm.expectRevert(abi.encodeWithSignature("ERC721WalletPassNoPassIssuer()"));
+        pass.setPassIssuer("");
+        assertEq(pass.passIssuer(), IDENTITY);
     }
 }
