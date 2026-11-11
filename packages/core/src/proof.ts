@@ -11,8 +11,8 @@ export interface ControlProof {
 
 export interface ProofHeadersOptions {
   /// Also send the pre-0.3.0 X- names, so an issuer that has not moved to
-  ///  the RFC 6648 names still reads the proof. Default true for this
-  ///  release; a later minor flips the default and then drops the names.
+  ///  the RFC 6648 names still reads the proof. Default true; pass false
+  ///  to send only the RFC 6648 names.
   legacy?: boolean;
 }
 

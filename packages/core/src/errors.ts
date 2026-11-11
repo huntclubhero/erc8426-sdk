@@ -14,12 +14,12 @@ export type AuthError =
   | "not_owner" // verified proof, but the account is not entitled (fresh read)
   | "read_failed"; // the fresh entitlement read could not be taken
 
-/// Codes retired in 0.3.0 and still accepted for one minor version. Each
+/// Codes retired in 0.3.0 and still accepted on read. Each
 ///  resolves to the spec's name through `canonicalErrorCode`:
 ///  `malformed_proof`, `invalid_address` and `invalid_token` are all
 ///  `invalid_request` (400); `link_invalid` and `not_found` are both
 ///  `unknown_capability` (404).
-/// @deprecated Use the spec's codes. These stop being accepted in a later minor.
+/// @deprecated Use the spec's codes. The aliases remain accepted; the SDK never emits them.
 export type DeprecatedWalletPassErrorCode = "malformed_proof" | "invalid_address" | "invalid_token" | "link_invalid" | "not_found";
 
 /// Codes a gated manifest, challenge or action endpoint answers with in
@@ -42,15 +42,15 @@ export type WalletPassErrorCode =
 /// The codes the SDK emits: `WalletPassErrorCode` without the deprecated aliases.
 export type CanonicalWalletPassErrorCode = Exclude<WalletPassErrorCode, DeprecatedWalletPassErrorCode>;
 
-/// @deprecated Alias kept for one minor version; the code is now `invalid_request`.
+/// @deprecated Alias still accepted on read; the code is now `invalid_request`.
 export type MalformedProofCode = "malformed_proof";
-/// @deprecated Alias kept for one minor version; the code is now `invalid_request`.
+/// @deprecated Alias still accepted on read; the code is now `invalid_request`.
 export type InvalidAddressCode = "invalid_address";
-/// @deprecated Alias kept for one minor version; the code is now `invalid_request`.
+/// @deprecated Alias still accepted on read; the code is now `invalid_request`.
 export type InvalidTokenCode = "invalid_token";
-/// @deprecated Alias kept for one minor version; the code is now `unknown_capability`.
+/// @deprecated Alias still accepted on read; the code is now `unknown_capability`.
 export type LinkInvalidCode = "link_invalid";
-/// @deprecated Alias kept for one minor version; the code is now `unknown_capability`.
+/// @deprecated Alias still accepted on read; the code is now `unknown_capability`.
 export type NotFoundCode = "not_found";
 
 /// The codes the SDK emits. Deprecated aliases are never produced, only read.

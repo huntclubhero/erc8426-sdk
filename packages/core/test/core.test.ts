@@ -375,7 +375,7 @@ describe("proof headers", () => {
       expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": signature }), signature).toEqual({ kind: "malformed", reason: "signature" });
     }
   });
-  it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
+  it("names the proof headers per RFC 6648 and sends the X- names beside them", () => {
     expect(PROOF_HEADER).toBe("Wallet-Pass-Proof");
     expect(SIGNATURE_HEADER).toBe("Wallet-Pass-Signature");
     expect(LEGACY_PROOF_HEADER).toBe("X-Wallet-Pass-Proof");

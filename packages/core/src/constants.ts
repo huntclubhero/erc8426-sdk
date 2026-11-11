@@ -23,15 +23,16 @@ export const ROTATE_ACTION = "rotate" as const;
 /// Headers a client sends to resolve a gated manifest (Gated acquisition).
 ///  Named without the X- prefix per RFC 6648, as the standard does. The
 ///  X- names of earlier drafts are still read by issuers, and `proofHeaders`
-///  still sends them beside the new ones for this release, so a 0.3.0 client
-///  resolves a 0.2.x issuer's manifest; a later minor stops sending them.
+///  still sends them beside the new ones, so a client resolves a 0.2.x
+///  issuer's manifest. They remain accepted and sent; no release is set for
+///  dropping them.
 export const PROOF_HEADER = "Wallet-Pass-Proof" as const;
 export const SIGNATURE_HEADER = "Wallet-Pass-Signature" as const;
-/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
-///  alongside the new names until a later minor drops them.
+/// @deprecated The pre-0.3.0 header names. Still accepted on read and sent
+///  alongside the new names.
 export const LEGACY_PROOF_HEADER = "X-Wallet-Pass-Proof" as const;
-/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
-///  alongside the new names until a later minor drops them.
+/// @deprecated The pre-0.3.0 header names. Still accepted on read and sent
+///  alongside the new names.
 export const LEGACY_SIGNATURE_HEADER = "X-Wallet-Pass-Signature" as const;
 /// Every header name that may carry a proof, in the order an issuer reads
 ///  them (the new name wins when both are present). For CORS allow lists.

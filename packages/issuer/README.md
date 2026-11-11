@@ -118,7 +118,7 @@ Refusals carry the `error` codes of the spec's refusal table (Refusal responses)
 | `action_failed`, `internal_error` | 500 | The action threw, or the issuer did (SDK codes) | Later |
 | `read_failed` | 503 | The fresh entitlement read could not be taken | After `Retry-After` |
 
-Until 0.4.0 the client and `isWalletPassErrorCode` also accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
+The client and `isWalletPassErrorCode` still accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
 
 ## CORS
 
