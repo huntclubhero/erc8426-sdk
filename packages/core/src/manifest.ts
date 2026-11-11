@@ -32,11 +32,23 @@ export type PassIssuerIdentity = {
   google?: { issuerId: string } & Record<string, string>;
 } & Record<string, Record<string, string>>;
 
-/// The members the standard defines per format key.
-const ISSUER_MEMBERS: Record<string, readonly string[]> = {
-  [FORMAT_APPLE]: ["teamIdentifier", "passTypeIdentifier"],
-  [FORMAT_GOOGLE]: ["issuerId"],
-};
+/// The members the standard defines per format key. A Map, because the key
+///  looked up comes from untrusted JSON: an object literal would answer
+///  `constructor` or `toString` with what it inherits.
+const ISSUER_MEMBERS: ReadonlyMap<string, readonly string[]> = new Map([
+  [FORMAT_APPLE, ["teamIdentifier", "passTypeIdentifier"]],
+  [FORMAT_GOOGLE, ["issuerId"]],
+]);
+
+/// Set an own, enumerable member under a key that came from untrusted JSON.
+///  Plain assignment would run the `__proto__` setter for that one key.
+function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+function getOwn<T>(source: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(source, key) ? source[key] : undefined;
+}
 
 export type PassIssuerParseResult =
   | { ok: true; issuer: PassIssuerIdentity; issues: ManifestIssue[] }
@@ -89,14 +101,14 @@ export function parsePassIssuer(value: unknown, path = "issuer"): PassIssuerPars
         issues.push({ level: "error", path: `${at}.${name}`, message: "issuer members must be strings" });
         continue;
       }
-      clean[name] = member;
+      setOwn(clean, name, member);
     }
-    for (const name of ISSUER_MEMBERS[format] ?? []) {
+    for (const name of ISSUER_MEMBERS.get(format) ?? []) {
       if (!Object.hasOwn(members, name)) {
         issues.push({ level: "error", path: `${at}.${name}`, message: `issuer.${format} is defined by its ${name} member, which is missing` });
       }
     }
-    out[format] = clean;
+    setOwn(out, format, clean);
   }
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, issuer: out as PassIssuerIdentity, issues };
@@ -122,8 +134,8 @@ export function parsePassIssuerJson(text: string, path = "passIssuer"): PassIssu
 export function diffPassIssuer(a: PassIssuerIdentity, b: PassIssuerIdentity): string[] {
   const diffs: string[] = [];
   for (const format of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
-    const left = a[format];
-    const right = b[format];
+    const left = getOwn(a, format);
+    const right = getOwn(b, format);
     if (!left || !right) {
       diffs.push(format);
       continue;
@@ -185,7 +197,7 @@ export function parseManifest(value: unknown): ManifestParseResult {
           message: `the google URL is not a Save to Google Wallet link (${GOOGLE_SAVE_URL_PREFIX}...); the standard does not require one, but check that it reaches Google Wallet`,
         });
       }
-      out[key] = url;
+      setOwn(out, key, url);
     }
   }
 
@@ -222,14 +234,14 @@ export function parseManifest(value: unknown): ManifestParseResult {
     }
   }
 
-  // issuer is OPTIONAL. Present, it has the defined shape or the manifest is
-  // refused: a Client is asked not to install a pass whose signer differs
-  // from it, which it cannot judge against a member it cannot read.
+  // issuer is OPTIONAL, and the standard gives a Client no rule for one that
+  // is malformed, so the manifest is not refused for it: the member is
+  // dropped with a warning, and the manifest reads as one that carries none.
   let issuer: PassIssuerIdentity | undefined;
   if (value.issuer !== undefined) {
     const parsed = parsePassIssuer(value.issuer);
-    issues.push(...parsed.issues);
     if (parsed.ok) issuer = parsed.issuer;
+    else for (const issue of parsed.issues) issues.push({ ...issue, level: "warning", message: `${issue.message}; the issuer member is ignored` });
   }
 
   if (issues.some((i) => i.level === "error")) return { ok: false, issues };
@@ -254,7 +266,7 @@ export function createManifest(
   options: { issuer?: PassIssuerIdentity } = {},
 ): PassManifest {
   const clean: Record<string, string> = {};
-  for (const [k, v] of Object.entries(formats)) if (typeof v === "string" && v.length > 0) clean[k] = v;
+  for (const [k, v] of Object.entries(formats)) if (typeof v === "string" && v.length > 0) setOwn(clean, k, v);
   if (Object.keys(clean).length === 0) throw new Error("a manifest needs at least one format");
   const manifest: PassManifest = { version: MANIFEST_VERSION, formats: clean as PassManifest["formats"] };
   if (updatedAt !== undefined) {

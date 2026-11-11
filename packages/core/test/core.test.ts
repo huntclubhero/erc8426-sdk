@@ -248,7 +248,7 @@ describe("manifest", () => {
     const other = parseManifest({ ...good, issuer: { ...specIssuer, samsung: { partnerId: "p1" } } });
     expect(other).toMatchObject({ ok: true, manifest: { issuer: { samsung: { partnerId: "p1" } } } });
   });
-  it("refuses an issuer member that does not have the defined shape", () => {
+  it("drops an issuer member that does not have the defined shape, with a warning, and keeps the manifest", () => {
     const bad: Array<[unknown, string]> = [
       ["A1B2C3D4E5", "issuer"],
       [[], "issuer"],
@@ -262,9 +262,56 @@ describe("manifest", () => {
       [{ samsung: { partnerId: ["p1"] } }, "issuer.samsung.partnerId"],
     ];
     for (const [issuer, path] of bad) {
+      // The standard has no Client rule for a malformed issuer, so the
+      // manifest is still acted on; the member is unusable and is dropped.
       const r = parseManifest({ ...good, issuer });
-      expect(r.ok, JSON.stringify(issuer)).toBe(false);
-      expect(r.issues.some((i) => i.level === "error" && i.path === path), `${JSON.stringify(issuer)} at ${path}`).toBe(true);
+      expect(r.ok, JSON.stringify(issuer)).toBe(true);
+      expect(r.ok && r.manifest.issuer, JSON.stringify(issuer)).toBeUndefined();
+      expect(r.issues.some((i) => i.level === "warning" && i.path === path), `${JSON.stringify(issuer)} at ${path}`).toBe(true);
+      expect(r.issues.some((i) => i.level === "error")).toBe(false);
+      // On its own, the member's parser still says it is not an issuer object.
+      expect(parsePassIssuer(issuer).ok).toBe(false);
+    }
+  });
+  // Every key below is one a plain object inherits. A manifest is untrusted
+  // input: none of them may be read through the prototype, and none may throw.
+  const INHERITED = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+  const withKey = (key: string, value: unknown) => JSON.parse(`{${JSON.stringify(key)}:${JSON.stringify(value)}}`) as Record<string, unknown>;
+  it("never throws on an issuer keyed by a name objects inherit, and keeps such keys as own members", () => {
+    for (const key of INHERITED) {
+      const members = { partnerId: "p1" };
+      const issuer = withKey(key, members);
+      const direct = parsePassIssuer(issuer);
+      expect(direct.ok, key).toBe(true);
+      if (direct.ok) {
+        expect(Object.keys(direct.issuer), key).toEqual([key]);
+        expect(Object.getOwnPropertyDescriptor(direct.issuer, key)?.value, key).toEqual(members);
+        expect(Object.getPrototypeOf(direct.issuer), key).toBe(Object.prototype);
+      }
+      expect(parsePassIssuerJson(JSON.stringify(issuer)).ok, key).toBe(true);
+      const r = parseManifest({ ...good, issuer });
+      expect(r.ok, key).toBe(true);
+      expect(r.issues, key).toEqual([]);
+      expect(createManifest(good.formats, undefined, { issuer: issuer as never }).issuer && Object.keys(createManifest(good.formats, undefined, { issuer: issuer as never }).issuer!), key).toEqual([key]);
+      // The same names as member names, and as a value that is not an object.
+      const inner = parsePassIssuer({ samsung: withKey(key, "x") });
+      expect(inner.ok && Object.keys(inner.issuer.samsung!), key).toEqual([key]);
+      expect(parsePassIssuer(withKey(key, "not an object")).ok, key).toBe(false);
+      expect(parseManifest({ ...good, issuer: withKey(key, "not an object") }).ok, key).toBe(true);
+    }
+  });
+  it("never reads a format through the prototype", () => {
+    for (const key of INHERITED) {
+      const r = parseManifest({ formats: withKey(key, "https://example.com/pass") });
+      expect(r.ok, key).toBe(true);
+      if (r.ok) {
+        expect(Object.keys(r.manifest.formats), key).toEqual([key]);
+        expect(Object.getPrototypeOf(r.manifest.formats), key).toBe(Object.prototype);
+      }
+      expect(Object.keys(createManifest(withKey(key, "https://example.com/pass") as never).formats), key).toEqual([key]);
+      // Comparing issuers: an inherited name on one side only is a difference, never a match or a throw.
+      expect(diffPassIssuer(specIssuer, { ...specIssuer, ...withKey(key, { a: "b" }) } as never), key).toEqual([key]);
+      expect(diffPassIssuer(specIssuer, { ...specIssuer, google: { issuerId: specIssuer.google.issuerId, ...withKey(key, "x") } } as never), key).toEqual([`google.${key}`]);
     }
   });
   it("createManifest emits issuer when given one, after checking its shape", () => {
