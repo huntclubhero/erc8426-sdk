@@ -9,8 +9,10 @@ export interface PassManifest {
   /// Unix seconds of the last content change. Content freshness only: it says
   ///  nothing about whether the URLs in `formats` are still valid.
   updatedAt?: number;
-  /// OPTIONAL manifest version; 1 is the only value defined. Issuers built
-  ///  with this SDK emit it; clients tolerate its absence.
+  /// Manifest version. REQUIRED of a Pass Issuer, and 1 is the only value
+  ///  defined: `createManifest` always emits it. It stays optional in this
+  ///  type because a Client reads a manifest without it as version 1, so a
+  ///  parsed manifest from an older issuer may not carry it.
   version?: number;
 }
 
@@ -114,7 +116,7 @@ export function parseManifest(value: unknown): ManifestParseResult {
   if (value.version !== undefined) {
     const v = value.version;
     if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
-      issues.push({ level: "error", path: "version", message: "version, when present, MUST be a positive integer (1)" });
+      issues.push({ level: "error", path: "version", message: "version MUST be the integer 1" });
     } else if (v !== MANIFEST_VERSION) {
       issues.push({
         level: "error",

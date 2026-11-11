@@ -193,27 +193,39 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   };
 
   // Manifest validation shared by the public response and the owner's gated one.
-  // `version` is optional (1 when present) and its absence is tolerated.
+  // `version` is REQUIRED of a Pass Issuer (the integer 1), and a Client reads
+  // its absence as version 1. So a manifest without it still resolves and is
+  // valid here; the omission is reported on its own, as an advisory for the
+  // issuer, and a present value other than 1 fails the shape check.
   const checkManifest = async (body: unknown, idPrefix: string): Promise<PassManifest | null> => {
     const parsed = parseManifest(body);
     if (!parsed.ok) {
       const detail = parsed.issues.filter((i) => i.level === "error").map((i) => `${i.path || "(root)"}: ${i.message}`).join("; ");
-      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)", S.manifest, "MUST", "fail", detail);
+      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds, a version that is understood)", S.manifest, "MUST", "fail", detail);
       return null;
     }
     const platforms = Object.keys(parsed.manifest.formats).join(", ");
     record(
       `${idPrefix}.valid`,
-      "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)",
+      "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds, a version that is understood)",
       S.manifest,
       "MUST",
       "pass",
-      `formats: ${platforms}; version: ${parsed.manifest.version ?? "(absent, tolerated)"}`,
+      `formats: ${platforms}`,
+    );
+    const hasVersion = parsed.manifest.version !== undefined;
+    record(
+      `${idPrefix}.version`,
+      "The manifest carries version 1 (REQUIRED of a Pass Issuer; a Client reads its absence as 1, so this is advisory)",
+      S.manifest,
+      "SHOULD",
+      hasVersion ? "pass" : "fail",
+      hasVersion ? `version: ${parsed.manifest.version}` : "version is absent; add \"version\": 1",
     );
     const warnings = parsed.issues.filter((i) => i.level === "warning");
     record(
       `${idPrefix}.lint`,
-      "No likely mistakes (updatedAt in seconds, google URL shape, manifest version)",
+      "No likely mistakes (updatedAt in seconds, google URL shape)",
       S.manifest,
       "SHOULD",
       warnings.length === 0 ? "pass" : "fail",

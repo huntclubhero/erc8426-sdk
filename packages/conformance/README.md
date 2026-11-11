@@ -30,8 +30,9 @@ Each check has a stable id, the spec section it enforces, and its level.
 | `contract.passuri-nonexistent` | MUST | Contract interface | `passURI` reverts for a nonexistent token |
 | `manifest.reachable` | MUST | Pass manifest | the endpoint answers 200 (public) or 401 (gated) |
 | `manifest.media-type` | MUST | Pass manifest | the manifest is served as `application/json` |
-| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, https acquisition URLs, `updatedAt` integer seconds; `version` optional (1) |
-| `manifest.lint` | SHOULD | Pass manifest | likely mistakes: `updatedAt` in milliseconds, a `google` URL that is not a Save link, an unknown `version` |
+| `manifest.valid` | MUST | Pass manifest | non-empty `formats`, https acquisition URLs, `updatedAt` integer seconds; a `version` other than `1` fails (a Client MUST NOT act on a version it does not understand) |
+| `manifest.version` | SHOULD | Pass manifest | the manifest carries `"version": 1`. The standard makes it REQUIRED of a Pass Issuer and tells a Client to read its absence as version `1`, so an absent `version` is reported as an advisory, not as a MUST failure |
+| `manifest.lint` | SHOULD | Pass manifest | likely mistakes: `updatedAt` in milliseconds, a `google` URL that is not a Save link |
 | `manifest.apple-media-type` | SHOULD | Pass manifest | the `apple` URL is served as `application/vnd.apple.pkpass`; advisory, since the standard leaves the media type to the platform, but Apple devices expect it |
 | `manifest.apple-reachable` | SHOULD | Pass manifest | reported only when the `apple` URL cannot be fetched |
 | `mirror.valid` | MUST | Metadata mirror | a `wallet_pass` in `tokenURI` metadata is a valid manifest |

@@ -210,7 +210,7 @@ describe("manifest", () => {
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });
     expect(ms.ok && ms.issues.some((i) => i.level === "warning")).toBe(true);
   });
-  it("carries an optional integer version, tolerating its absence and refusing unknown values", () => {
+  it("carries an integer version, tolerating its absence and refusing unknown values", () => {
     expect(parseManifest(good)).toMatchObject({ ok: true, manifest: { formats: good.formats } });
     expect((parseManifest(good) as { manifest: { version?: number } }).manifest.version).toBeUndefined();
     const v1 = parseManifest({ ...good, version: 1 });
@@ -222,6 +222,11 @@ describe("manifest", () => {
     expect(newer.ok).toBe(false);
     expect(newer.issues.some((i) => i.level === "error" && i.path === "version")).toBe(true);
     expect(MANIFEST_VERSION).toBe(1);
+  });
+  it("createManifest always emits version 1, which the standard requires of a Pass Issuer", () => {
+    expect(createManifest({ apple: good.formats.apple }).version).toBe(1);
+    expect(createManifest(good.formats, 1754500000).version).toBe(1);
+    expect(createManifest(good.formats, new Date(1754500000000))).toEqual({ version: 1, formats: good.formats, updatedAt: 1754500000 });
   });
   it("creates manifests and reads the metadata mirror", () => {
     const m = createManifest({ apple: "https://a.example/p.pkpass", google: "" }, new Date(1754500000000));

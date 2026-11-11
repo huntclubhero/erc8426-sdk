@@ -33,7 +33,8 @@ export const LEGACY_SIGNATURE_HEADER = "X-Wallet-Pass-Signature" as const;
 ///  them (the new name wins when both are present). For CORS allow lists.
 export const PROOF_HEADER_NAMES = [PROOF_HEADER, SIGNATURE_HEADER, LEGACY_PROOF_HEADER, LEGACY_SIGNATURE_HEADER] as const;
 
-/// The manifest's optional `version` member. 1 is the only value defined.
+/// The manifest's `version` member: REQUIRED of a Pass Issuer, read as 1 by a
+///  Client when absent. 1 is the only value defined.
 export const MANIFEST_VERSION = 1 as const;
 
 /// Media type an `apple` acquisition URL MUST be served with.

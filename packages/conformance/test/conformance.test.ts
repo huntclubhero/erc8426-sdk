@@ -8,14 +8,17 @@ import { RevertError, fakeChain, fakeIssuer, type FakeContract, type IssuerFault
 
 const CONTRACT = getAddress("0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1");
 
-function world(opts: { mode: "public" | "gated"; faults?: IssuerFaults; contract?: Partial<FakeContract>; mirror?: unknown }) {
+/// The fake issuer serves no `version` unless told to (a pre-0.3.0 issuer);
+///  a conformant world carries the REQUIRED `version: 1`, and `versionless`
+///  leaves it out.
+function world(opts: { mode: "public" | "gated"; faults?: IssuerFaults; contract?: Partial<FakeContract>; mirror?: unknown; versionless?: boolean }) {
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey);
   const issuer = fakeIssuer({
     contract: CONTRACT,
     mode: opts.mode,
     ownerOf: (id) => (id === "7" ? owner.address : null),
-    ...(opts.faults ? { faults: opts.faults } : {}),
+    faults: { ...(opts.versionless ? {} : { manifestVersion: 1 }), ...opts.faults },
   });
   const chain = fakeChain({
     contracts: {
@@ -143,6 +146,29 @@ describe("broken implementations are caught", () => {
     const r = await run();
     expect(byId(r, "manifest.apple-media-type")).toMatchObject({ level: "SHOULD", status: "fail", detail: "Content-Type: application/octet-stream" });
     expect(r.ok).toBe(true);
+  });
+
+  it("a manifest without version is an advisory for the issuer, not a MUST failure", async () => {
+    // The standard makes `version` REQUIRED of a Pass Issuer and tells a
+    // Client to read its absence as version 1, so the manifest still resolves.
+    const pub = await world({ mode: "public", versionless: true }).run();
+    expect(byId(pub, "manifest.valid").status).toBe("pass");
+    expect(byId(pub, "manifest.version")).toMatchObject({ level: "SHOULD", status: "fail" });
+    expect(byId(pub, "manifest.version").detail).toMatch(/absent/);
+    expect(pub.ok).toBe(true);
+    const gated = world({ mode: "gated", versionless: true });
+    const g = await gated.run({ ownerPrivateKey: gated.ownerKey });
+    expect(byId(g, "gated.manifest.version")).toMatchObject({ level: "SHOULD", status: "fail" });
+    expect(g.ok).toBe(true);
+    const ok = await world({ mode: "public" }).run();
+    expect(byId(ok, "manifest.version")).toMatchObject({ level: "SHOULD", status: "pass", detail: "version: 1" });
+  });
+
+  it("a manifest whose version is not understood fails", async () => {
+    const r = await world({ mode: "public", faults: { manifestVersion: 2 } }).run();
+    expect(byId(r, "manifest.valid").status).toBe("fail");
+    expect(byId(r, "manifest.valid").detail).toMatch(/version/);
+    expect(r.ok).toBe(false);
   });
 
   it("an invalid public manifest fails", async () => {
@@ -331,7 +357,7 @@ describe("over real HTTP", () => {
       const port = (server.address() as { port: number }).port;
       const ownerKey = generatePrivateKey();
       const owner = privateKeyToAccount(ownerKey);
-      issuer = fakeIssuer({ base: `http://127.0.0.1:${port}`, contract: CONTRACT, mode: "gated", ownerOf: () => owner.address });
+      issuer = fakeIssuer({ base: `http://127.0.0.1:${port}`, contract: CONTRACT, mode: "gated", ownerOf: () => owner.address, faults: { manifestVersion: 1 } });
       const chain = fakeChain({
         contracts: {
           [CONTRACT]: {
