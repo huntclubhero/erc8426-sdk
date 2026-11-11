@@ -12,7 +12,7 @@ import {
 import type { ApnsClient, PushOutcome } from "./apns.js";
 import type { ImageFetchOptions } from "./images.js";
 import { buildPkpass, type AppleCertificates } from "./pkpass.js";
-import { MemoryApplePassStore, newPassRecord, retiredReasonFor, rotatedRecord, type ApplePassRecord, type ApplePassStore } from "./store.js";
+import { MemoryApplePassStore, newPassRecord, retiredAtFor, retiredReasonFor, rotatedRecord, type ApplePassRecord, type ApplePassStore } from "./store.js";
 import { hmacHex, responseBody, safeEqual } from "./util.js";
 import { applePassKitWebService, type BuildPassArgs } from "./webservice.js";
 
@@ -48,6 +48,17 @@ export interface AppleFormatProviderOptions {
   ///  token. `reason` is why that token was retired ("transfer" or "reset"),
   ///  undefined when unknown. Defaults to `supersededContent`.
   supersede?(content: PassContent, reason?: SupersededReason): PassContent;
+  /// Also give a superseded (voided) pass an `expirationDate` in the past.
+  ///  Default false: the pass is marked `voided` only, as before. Apple's
+  ///  reference defines `voided` ("the pass is void") and `expirationDate`
+  ///  ("the date and time the pass expires") and does not say where Wallet
+  ///  shows a pass in either state. One deployment saw a voided pass stay in
+  ///  the main stack on at least one phone, and saw it filed with expired
+  ///  passes once it also carried a past expiration date; that is an
+  ///  observation on real devices, not an Apple guarantee (see
+  ///  docs/platforms/apple.md). The date is the moment of the supersede, a
+  ///  minute back; an earlier `expiresAt` already on the content is kept.
+  expireSuperseded?: boolean;
   /// Called with push outcomes; a push failure never fails the caller.
   onPush?(serial: string, outcomes: PushOutcome[] | Error): void;
 }
@@ -138,6 +149,11 @@ function fingerprint(content: PassContent | undefined): string {
 
 const DOWNLOAD_CONTEXT = "erc8426-pkpass-download-v1";
 
+/// With `expireSuperseded`, how far before the record's last change a
+///  superseded pass's `expirationDate` is set, so it is already past when
+///  the device reads it.
+export const SUPERSEDED_EXPIRY_BACKDATE_MS = 60_000;
+
 export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleFormatProvider {
   if (opts.linkSecret !== undefined) {
     const secretLength = typeof opts.linkSecret === "string" ? Buffer.byteLength(opts.linkSecret) : opts.linkSecret.byteLength;
@@ -168,9 +184,20 @@ export function appleFormatProvider(opts: AppleFormatProviderOptions): AppleForm
     if (!record.content) throw new Error(`no stored content for serial ${record.serial}`);
     // A retired token renders with the reason IT was retired for; the stored
     // content's own reason (the issuer's voided serial) is the fallback.
-    const content = retired
+    let content = retired
       ? supersede(record.content, retiredReasonFor(record, authenticationToken) ?? record.content.supersededReason)
       : record.content;
+    // Dated from the moment the presented token was retired, which later
+    // updates of the record never move, so every fetch of the superseded
+    // pass carries the same date. A record that does not know that moment (a
+    // token retired before 0.4.0, or voided content fetched with the current
+    // token) falls back to the record's last change. An expiry the content
+    // already carries is kept when it is the earlier of the two.
+    if (opts.expireSuperseded && content.voided) {
+      const since = retiredAtFor(record, authenticationToken) ?? record.updatedAt.getTime();
+      const expiry = new Date(since - SUPERSEDED_EXPIRY_BACKDATE_MS);
+      if (!content.expiresAt || content.expiresAt.getTime() > expiry.getTime()) content = { ...content, expiresAt: expiry };
+    }
     return buildPkpass(content, {
       passTypeIdentifier: opts.passTypeIdentifier,
       teamIdentifier: opts.teamIdentifier,

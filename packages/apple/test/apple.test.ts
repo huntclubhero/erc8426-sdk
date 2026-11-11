@@ -12,6 +12,9 @@ import {
   featuredActionsFor,
   passImages,
   validateSignerCertificate,
+  APNS_RETRY_AFTER_SECONDS,
+  DEFAULT_APNS_RETRY,
+  apnsRetryAdvice,
   createApnsClient,
   fetchImage,
   isPng,
@@ -19,9 +22,11 @@ import {
   MAX_LOG_BODY_BYTES,
   MAX_REGISTRATIONS_PER_PASS,
   MAX_PUSH_TOKENS_PER_PASS,
+  SUPERSEDED_EXPIRY_BACKDATE_MS,
   SUPERSEDED_PUSH_WINDOW_MS,
   hexToRgb,
   newPassRecord,
+  passEtag,
   rotatedRecord,
   toPassJson,
   type ApnsClient,
@@ -698,6 +703,73 @@ describe("PassKit web service", () => {
     expect(stale.status).toBe(200);
   });
 
+  // ERC-8426 asks an issuer to evaluate If-None-Match as well as
+  // If-Modified-Since (RFC 9110, Section 13). The tag comes from the same
+  // value as Last-Modified, the record's updatedAt, and from the token.
+  describe("If-None-Match", () => {
+    const path = `/v1/passes/${PASS_TYPE}/s3r1al`;
+
+    it("answers a matching tag 304 without building, and a tag that does not match 200", async () => {
+      const { call, record, built } = await setup();
+      const res = await call("GET", path, { token: record.authenticationToken });
+      const etag = res.headers.get("etag")!;
+      expect(etag).toMatch(/^"[0-9a-f]{32}"$/);
+      expect(etag).toBe(passEtag(record, record.authenticationToken, false));
+      const cached = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": etag } });
+      expect(cached.status).toBe(304);
+      expect(cached.headers.get("etag")).toBe(etag);
+      expect(cached.headers.get("last-modified")).toBe(record.updatedAt.toUTCString());
+      expect(built).toHaveLength(1);
+      // A list, and a weak tag, compare the same way (RFC 9110, 13.1.2).
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": `"other", W/${etag}` } })).status).toBe(304);
+      for (const stale of ['"0123456789abcdef0123456789abcdef"', "garbage", etag.slice(1, -1), ""]) {
+        expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": stale } })).status, stale).toBe(200);
+      }
+    });
+
+    it("changes with every update, even two inside one second, where If-Modified-Since cannot tell them apart", async () => {
+      const { call, record, store } = await setup();
+      const first = (await call("GET", path, { token: record.authenticationToken })).headers;
+      const bumped = { ...record, updatedAt: new Date(record.updatedAt.getTime() + 1) };
+      await store.putPass(bumped);
+      const res = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": first.get("etag")! } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("etag")).not.toBe(first.get("etag"));
+    });
+
+    it("wins over If-Modified-Since when both are sent", async () => {
+      const { call, record } = await setup();
+      const etag = (await call("GET", path, { token: record.authenticationToken })).headers.get("etag")!;
+      const fresh = record.updatedAt.toUTCString();
+      const old = new Date(record.updatedAt.getTime() - 60_000).toUTCString();
+      // The tag does not match: 200, although the date alone would say not modified.
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": '"nope"', "if-modified-since": fresh } })).status).toBe(200);
+      // The tag matches: 304, although the date alone would say modified.
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": etag, "if-modified-since": old } })).status).toBe(304);
+    });
+
+    it("a superseded pass has its own tag: the live pass's tag never earns a retired token a 304", async () => {
+      const { call, record, store, built } = await setup();
+      const liveTag = (await call("GET", path, { token: record.authenticationToken })).headers.get("etag")!;
+      const next = rotatedRecord(record, OWNER_B);
+      await store.putPass(next);
+      // The old device still holds the live pass and its tag.
+      const res = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": liveTag, "if-modified-since": new Date(Date.now() + 60_000).toUTCString() } });
+      expect(res.status).toBe(200);
+      expect(built.at(-1)).toEqual({ retired: true, token: record.authenticationToken });
+      const supersededTag = res.headers.get("etag")!;
+      expect(supersededTag).not.toBe(liveTag);
+      // Once it holds the superseded rendering, a repeat is not rebuilt.
+      const again = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": supersededTag } });
+      expect(again.status).toBe(304);
+      expect(built).toHaveLength(2);
+      // Neither tag is the new holder's.
+      const current = await call("GET", path, { token: next.authenticationToken, headers: { "if-none-match": `${liveTag}, ${supersededTag}` } });
+      expect(current.status).toBe(200);
+      expect(current.headers.get("etag")).not.toBe(supersededTag);
+    });
+  });
+
   it("serves a retired token the superseded rendering, lets it unregister, never register", async () => {
     const { call, record, store, built } = await setup();
     await call("POST", regPath, { token: record.authenticationToken, body: { pushToken: PUSH_TOKEN } });
@@ -775,6 +847,20 @@ describe("APNs client", () => {
   const GONE = "d".repeat(64);
   let ecPublicPem: string;
   let ecPrivatePem: string;
+  /// Answers the stand-in gateway gives a token before its default 200, in
+  ///  order: an APNs status and reason, or "stall" for no answer.
+  const script = new Map<string, Array<{ status: number; reason: string } | "stall">>();
+  const sendsTo = (token: string) => seen.filter((s) => s.path.endsWith(token)).length;
+  const client = (extra: Partial<Parameters<typeof createApnsClient>[0]> = {}) =>
+    createApnsClient({
+      keyId: "KEY1234567",
+      teamId: TEAM,
+      privateKeyP8: ecPrivatePem,
+      origin,
+      passTypeIdentifier: PASS_TYPE,
+      retry: { baseDelayMs: 5 },
+      ...extra,
+    } as Parameters<typeof createApnsClient>[0]);
 
   beforeAll(async () => {
     const ec = generateKeyPairSync("ec", {
@@ -799,7 +885,13 @@ describe("APNs client", () => {
           authorization: headers.authorization as string | undefined,
           body,
         });
-        if (path.endsWith(GONE)) {
+        const scripted = script.get(path.slice("/3/device/".length))?.shift();
+        if (scripted === "stall") {
+          // No answer at all: the client's stream timeout is the only way out.
+        } else if (scripted) {
+          stream.respond({ ":status": scripted.status, "content-type": "application/json" });
+          stream.end(JSON.stringify({ reason: scripted.reason }));
+        } else if (path.endsWith(GONE)) {
           stream.respond({ ":status": 410, "content-type": "application/json" });
           stream.end(JSON.stringify({ reason: "Unregistered", timestamp: Date.now() }));
         } else {
@@ -820,7 +912,7 @@ describe("APNs client", () => {
     seen.length = 0;
     const apns = createApnsClient({ keyId: "KEY1234567", teamId: TEAM, privateKeyP8: ecPrivatePem, origin, passTypeIdentifier: PASS_TYPE });
     const out = await apns.send(["c".repeat(64), "c".repeat(64)]);
-    expect(out).toEqual([{ token: "c".repeat(64), ok: true, status: 200 }]);
+    expect(out).toEqual([{ token: "c".repeat(64), ok: true, status: 200, attempts: 1 }]);
     expect(seen).toHaveLength(1);
     const s = seen[0]!;
     expect(s.path).toBe(`/3/device/${"c".repeat(64)}`);
@@ -861,11 +953,156 @@ describe("APNs client", () => {
       origin: "http://127.0.0.1:1",
       passTypeIdentifier: PASS_TYPE,
       connectTimeoutMs: 2000,
+      retry: { baseDelayMs: 5 },
     });
     const out = await apns.send([PUSH_TOKEN]);
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ ok: false });
+    // Every attempt failed to connect; a later push may land.
+    expect(out[0]).toMatchObject({ ok: false, attempts: 3, retryable: true });
     expect(out[0]!.reason).toMatch(/^connect/);
+  });
+
+  // The default is one send per push, exactly as before 0.4.0.
+  it("sends each push once unless retry is asked for, and still says what a later push can fix", async () => {
+    seen.length = 0;
+    const token = "7a".repeat(32);
+    script.set(token, ["stall"]);
+    const apns = client({ retry: undefined, streamTimeoutMs: 150 });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, reason: "stream timeout", attempts: 1, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.noAnswer }]);
+    expect(sendsTo(token)).toBe(1);
+    const off = client({ retry: false, streamTimeoutMs: 150 });
+    script.set(token, ["stall"]);
+    expect((await off.send([token]))[0]).toMatchObject({ ok: false, attempts: 1 });
+    apns.close();
+    off.close();
+  });
+
+  it("with retry on, resends a push that got no answer", async () => {
+    seen.length = 0;
+    const token = "3c".repeat(32);
+    script.set(token, ["stall"]);
+    const apns = client({ retry: { baseDelayMs: 5 }, streamTimeoutMs: 150 });
+    const out = await apns.send([token, PUSH_TOKEN]);
+    expect(out.find((o) => o.token === token)).toEqual({ token, ok: true, status: 200, attempts: 2 });
+    // The token that landed first is not sent again.
+    expect(out.find((o) => o.token === PUSH_TOKEN)).toEqual({ token: PUSH_TOKEN, ok: true, status: 200, attempts: 1 });
+    expect(sendsTo(PUSH_TOKEN)).toBe(1);
+    apns.close();
+  });
+
+  it("an undefined member of retry means its default, never a single send", async () => {
+    seen.length = 0;
+    const token = "2b".repeat(32);
+    script.set(token, ["stall", "stall", "stall", "stall"]);
+    const apns = client({ retry: { attempts: undefined, baseDelayMs: 5, maxDelayMs: undefined, maxAddedMs: undefined }, streamTimeoutMs: 60 });
+    const out = await apns.send([token]);
+    expect(out[0]).toMatchObject({ ok: false, attempts: DEFAULT_APNS_RETRY.attempts, retryable: true });
+    expect(sendsTo(token)).toBe(3);
+    script.delete(token);
+    apns.close();
+  });
+
+  it("stops resending once the added time is spent", async () => {
+    seen.length = 0;
+    const token = "8b".repeat(32);
+    script.set(token, ["stall", "stall", "stall", "stall", "stall", "stall"]);
+    // Ten attempts allowed, but only 100 ms of added time: the first resend
+    // (after 20 ms) starts, the next would start past the cap and is not made.
+    const apns = client({ retry: { attempts: 10, baseDelayMs: 20, maxAddedMs: 100 }, streamTimeoutMs: 120 });
+    const started = Date.now();
+    const out = await apns.send([token]);
+    expect(out[0]).toMatchObject({ ok: false, attempts: 2, retryable: true });
+    expect(Date.now() - started).toBeLessThan(1500);
+    script.delete(token);
+    apns.close();
+  });
+
+  // Apple, "Handling notification responses from APNs": 429 is "too many
+  // requests for the same device token", "You can retry with a delay", and "an
+  // error code beginning with 4XX slows down your ability to send". So a 429
+  // is never resent inside a send; it is handed to the caller's queue.
+  it("never resends a 429 in process: it settles for the caller's queue with a suggested delay", async () => {
+    seen.length = 0;
+    const token = "1a".repeat(32);
+    script.set(token, [{ status: 429, reason: "TooManyRequests" }]);
+    const apns = client({ retry: { baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    expect(out).toEqual([
+      { token, ok: false, status: 429, reason: "TooManyRequests", attempts: 1, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.tooManyRequests },
+    ]);
+    expect(sendsTo(token)).toBe(1);
+    apns.close();
+  });
+
+  // Apple: "After 15 minutes, you can retry JSON payloads that receive
+  // response status codes that begin with 5XX."
+  it("does not resend a 5xx, and suggests Apple's 15 minutes", async () => {
+    seen.length = 0;
+    const token = "4d".repeat(32);
+    script.set(token, [{ status: 503, reason: "ServiceUnavailable" }]);
+    const apns = client({ retry: { baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, status: 503, reason: "ServiceUnavailable", attempts: 1, retryable: true, retryAfterSeconds: 900 }]);
+    expect(sendsTo(token)).toBe(1);
+    apns.close();
+  });
+
+  // Apple: "ExpiredProviderToken: The provider token is stale and a new token
+  // should be generated." The client drops its cached token on that answer.
+  it("resends once, with a new provider token, after 403 ExpiredProviderToken", async () => {
+    seen.length = 0;
+    const token = "9c".repeat(32);
+    script.set(token, [
+      { status: 403, reason: "ExpiredProviderToken" },
+      { status: 403, reason: "ExpiredProviderToken" },
+    ]);
+    const apns = client({ retry: { attempts: 5, baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    // One resend for this reason, however many attempts are allowed.
+    expect(out).toEqual([{ token, ok: false, status: 403, reason: "ExpiredProviderToken", attempts: 2, retryable: true, retryAfterSeconds: APNS_RETRY_AFTER_SECONDS.noAnswer }]);
+    const sent = seen.filter((s) => s.path.endsWith(token));
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.authorization).not.toBe(sent[0]!.authorization);
+    // The next send lands on the fresh token.
+    expect((await apns.send([token]))[0]).toMatchObject({ ok: true, attempts: 1 });
+    // With retry off it is reported as worth pushing again, and not resent.
+    script.set(token, [{ status: 403, reason: "ExpiredProviderToken" }]);
+    const once = client({ retry: undefined });
+    expect((await once.send([token]))[0]).toMatchObject({ ok: false, status: 403, attempts: 1, retryable: true });
+    apns.close();
+    once.close();
+  });
+
+  // Apple: "Don't retry notification responses with the error code
+  // BadDeviceToken, DeviceTokenNotForTopic, Forbidden, ExpiredToken,
+  // Unregistered, or PayloadTooLarge."
+  it("never resends a 400, a 403 Forbidden or a 410", async () => {
+    seen.length = 0;
+    const bad = "5e".repeat(32);
+    const forbidden = "6f".repeat(32);
+    script.set(bad, [{ status: 400, reason: "BadDeviceToken" }]);
+    script.set(forbidden, [{ status: 403, reason: "Forbidden" }]);
+    const apns = client({ retry: { baseDelayMs: 5 } });
+    const out = await apns.send([bad, forbidden, GONE]);
+    expect(out.find((o) => o.token === bad)).toEqual({ token: bad, ok: false, status: 400, reason: "BadDeviceToken", attempts: 1, retryable: false });
+    expect(out.find((o) => o.token === forbidden)).toMatchObject({ status: 403, attempts: 1, retryable: false });
+    expect(out.find((o) => o.token === GONE)).toMatchObject({ status: 410, attempts: 1, retryable: false });
+    expect(seen).toHaveLength(3);
+    apns.close();
+  });
+
+  it("classifies an outcome by what Apple documents for its status", () => {
+    expect(apnsRetryAdvice({ token: "t", ok: true, status: 200 })).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, reason: "stream timeout" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "ExpiredProviderToken" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyRequests" })).toBe("later");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyProviderTokenUpdates" })).toBe("later");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 500, reason: "InternalServerError" })).toBe("later");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 503, reason: "Shutdown" })).toBe("later");
+    for (const status of [400, 404, 405, 410, 413]) expect(apnsRetryAdvice({ token: "t", ok: false, status }), String(status)).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "Forbidden" })).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 403, reason: "BadCertificate" })).toBe("never");
   });
 
   it("authenticates with the pass certificate over mutual TLS", async () => {
@@ -976,6 +1213,73 @@ describe("appleFormatProvider", () => {
     expect(pass.storeCard.primaryFields[0].value).toBe("Transferred");
     expect(pass.storeCard.backFields[0].value).toMatch(/^The token moved to a new owner/);
     expect(JSON.stringify(pass)).not.toContain("issuer.example/a?");
+  });
+
+  it("expireSuperseded: a superseded pass also carries a past expirationDate; off by default", async () => {
+    const refreshOld = async (p: ReturnType<typeof provider>["p"], oldToken: string) => {
+      const res = await p.handle(
+        new Request(`https://issuer.example/apple/v1/passes/${PASS_TYPE}/s3r1al`, { headers: { authorization: `ApplePass ${oldToken}` } }),
+      );
+      expect(res.status).toBe(200);
+      return JSON.parse(unzip(new Uint8Array(await res.arrayBuffer()))["pass.json"]!.toString());
+    };
+    // Default: voided only, as before.
+    const plain = provider().p;
+    await plain.acquisitionUrl(ctx(OWNER_A));
+    const plainToken = (await plain.store.getPass("s3r1al"))!.authenticationToken;
+    await plain.acquisitionUrl(ctx(OWNER_B));
+    const voidedOnly = await refreshOld(plain, plainToken);
+    expect(voidedOnly.voided).toBe(true);
+    expect(voidedOnly.expirationDate).toBeUndefined();
+
+    // Opted in: a transfer (retired token) ...
+    const { p } = provider(fakeApns(), { expireSuperseded: true });
+    const liveUrl = await p.acquisitionUrl(ctx(OWNER_A));
+    const live = JSON.parse(unzip(new Uint8Array(await (await p.handle(new Request(liveUrl))).arrayBuffer()))["pass.json"]!.toString());
+    // ... never touches a live pass.
+    expect(live.voided).toBeUndefined();
+    expect(live.expirationDate).toBeUndefined();
+    const oldToken = (await p.store.getPass("s3r1al"))!.authenticationToken;
+    const newUrl = await p.acquisitionUrl(ctx(OWNER_B));
+    const superseded = await refreshOld(p, oldToken);
+    expect(superseded.voided).toBe(true);
+    expect(Date.parse(superseded.expirationDate)).toBeLessThan(Date.now());
+    // The same date on every fetch, so a refresh does not look like a change.
+    expect((await refreshOld(p, oldToken)).expirationDate).toBe(superseded.expirationDate);
+    // It is the moment of the supersede: later updates for the new holder do not move it.
+    await new Promise((r) => setTimeout(r, 1100));
+    await p.notifyUpdate!(ctx(OWNER_B, content({ primary: [{ key: "bal", label: "BALANCE", value: "14" }] })));
+    expect((await refreshOld(p, oldToken)).expirationDate).toBe(superseded.expirationDate);
+    const retiredAt = (await p.store.getPass("s3r1al"))!.retiredAt![0]!;
+    expect(Date.parse(superseded.expirationDate)).toBe(Math.floor((retiredAt - SUPERSEDED_EXPIRY_BACKDATE_MS) / 1000) * 1000);
+
+    // An expiry the content already carries wins when it is earlier, and loses when it is later.
+    const dated = (expiresAt: Date) =>
+      provider(fakeApns(), { expireSuperseded: true, supersede: (c, reason) => ({ ...supersededContent(c, reason), expiresAt }) }).p;
+    for (const [expiresAt, keeps] of [
+      [new Date("2020-01-01T00:00:00Z"), true],
+      [new Date("2099-01-01T00:00:00Z"), false],
+    ] as Array<[Date, boolean]>) {
+      const q = dated(expiresAt);
+      await q.acquisitionUrl(ctx(OWNER_A));
+      const before = (await q.store.getPass("s3r1al"))!.authenticationToken;
+      await q.acquisitionUrl(ctx(OWNER_B));
+      const got = Date.parse((await refreshOld(q, before)).expirationDate);
+      if (keeps) expect(got).toBe(expiresAt.getTime());
+      else expect(got).toBeLessThan(Date.now());
+    }
+    // The new holder's pass is live.
+    const next = JSON.parse(unzip(new Uint8Array(await (await p.handle(new Request(newUrl))).arrayBuffer()))["pass.json"]!.toString());
+    expect(next.expirationDate).toBeUndefined();
+
+    // ... and the issuer's voided serial (content that arrives voided).
+    const issuerMode = provider(fakeApns(), { expireSuperseded: true }).p;
+    await issuerMode.acquisitionUrl(ctx(OWNER_A));
+    const token = (await issuerMode.store.getPass("s3r1al"))!.authenticationToken;
+    await issuerMode.notifyUpdate!(ctx(OWNER_A, content({ voided: true, links: [], supersededReason: "reset" })));
+    const reset = await refreshOld(issuerMode, token);
+    expect(reset.voided).toBe(true);
+    expect(Date.parse(reset.expirationDate)).toBeLessThan(Date.now());
   });
 
   it("rotates on the owner's request and pushes", async () => {

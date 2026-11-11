@@ -171,7 +171,7 @@ function readProof(request: Request, body: Json | null): ProofRead {
   if (fromHeaders.kind !== "absent") return fromHeaders;
   if (!body || (body.message === undefined && body.signature === undefined)) return { kind: "absent" };
   const { message, signature } = body;
-  if (typeof message !== "string" || typeof signature !== "string" || !/^0x([0-9a-fA-F]{2})+$/.test(signature)) {
+  if (typeof message !== "string" || typeof signature !== "string" || !/^0x[0-9a-fA-F]*$/.test(signature)) {
     return { kind: "malformed", error: "invalid_request", message: "the proof could not be decoded" };
   }
   return { kind: "present", proof: { message, signature: signature as Hex } };

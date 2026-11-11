@@ -12,12 +12,14 @@ import {
   SIGNATURE_HEADER,
   WALLET_PASS_ERROR_CODES,
   WALLET_PASS_INTERFACE_ID,
+  WALLET_PASS_ISSUER_INTERFACE_ID,
   actionUrn,
   assetId,
   buildChallenge,
   canonicalErrorCode,
   createManifest,
   decodeBase64Url,
+  diffPassIssuer,
   encodeBase64Url,
   isDeprecatedWalletPassErrorCode,
   isWalletPassErrorCode,
@@ -26,6 +28,8 @@ import {
   parseAssetId,
   parseChallenge,
   parseManifest,
+  parsePassIssuer,
+  parsePassIssuerJson,
   proofHeaders,
   readMetadataMirror,
   readProofHeaders,
@@ -210,7 +214,7 @@ describe("manifest", () => {
     const ms = parseManifest({ ...good, updatedAt: 1754500000000 * 1000 });
     expect(ms.ok && ms.issues.some((i) => i.level === "warning")).toBe(true);
   });
-  it("carries an optional integer version, tolerating its absence and refusing unknown values", () => {
+  it("carries an integer version, tolerating its absence and refusing unknown values", () => {
     expect(parseManifest(good)).toMatchObject({ ok: true, manifest: { formats: good.formats } });
     expect((parseManifest(good) as { manifest: { version?: number } }).manifest.version).toBeUndefined();
     const v1 = parseManifest({ ...good, version: 1 });
@@ -222,6 +226,119 @@ describe("manifest", () => {
     expect(newer.ok).toBe(false);
     expect(newer.issues.some((i) => i.level === "error" && i.path === "version")).toBe(true);
     expect(MANIFEST_VERSION).toBe(1);
+  });
+  it("createManifest always emits version 1, which the standard requires of a Pass Issuer", () => {
+    expect(createManifest({ apple: good.formats.apple }).version).toBe(1);
+    expect(createManifest(good.formats, 1754500000).version).toBe(1);
+    expect(createManifest(good.formats, new Date(1754500000000))).toEqual({ version: 1, formats: good.formats, updatedAt: 1754500000 });
+  });
+  // The spec's example manifest (Pass manifest).
+  const specIssuer = {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  };
+  it("carries the OPTIONAL issuer member: format keys to objects of string members", () => {
+    const r = parseManifest({ ...good, version: 1, issuer: specIssuer });
+    expect(r).toMatchObject({ ok: true, manifest: { issuer: specIssuer } });
+    expect(r.issues).toEqual([]);
+    // Absent stays absent, and one platform alone is fine.
+    expect((parseManifest(good) as { manifest: { issuer?: unknown } }).manifest.issuer).toBeUndefined();
+    expect(parseManifest({ ...good, issuer: { google: specIssuer.google } })).toMatchObject({ ok: true, manifest: { issuer: { google: specIssuer.google } } });
+    // Members for other format keys are defined with those keys: kept as given.
+    const other = parseManifest({ ...good, issuer: { ...specIssuer, samsung: { partnerId: "p1" } } });
+    expect(other).toMatchObject({ ok: true, manifest: { issuer: { samsung: { partnerId: "p1" } } } });
+  });
+  it("drops an issuer member that does not have the defined shape, with a warning, and keeps the manifest", () => {
+    const bad: Array<[unknown, string]> = [
+      ["A1B2C3D4E5", "issuer"],
+      [[], "issuer"],
+      [null, "issuer"],
+      [{ apple: "A1B2C3D4E5" }, "issuer.apple"],
+      [{ apple: { teamIdentifier: 7, passTypeIdentifier: "pass.example.card" } }, "issuer.apple.teamIdentifier"],
+      [{ apple: { teamIdentifier: "A1B2C3D4E5" } }, "issuer.apple.passTypeIdentifier"],
+      [{ apple: { passTypeIdentifier: "pass.example.card" } }, "issuer.apple.teamIdentifier"],
+      [{ google: {} }, "issuer.google.issuerId"],
+      [{ google: { issuerId: 3388000000012345678 } }, "issuer.google.issuerId"],
+      [{ samsung: { partnerId: ["p1"] } }, "issuer.samsung.partnerId"],
+    ];
+    for (const [issuer, path] of bad) {
+      // The standard has no Client rule for a malformed issuer, so the
+      // manifest is still acted on; the member is unusable and is dropped.
+      const r = parseManifest({ ...good, issuer });
+      expect(r.ok, JSON.stringify(issuer)).toBe(true);
+      expect(r.ok && r.manifest.issuer, JSON.stringify(issuer)).toBeUndefined();
+      expect(r.issues.some((i) => i.level === "warning" && i.path === path), `${JSON.stringify(issuer)} at ${path}`).toBe(true);
+      expect(r.issues.some((i) => i.level === "error")).toBe(false);
+      // On its own, the member's parser still says it is not an issuer object.
+      expect(parsePassIssuer(issuer).ok).toBe(false);
+    }
+  });
+  // Every key below is one a plain object inherits. A manifest is untrusted
+  // input: none of them may be read through the prototype, and none may throw.
+  const INHERITED = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+  const withKey = (key: string, value: unknown) => JSON.parse(`{${JSON.stringify(key)}:${JSON.stringify(value)}}`) as Record<string, unknown>;
+  it("never throws on an issuer keyed by a name objects inherit, and keeps such keys as own members", () => {
+    for (const key of INHERITED) {
+      const members = { partnerId: "p1" };
+      const issuer = withKey(key, members);
+      const direct = parsePassIssuer(issuer);
+      expect(direct.ok, key).toBe(true);
+      if (direct.ok) {
+        expect(Object.keys(direct.issuer), key).toEqual([key]);
+        expect(Object.getOwnPropertyDescriptor(direct.issuer, key)?.value, key).toEqual(members);
+        expect(Object.getPrototypeOf(direct.issuer), key).toBe(Object.prototype);
+      }
+      expect(parsePassIssuerJson(JSON.stringify(issuer)).ok, key).toBe(true);
+      const r = parseManifest({ ...good, issuer });
+      expect(r.ok, key).toBe(true);
+      expect(r.issues, key).toEqual([]);
+      expect(createManifest(good.formats, undefined, { issuer: issuer as never }).issuer && Object.keys(createManifest(good.formats, undefined, { issuer: issuer as never }).issuer!), key).toEqual([key]);
+      // The same names as member names, and as a value that is not an object.
+      const inner = parsePassIssuer({ samsung: withKey(key, "x") });
+      expect(inner.ok && Object.keys(inner.issuer.samsung!), key).toEqual([key]);
+      expect(parsePassIssuer(withKey(key, "not an object")).ok, key).toBe(false);
+      expect(parseManifest({ ...good, issuer: withKey(key, "not an object") }).ok, key).toBe(true);
+    }
+  });
+  it("never reads a format through the prototype", () => {
+    for (const key of INHERITED) {
+      const r = parseManifest({ formats: withKey(key, "https://example.com/pass") });
+      expect(r.ok, key).toBe(true);
+      if (r.ok) {
+        expect(Object.keys(r.manifest.formats), key).toEqual([key]);
+        expect(Object.getPrototypeOf(r.manifest.formats), key).toBe(Object.prototype);
+      }
+      expect(Object.keys(createManifest(withKey(key, "https://example.com/pass") as never).formats), key).toEqual([key]);
+      // Comparing issuers: an inherited name on one side only is a difference, never a match or a throw.
+      expect(diffPassIssuer(specIssuer, { ...specIssuer, ...withKey(key, { a: "b" }) } as never), key).toEqual([key]);
+      expect(diffPassIssuer(specIssuer, { ...specIssuer, google: { issuerId: specIssuer.google.issuerId, ...withKey(key, "x") } } as never), key).toEqual([`google.${key}`]);
+    }
+  });
+  it("createManifest emits issuer when given one, after checking its shape", () => {
+    expect(createManifest(good.formats, 1754500000, { issuer: specIssuer })).toEqual({ version: 1, formats: good.formats, updatedAt: 1754500000, issuer: specIssuer });
+    expect(createManifest(good.formats, undefined, { issuer: specIssuer })).toEqual({ version: 1, formats: good.formats, issuer: specIssuer });
+    expect(createManifest(good.formats)).not.toHaveProperty("issuer");
+    expect(() => createManifest(good.formats, undefined, { issuer: { apple: { teamIdentifier: "A1B2C3D4E5" } } as never })).toThrow(/passTypeIdentifier/);
+  });
+  it("reads the issuer identity commitment a contract returns from passIssuer()", () => {
+    expect(WALLET_PASS_ISSUER_INTERFACE_ID).toBe("0x470be7e9");
+    expect(toFunctionSelector("passIssuer()")).toBe(WALLET_PASS_ISSUER_INTERFACE_ID);
+    expect(parsePassIssuerJson(JSON.stringify(specIssuer))).toEqual({ ok: true, issuer: specIssuer, issues: [] });
+    expect(parsePassIssuerJson("not json").ok).toBe(false);
+    expect(parsePassIssuerJson("").ok).toBe(false);
+    expect(parsePassIssuerJson('"A1B2C3D4E5"').ok).toBe(false);
+    expect(parsePassIssuer(specIssuer)).toEqual({ ok: true, issuer: specIssuer, issues: [] });
+  });
+  it("compares two issuer objects member for member", () => {
+    expect(diffPassIssuer(specIssuer, JSON.parse(JSON.stringify(specIssuer)))).toEqual([]);
+    // Key order is not a difference.
+    expect(diffPassIssuer(specIssuer, { google: specIssuer.google, apple: { passTypeIdentifier: "pass.example.card", teamIdentifier: "A1B2C3D4E5" } })).toEqual([]);
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, apple: { ...specIssuer.apple, teamIdentifier: "ZZZZZZZZZZ" } })).toEqual(["apple.teamIdentifier"]);
+    expect(diffPassIssuer(specIssuer, { apple: specIssuer.apple })).toEqual(["google"]);
+    expect(diffPassIssuer({ apple: specIssuer.apple }, specIssuer)).toEqual(["google"]);
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, google: { issuerId: "3388000000012345678", extra: "x" } })).toEqual(["google.extra"]);
+    // Compared as strings, exactly: no case folding, no trimming.
+    expect(diffPassIssuer(specIssuer, { ...specIssuer, apple: { ...specIssuer.apple, passTypeIdentifier: "pass.example.Card" } })).toEqual(["apple.passTypeIdentifier"]);
   });
   it("creates manifests and reads the metadata mirror", () => {
     const m = createManifest({ apple: "https://a.example/p.pkpass", google: "" }, new Date(1754500000000));
@@ -244,7 +361,21 @@ describe("proof headers", () => {
     expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "" })).toEqual({ kind: "absent" });
     expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
   });
-  it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
+  it("takes any 0x-prefixed hex string as a signature and leaves its length to the verifier", () => {
+    // As the reference server does (hex or nothing): an ERC-1271 signature can
+    // be any length, so "0x" and an odd number of digits are a signature the
+    // verifier will refuse, not a malformed request.
+    for (const signature of ["0x", "0xabc", "0xdeadbeef"]) {
+      expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": signature }), signature).toEqual({
+        kind: "present",
+        proof: { message: "{}", signature },
+      });
+    }
+    for (const signature of ["nothex", "0xzz", "abcd", "0x 12", "0X12"]) {
+      expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": signature }), signature).toEqual({ kind: "malformed", reason: "signature" });
+    }
+  });
+  it("names the proof headers per RFC 6648 and sends the X- names beside them", () => {
     expect(PROOF_HEADER).toBe("Wallet-Pass-Proof");
     expect(SIGNATURE_HEADER).toBe("Wallet-Pass-Signature");
     expect(LEGACY_PROOF_HEADER).toBe("X-Wallet-Pass-Proof");
@@ -325,7 +456,7 @@ describe("statuses", () => {
       read_failed: 503,
     };
     for (const [code, status] of Object.entries(table)) expect(statusForError(code as WalletPassErrorCode), code).toBe(status);
-    // Pending addition to the table (PR #2036): a Not Before in the future is a failed freshness check.
+    // A Not Before in the future is a failed freshness check.
     expect(statusForError("not_yet_valid")).toBe(401);
     for (const code of Object.keys(table)) expect(CANONICAL_WALLET_PASS_ERROR_CODES).toContain(code);
   });

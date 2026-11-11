@@ -48,6 +48,42 @@ describe("public configuration", () => {
   });
 });
 
+describe("the manifest's issuer member", () => {
+  const identity = {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  };
+
+  it("is left out unless manifestIssuer is configured", async () => {
+    const h = buildHarness({ mode: "public" });
+    h.chain.setOwner(TOKEN_ID, newSigner().address);
+    expect(await (await h.get(MANIFEST)).json()).not.toHaveProperty("issuer");
+  });
+
+  it("is sent in every manifest, public and gated, exactly as configured", async () => {
+    const pub = buildHarness({ mode: "public", manifestIssuer: identity });
+    pub.chain.setOwner(TOKEN_ID, newSigner().address);
+    const body = (await (await pub.get(MANIFEST)).json()) as { issuer: unknown; version: number };
+    expect(body.issuer).toEqual(identity);
+    expect(body.version).toBe(1);
+    expect(parseManifest(body)).toMatchObject({ ok: true, manifest: { issuer: identity } });
+
+    const gated = buildHarness({ manifestIssuer: identity });
+    const owner = newSigner();
+    gated.chain.setOwner(TOKEN_ID, owner.address);
+    const claimed = await claim(gated, owner);
+    expect(claimed.res.status).toBe(200);
+    expect(claimed.body.issuer).toEqual(identity);
+    // The 401 still carries nothing but the challenge.
+    expect(await (await gated.get(MANIFEST)).json()).toEqual({ error: "proof_required", challenge: CHALLENGE_URI });
+  });
+
+  it("is refused at startup when it does not have the defined shape", () => {
+    expect(() => buildHarness({ manifestIssuer: { apple: { teamIdentifier: "A1B2C3D4E5" } } as never })).toThrow(/manifestIssuer.*passTypeIdentifier/);
+    expect(() => buildHarness({ manifestIssuer: "A1B2C3D4E5" as never })).toThrow(/manifestIssuer/);
+  });
+});
+
 describe("gated acquisition", () => {
   it("answers a request with no proof 401 proof_required with the challenge URI and no acquisition URLs", async () => {
     const h = buildHarness();

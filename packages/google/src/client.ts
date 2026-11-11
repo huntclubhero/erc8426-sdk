@@ -41,7 +41,9 @@ export interface GoogleMessage {
   /// Raise an Android notification for this message (Google `TEXT_AND_NOTIFY`). Default false:
   /// a plain `TEXT` message only shows inside the saved pass, it never wakes the holder, so a
   /// warning the holder must act on (a pet about to lapse, a boarding change) needs `notify: true`.
-  /// Google caps notifying messages per object per day (three at the time of writing).
+  /// Google documents a maximum of three messages that trigger a push notification in a 24 hour
+  /// period and answers a further one with a "QuotaExceededException response"; the provider's
+  /// `notifyUpdate` then sends the same message as `TEXT` and reports it through `onError`.
   notify?: boolean;
 }
 

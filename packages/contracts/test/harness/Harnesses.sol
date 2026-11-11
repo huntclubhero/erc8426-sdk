@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
 import {ERC721WalletPass} from "../../src/ERC721WalletPass.sol";
+import {ERC721WalletPassIssuer} from "../../src/extensions/ERC721WalletPassIssuer.sol";
 import {ERC721WalletPassRentable} from "../../src/extensions/ERC721WalletPassRentable.sol";
 import {BoundedAction} from "../../src/utils/BoundedAction.sol";
 
@@ -106,5 +107,22 @@ contract BoundedHarness is ERC721WalletPass, BoundedAction {
 
     function _boundedActionOwner(uint256 tokenId) internal view override returns (address) {
         return _requireOwned(tokenId);
+    }
+}
+
+/// @dev The issuer identity commitment, with an ungated setter for tests.
+contract IssuerCommitmentHarness is ERC721WalletPassIssuer {
+    constructor(string memory base, string memory identity)
+        ERC721("Harness", "H")
+        ERC721WalletPass(base)
+        ERC721WalletPassIssuer(identity)
+    {}
+
+    function mint(address to, uint256 id) external {
+        _mint(to, id);
+    }
+
+    function setPassIssuer(string calldata identity) external {
+        _setPassIssuer(identity);
     }
 }

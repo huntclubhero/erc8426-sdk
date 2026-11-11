@@ -20,6 +20,10 @@ export interface ApplePassRecord {
   ///  `retiredAuthenticationTokens` (null when unknown). Optional so records
   ///  written before it existed still load; they render the generic wording.
   retiredReasons?: Array<SupersededReason | null>;
+  /// When each retired token was retired, epoch milliseconds, index-aligned
+  ///  with `retiredAuthenticationTokens` (null when unknown). Optional so
+  ///  records written before it existed still load.
+  retiredAt?: Array<number | null>;
   /// Owner the current token was issued to, lowercased. A different owner on
   ///  the next acquisition is a transfer and rotates the token.
   owner?: string;
@@ -192,14 +196,24 @@ export function rotatedRecord(record: ApplePassRecord, newOwner?: string, reason
   const why = reason ?? (newOwner ? "transfer" : null);
   // Align an older record's reasons (or none) with its tokens before adding.
   const reasons = record.retiredAuthenticationTokens.map((_, i) => record.retiredReasons?.[i] ?? null);
+  const times = record.retiredAuthenticationTokens.map((_, i) => record.retiredAt?.[i] ?? null);
+  const now = new Date();
   return {
     ...record,
     authenticationToken: randomToken(),
     retiredAuthenticationTokens: [record.authenticationToken, ...record.retiredAuthenticationTokens].slice(0, MAX_RETIRED_TOKENS),
     retiredReasons: [why, ...reasons].slice(0, MAX_RETIRED_TOKENS),
+    retiredAt: [now.getTime(), ...times].slice(0, MAX_RETIRED_TOKENS),
     owner: newOwner ? newOwner.toLowerCase() : record.owner,
-    updatedAt: new Date(),
+    updatedAt: now,
   };
+}
+
+/// When a retired token was retired (epoch milliseconds), or undefined when
+///  the token is not retired or the record does not know.
+export function retiredAtFor(record: ApplePassRecord, token: string): number | undefined {
+  const i = record.retiredAuthenticationTokens.indexOf(token);
+  return i < 0 ? undefined : (record.retiredAt?.[i] ?? undefined);
 }
 
 /// Why a retired token was retired, or undefined when the token is not

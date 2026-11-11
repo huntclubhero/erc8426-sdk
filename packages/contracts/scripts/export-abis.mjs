@@ -17,6 +17,8 @@ const CONTRACTS = [
   ["IERC721WalletPass.sol", "IERC721WalletPass"],
   ["ERC721WalletPass.sol", "ERC721WalletPass"],
   ["ERC721WalletPassRentable.sol", "ERC721WalletPassRentable"],
+  ["IERC721WalletPassIssuer.sol", "IERC721WalletPassIssuer"],
+  ["ERC721WalletPassIssuer.sol", "ERC721WalletPassIssuer"],
   ["BoundedAction.sol", "BoundedAction"],
   ["IERC4907.sol", "IERC4907"],
   ["IERC5192.sol", "IERC5192"],

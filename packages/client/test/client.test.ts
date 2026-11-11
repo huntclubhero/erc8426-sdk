@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createWalletClient, custom, getAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { WALLET_PASS_INTERFACE_ID, WalletPassError, buildChallenge, generateNonce, tokenRef } from "@erc8426/core";
+import { WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID, WalletPassError, buildChallenge, generateNonce, tokenRef } from "@erc8426/core";
 import {
   WalletPassClientError,
   checkChallengeScope,
@@ -194,6 +194,126 @@ describe("public manifest", () => {
     const { client } = setup("public", { faults: { manifestVersion: 2 } });
     await expect(client.getManifest({ contract: CONTRACT, tokenId: 1 })).rejects.toMatchObject({ code: "invalid_manifest" });
     await expect(client.getAcquisitionUrl({ contract: CONTRACT, tokenId: 1 }, "apple")).rejects.toMatchObject({ code: "invalid_manifest" });
+  });
+
+  describe("issuer identity commitment", () => {
+    const identity = {
+      apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+      google: { issuerId: "3388000000012345678" },
+    };
+    const t = { contract: CONTRACT, tokenId: 1 };
+    /// A contract that may commit to an identity, behind an issuer that may send one.
+    function committed(opts: { onChain?: unknown | null; revert?: boolean; inManifest?: unknown; mode?: "public" | "gated"; verifyIssuer?: boolean }) {
+      const owner = privateKeyToAccount(generatePrivateKey());
+      const issuer = fakeIssuer({
+        contract: CONTRACT,
+        mode: opts.mode ?? "public",
+        ownerOf: () => owner.address,
+        ...(opts.inManifest !== undefined ? { manifestIssuer: opts.inManifest } : {}),
+      });
+      const commits = opts.onChain !== undefined && opts.onChain !== null;
+      const chain = fakeChain({
+        contracts: {
+          [CONTRACT]: {
+            interfaces: [WALLET_PASS_INTERFACE_ID, ...(commits || opts.revert ? [WALLET_PASS_ISSUER_INTERFACE_ID] : [])],
+            passURI: (id) => issuer.passUri(id),
+            ...(commits ? { passIssuer: () => (typeof opts.onChain === "string" ? opts.onChain : JSON.stringify(opts.onChain)) } : {}),
+          },
+          [NO165]: { interfaces: null },
+        },
+      });
+      const client = createWalletPassClient({
+        publicClient: chain.client,
+        fetch: issuer.fetch,
+        ...(opts.verifyIssuer !== undefined ? { verifyIssuer: opts.verifyIssuer } : {}),
+      });
+      return { client, owner, issuer };
+    }
+
+    it("reads the commitment, and answers null for a contract that makes none", async () => {
+      expect(await committed({ onChain: identity }).client.getIssuerCommitment(CONTRACT)).toEqual(identity);
+      const none = committed({});
+      expect(await none.client.getIssuerCommitment(CONTRACT)).toBeNull();
+      expect(await none.client.getIssuerCommitment(NO165)).toBeNull();
+    });
+
+    it("refuses a commitment that is not the JSON object the standard defines", async () => {
+      await expect(committed({ onChain: "not json" }).client.getIssuerCommitment(CONTRACT)).rejects.toMatchObject({ code: "invalid_manifest", source: "chain" });
+      await expect(committed({ onChain: { apple: { teamIdentifier: "A1B2C3D4E5" } } }).client.getIssuerCommitment(CONTRACT)).rejects.toMatchObject({
+        code: "invalid_manifest",
+        source: "chain",
+      });
+      // The contract claims the interface and the read reverts: that is not "no commitment".
+      await expect(committed({ revert: true }).client.getIssuerCommitment(CONTRACT)).rejects.toMatchObject({ source: "chain" });
+    });
+
+    it("a manifest whose issuer or formats use names objects inherit resolves, and never throws a raw error", async () => {
+      for (const key of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+        const hostile = JSON.parse(`{${JSON.stringify(key)}:{"partnerId":"p1"}}`) as unknown;
+        const { client } = committed({ inManifest: hostile });
+        const r = await client.getManifest(t);
+        expect(Object.keys(r.manifest.issuer!), key).toEqual([key]);
+        expect((await client.addToWallet(t, { platform: "apple" })).url, key).toMatch(/\.pkpass$/);
+        // A platform name that is only inherited is not a format of the manifest.
+        await expect(client.getAcquisitionUrl(t, key), key).rejects.toMatchObject({ code: "unsupported", source: "client" });
+        await expect(client.addToWallet(t, { platform: key }), key).rejects.toMatchObject({ code: "unsupported" });
+      }
+    });
+
+    it("a malformed issuer member does not stop the manifest; under verifyIssuer it counts as no issuer member", async () => {
+      const malformed = { apple: { teamIdentifier: "A1B2C3D4E5" } };
+      const plain = committed({ inManifest: malformed });
+      const r = await plain.client.getManifest(t);
+      expect(r.manifest.issuer).toBeUndefined();
+      expect(r.issues.some((i) => i.level === "warning" && i.path === "issuer.apple.passTypeIdentifier")).toBe(true);
+      expect((await plain.client.getManifest(t, { verifyIssuer: true })).issuerCommitment).toBeNull();
+      const bound = committed({ onChain: identity, inManifest: malformed });
+      expect((await bound.client.getManifest(t)).manifest.issuer).toBeUndefined();
+      await expect(bound.client.getManifest(t, { verifyIssuer: true })).rejects.toMatchObject({ code: "invalid_manifest", source: "client" });
+    });
+
+    it("says so when a contract claims the commitment and passIssuer() reverts", async () => {
+      const err = await committed({ revert: true }).client.getIssuerCommitment(CONTRACT).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "invalid_manifest", source: "chain" });
+      expect((err as Error).message).toMatch(/passIssuer\(\) reverted/);
+      expect((err as Error).message).not.toMatch(/burned/);
+    });
+
+    it("carries the manifest's issuer through without reading the contract unless asked", async () => {
+      const { client } = committed({ onChain: identity, inManifest: { ...identity, google: { issuerId: "1111111111111111111" } } });
+      const r = await client.getManifest(t);
+      expect(r.manifest.issuer?.google?.issuerId).toBe("1111111111111111111");
+      expect(r.issuerCommitment).toBeUndefined();
+    });
+
+    it("verifyIssuer: a manifest that matches the commitment resolves and says so", async () => {
+      const { client } = committed({ onChain: identity, inManifest: identity });
+      const r = await client.getManifest(t, { verifyIssuer: true });
+      expect(r.issuerCommitment).toEqual(identity);
+      expect((await client.addToWallet(t, { platform: "apple", verifyIssuer: true })).url).toMatch(/\.pkpass$/);
+      // A contract that makes no commitment has nothing to check against.
+      const plain = committed({ inManifest: identity });
+      expect((await plain.client.getManifest(t, { verifyIssuer: true })).issuerCommitment).toBeNull();
+    });
+
+    it("verifyIssuer: a manifest that differs from the commitment, or omits issuer, is not acted on", async () => {
+      const differs = committed({ onChain: identity, inManifest: { ...identity, apple: { ...identity.apple, teamIdentifier: "ZZZZZZZZZZ" } } });
+      await expect(differs.client.getManifest(t, { verifyIssuer: true })).rejects.toMatchObject({ code: "invalid_manifest", source: "client" });
+      await expect(differs.client.getManifest(t, { verifyIssuer: true })).rejects.toThrow(/apple\.teamIdentifier/);
+      await expect(differs.client.getAcquisitionUrl(t, "apple", { verifyIssuer: true })).rejects.toMatchObject({ code: "invalid_manifest" });
+      await expect(differs.client.addToWallet(t, { platform: "apple", verifyIssuer: true })).rejects.toMatchObject({ code: "invalid_manifest" });
+      const missing = committed({ onChain: identity });
+      await expect(missing.client.getManifest(t, { verifyIssuer: true })).rejects.toThrow(/issuer/);
+    });
+
+    it("verifyIssuer can be the client's default, and applies to a gated manifest", async () => {
+      const bad = committed({ onChain: identity, inManifest: { google: identity.google }, mode: "gated", verifyIssuer: true });
+      await expect(bad.client.getManifest(t, { signer: bad.owner })).rejects.toMatchObject({ code: "invalid_manifest", source: "client" });
+      // The per-call option wins over the client's default.
+      expect((await bad.client.getManifest(t, { signer: bad.owner, verifyIssuer: false })).configuration).toBe("gated");
+      const good = committed({ onChain: identity, inManifest: identity, mode: "gated", verifyIssuer: true });
+      expect((await good.client.getManifest(t, { signer: good.owner })).issuerCommitment).toEqual(identity);
+    });
   });
 
   it("reports a 0.2.x issuer's retired code names under the spec's names, keeping the sent string in serverCode", async () => {

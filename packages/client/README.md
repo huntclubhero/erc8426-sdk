@@ -9,7 +9,7 @@ npm install @erc8426/client @erc8426/core viem
 ## What it does for you
 
 - **Discovery.** `supportsWalletPass` runs the full ERC-165 detection procedure for `0xef5f1e71` and answers `false` (never throws) for contracts without ERC-165.
-- **Both configurations.** A manifest served without a proof is the public configuration. A `401 proof_required` is the gated configuration: the client fetches the acquire challenge, has your signer sign it, and retries with the `Wallet-Pass-Proof` and `Wallet-Pass-Signature` headers (and, for this release, the pre-0.3.0 `X-` names beside them, so a 0.2.x issuer still answers; a later minor stops sending those).
+- **Both configurations.** A manifest served without a proof is the public configuration. A `401 proof_required` is the gated configuration: the client fetches the acquire challenge, has your signer sign it, and retries with the `Wallet-Pass-Proof` and `Wallet-Pass-Signature` headers (and the pre-0.3.0 `X-` names beside them, so a 0.2.x issuer still answers).
 - **Protection for the signer.** Before a challenge reaches the signer, the client checks it is scoped to what the user asked for. The challenge must be served from the same origin as the endpoint the proof will be sent to, and its SIWE domain must be exactly that endpoint's host (including a non-default port), so a signature meant for one verifier is never handed to another. The address must be the signer, the chain id the token's chain, and the resources exactly two in order: the CAIP-19 token, then the action URN (an extra resource such as a ReCap is refused). The expiration must be in the future and not too far away. The statement line is free text and is not relied on. Anything else is refused with `source: "client"` and nothing is signed.
 - **Safe URLs.** Everything the client fetches came from a contract or an issuer, so it fetches only https (or http on a loopback host), and it never returns an acquisition URL for navigation unless it is https (or http on localhost). `javascript:`, `data:` and non-local `http:` are refused.
 - **No caching.** The spec says clients MUST NOT durably cache acquisition URLs and SHOULD fetch the manifest at the moment of the add-to-wallet action. Every call re-reads `passURI` and refetches the manifest.
@@ -90,6 +90,16 @@ const missed = await passes.getPassUpdates({ fromBlock: lastSeenBlock, toBlock: 
 
 The `wallet_pass` metadata mirror is available through `readMetadataMirror(token)`. It is marked `authoritative: false`: when both exist the manifest behind `passURI` wins, and a gated issuer must not mirror URLs at all.
 
+## Checking who signs the passes
+
+A manifest may carry an `issuer` member naming the platform signer of its passes (`manifest.issuer.apple.teamIdentifier` and `passTypeIdentifier`, `manifest.issuer.google.issuerId`), and a contract may commit to the same object on chain through `passIssuer()`. With `verifyIssuer: true` (per call, or as the client's default) the client reads the commitment and refuses the manifest (`invalid_manifest`, `source: "client"`) unless its `issuer` equals it member for member; a contract that makes no commitment passes, and the result's `issuerCommitment` says which case it was.
+
+```ts
+const { manifest, issuerCommitment } = await passes.getManifest(token, { verifyIssuer: true });
+```
+
+This compares the contract with the manifest. Comparing either with the signer identifiers inside the pass file a device receives is platform-specific and is not done by this package. The check costs four contract reads per manifest, which is why it is off unless asked for.
+
 ## Signed actions
 
 For pass-reachable actions on the signed path (the user signs each action), `signedAction` requests a challenge for the action, checks its scope, signs it, and POSTs `{ message, signature, params, chainId, contract, tokenId, action }`:
@@ -118,7 +128,7 @@ These match the `@erc8426/issuer` routes. Query parameters are always added with
 
 ## Issuer notes (CORS)
 
-The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `Wallet-Pass-Proof` and `Wallet-Pass-Signature` (plus the `X-` names for this release), so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers` naming them (`PROOF_HEADER_NAMES` from `@erc8426/core` is the list). An `@erc8426/issuer` sends no CORS headers unless configured (`cors: { origins: [...] }` or an explicit `"*"`), so a browser client on another origin needs the issuer to name it.
+The first manifest request is a plain GET, so it needs no preflight. The gated retry carries `Wallet-Pass-Proof` and `Wallet-Pass-Signature` (plus the `X-` names, which are still sent), so a browser client needs the issuer to answer the preflight with `Access-Control-Allow-Headers` naming them (`PROOF_HEADER_NAMES` from `@erc8426/core` is the list). An `@erc8426/issuer` sends no CORS headers unless configured (`cors: { origins: [...] }` or an explicit `"*"`), so a browser client on another origin needs the issuer to name it.
 
 ## API
 
@@ -133,15 +143,17 @@ The first manifest request is a plain GET, so it needs no preflight. The gated r
 | `trustedChallengeDomains` | extra SIWE domains to accept, for development only |
 | `allowCrossOriginChallenge` | follow a challenge URL on another origin than the proof's endpoint, for development only |
 | `allowInsecureHttp` | fetch plain http from non-loopback hosts, for server-side development only |
+| `verifyIssuer` | default for the `verifyIssuer` option of `getManifest`, `getAcquisitionUrl` and `addToWallet`; off unless set |
 
 Returns:
 
 | method | |
 | - | - |
 | `supportsWalletPass(contract)` | `Promise<boolean>` |
+| `getIssuerCommitment(contract)` | `Promise<PassIssuerIdentity \| null>`: the identity the contract commits to through `passIssuer()` (ERC-165 id `0x470be7e9`), or `null` when it makes no commitment |
 | `getPassURI(token)` | `Promise<string>` raw `passURI` |
 | `resolvePassURI(uri)` | gateway-rewritten URL (http, https, data pass through) |
-| `getManifest(token, { signer?, signal? })` | `Promise<{ manifest, configuration, passUri, url, issues }>` |
+| `getManifest(token, { signer?, signal?, verifyIssuer? })` | `Promise<{ manifest, configuration, passUri, url, issues, issuerCommitment? }>` |
 | `getAcquisitionUrl(token, platform, { signer? })` | `Promise<string>` |
 | `addToWallet(token, { signer?, platform?, userAgent? })` | `Promise<{ url, platform, configuration, manifest }>` |
 | `readMetadataMirror(token)` | `Promise<{ authoritative: false, tokenUri, result }>` |

@@ -11,6 +11,7 @@ import {
   assertIssuerId,
   createSaveUrl,
   googleFormatProvider,
+  isNotifyQuotaError,
   googleWalletClient,
   saveOrigins,
   stateFor,
@@ -265,6 +266,9 @@ function fakeGoogle() {
   let tokenGrants = 0;
   let failNextUpsert = false;
   let failPatches = 0;
+  /// When set, a PATCH whose messages ask for a notification is refused with
+  ///  this status and a body naming Google's documented exception.
+  let notifyRefusal: { status: number; body: string; thenFailNextPatch?: boolean } | null = null;
   const reject401 = new Set<string>();
 
   const fetchFn = (async (input: string | URL, init: RequestInit = {}) => {
@@ -311,6 +315,10 @@ function fakeGoogle() {
         failPatches -= 1;
         return new Response("boom", { status: 503 });
       }
+      if (notifyRefusal && Array.isArray(body.messages) && body.messages.some((m: { messageType?: string }) => m.messageType === "TEXT_AND_NOTIFY")) {
+        if (notifyRefusal.thenFailNextPatch) failPatches = 1;
+        return new Response(notifyRefusal.body, { status: notifyRefusal.status });
+      }
       const merged = { ...existing, ...body };
       resources.set(path, merged);
       // A PATCH that carries `messages` replaces the list; record each entry
@@ -335,6 +343,9 @@ function fakeGoogle() {
     },
     failPatches(n: number) {
       failPatches = n;
+    },
+    refuseNotify(status: number, body: string, thenFailNextPatch = false) {
+      notifyRefusal = { status, body, thenFailNextPatch };
     },
   };
 }
@@ -444,6 +455,69 @@ describe("googleFormatProvider", () => {
     await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
     expect(g.messages.at(-1)!.path).toBe(`genericObject/${id}/messages`);
     expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Last chance", body: "Your pass lapses in 2h.", messageType: "TEXT_AND_NOTIFY" });
+  });
+
+  // Google, "Trigger Push Notifications": "Any attempts to notify more than 3
+  // times will yield a QuotaExceededException response. Any further updates to
+  // the pass can be set using TEXT instead of TEXT_AND_NOTIFY".
+  it("falls back to a plain TEXT message when the notify quota is exceeded, and reports it", async () => {
+    const quota = JSON.stringify({ error: { code: 429, message: "QuotaExceededException: notification quota exceeded for this pass", status: "RESOURCE_EXHAUSTED" } });
+    // The documented name decides, not the status: the wire shape is not documented.
+    for (const status of [429, 400]) {
+      const { g, p, errors } = setup({ messageFor: () => ({ header: "Last chance", body: "Your pass lapses in 2h.", notify: true }) });
+      const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+      const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+      g.refuseNotify(status, quota);
+      await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
+      // The words are on the card, silently.
+      expect(g.messages.at(-1)!.path).toBe(`genericObject/${id}/messages`);
+      expect(g.messages.at(-1)!.body.message).toMatchObject({ header: "Last chance", body: "Your pass lapses in 2h.", messageType: "TEXT" });
+      const stored = g.resources.get(`genericObject/${id}`)!.messages as Array<{ messageType: string }>;
+      expect(stored.map((m) => m.messageType)).toEqual(["TEXT"]);
+      // And the caller is told the notification did not go out.
+      expect(errors.filter((e) => /notify quota/.test(e))).toEqual([`notify quota exceeded for ${id}: message sent as TEXT`]);
+    }
+  });
+
+  it("says the message was sent as TEXT only once that write has landed", async () => {
+    const quota = JSON.stringify({ error: { code: 429, message: "QuotaExceededException" } });
+    const { g, p, errors } = setup({ messageFor: () => ({ header: "Last chance", body: "Your pass lapses in 2h.", notify: true }) });
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    g.refuseNotify(429, quota, true);
+    const before = g.messages.length;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
+    expect(g.messages.length).toBe(before);
+    expect(errors.some((e) => /sent as TEXT/.test(e))).toBe(false);
+    expect(errors).toEqual([`notify quota exceeded for ${id}: the TEXT write failed too`, `setMessages ${id}`]);
+  });
+
+  it("matches only the name Google documents, exactly", () => {
+    const err = (body: string) => new GoogleWalletApiError("PATCH", "genericObject/x", 429, body);
+    expect(isNotifyQuotaError(err("QuotaExceededException"))).toBe(true);
+    for (const body of ["quotaexceededexception", "quotaExceeded", "Quota exceeded for quota metric", "rateLimitExceeded"]) {
+      expect(isNotifyQuotaError(err(body)), body).toBe(false);
+    }
+  });
+
+  it("does not downgrade a notification on any other failure", async () => {
+    for (const [status, body] of [
+      [429, JSON.stringify({ error: { code: 429, message: "Rate limit exceeded", status: "RESOURCE_EXHAUSTED" } })],
+      [503, "backend error"],
+      [400, JSON.stringify({ error: { code: 400, message: "Invalid message" } })],
+    ] as Array<[number, string]>) {
+      const { g, p, errors } = setup({ messageFor: () => ({ header: "Last chance", body: "Your pass lapses in 2h.", notify: true }) });
+      const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+      const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+      g.refuseNotify(status, body);
+      const before = g.messages.length;
+      await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
+      expect(g.messages.length, String(status)).toBe(before);
+      expect(errors, String(status)).toEqual([`setMessages ${id}`]);
+    }
+    expect(isNotifyQuotaError(new GoogleWalletApiError("PATCH", "genericObject/x", 429, "QuotaExceededException"))).toBe(true);
+    expect(isNotifyQuotaError(new GoogleWalletApiError("PATCH", "genericObject/x", 429, "Rate limit exceeded"))).toBe(false);
+    expect(isNotifyQuotaError(new Error("QuotaExceededException"))).toBe(false);
   });
 
   it("rotate expires the object so the next acquisition issues a new id", async () => {

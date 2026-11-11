@@ -13,6 +13,19 @@ The issuer and the Apple web service are Fetch API handlers (`Request` in, `Resp
 
 The in-memory defaults are for tests and a single process only. `createIssuer` refuses them under `NODE_ENV=production` unless every store is named (`stores: kvStores(kv, { chainId, contract })`, or an explicit `stores: memoryStores()` for a deliberate single instance), and warns once outside production.
 
+## Apple signing cost under a burst
+
+Every pass file the Apple provider serves is built and signed at that moment: the images are fetched when they are given as URLs, the bundle's manifest is hashed, and the Pass Type ID key signs it. Nothing is cached between requests. That holds for a download and for every 200 answer of the web service's latest-pass route.
+
+What bounds it is the conditional fetch. The web service sends `Last-Modified` and an `ETag`, and answers a request that shows it already has the pass with 304, without building anything: an `If-None-Match` that carries the tag, or, when that header is absent, an `If-Modified-Since` that is not older. Apple's Wallet Developer Guide (archived) asks for the second ("Support the If-Modified-Since caching mechanism on this endpoint"), and the current endpoint reference lists only the `Authorization` header. Apple's documentation does not mention `If-None-Match`, and this SDK has no evidence that Wallet sends it; it is evaluated because ERC-8426 asks an issuer to evaluate both (RFC 9110, Section 13), and when both are sent `If-None-Match` decides. The tag is derived from the record's `updatedAt`, the value behind `Last-Modified`, and from the token presented, so a superseded pass has a tag of its own and a device still holding the live pass under a retired token is never told 304. One departure from RFC 9110, on purpose: `If-None-Match: *` is not honoured, because it would tell exactly that device to keep its live pass.
+
+So the cost to plan for is one signature per registered device per real change, arriving as the devices answer the push. An update pushed to every pass of a collection at once asks the host for that many signatures at once.
+
+- Push a collection-wide change in batches, at a rate the host signs comfortably. Measure one `buildPkpass` on the production host first; the time depends on the key, the images and the CPU.
+- Give images as bytes, or serve their URLs from somewhere fast and close: a slow image origin is paid on every build.
+- A superseded pass is rebuilt on every fetch unless the device sends the superseded pass's own tag in `If-None-Match` (a retired token is never answered 304 on `If-Modified-Since` alone). Plan for one build per old device per push, and pushes to superseded registrations stop after `SUPERSEDED_PUSH_WINDOW_MS`.
+- Do not push when nothing changed. `notifyUpdate` always pushes; call it for real changes only. ERC-8426 asks an issuer not to push unchanged content, because a platform can throttle updates for an issuer that does.
+
 ## Next.js on Vercel
 
 ```ts
@@ -37,7 +50,7 @@ export const DELETE = apple.webService;
 - **Stores:** Upstash Redis (or Vercel KV, which is Upstash) through `kvStores`; the issuer README has the ten-line adapter. Use Postgres or Redis for the Apple and Google stores.
 - **Events:** serverless functions cannot hold a `watchTransfers` subscription. Use an indexer webhook (below), or a Vercel Cron job that reads `Transfer`, `PassUpdate` and `BatchPassUpdate` logs since the last processed block and calls the same hooks.
 - **Secrets:** Vercel environment variables, marked sensitive. Base64 PEM files to keep their newlines intact. `linkSecret` (the example reads `ISSUER_LINK_SECRET`) is one of them: 32+ bytes, the same on every instance, required in production; the links are derived from it, so a store dump yields none.
-- **APNs:** the client reuses its HTTP/2 session within a warm instance; a cold start reconnects once. That is fine at pass-update volumes.
+- **APNs:** the client reuses its HTTP/2 session within a warm instance; a cold start reconnects once. That is fine at pass-update volumes. Each push is sent once by default, and a serverless function has no queue of its own: a lost supersede push leaves the old pass stale until the device next fetches. Record failed outcomes from `onPush` and push the serial again from a cron job or a queue (see "A lost push" in the [Apple notes](platforms/apple.md)).
 - **Preview deployments:** Apple only calls `https` web services on public hosts, so test device updates on a deployed preview, not localhost.
 
 ## Node and Express
@@ -60,6 +73,8 @@ app.listen(3000);
 watchTransfers({ client: publicClient, issuer });
 watchPassUpdates({ client: publicClient, issuer });
 ```
+
+With the APNs client's `retry` off, which is the default, a lost supersede push leaves an installed pass stale until the device next fetches; a queue-backed caller should push a supersede again when `onPush` reports a `retryable` outcome.
 
 A long-running process is the best home for this SDK: watchers hold their subscriptions, APNs keeps one session open, and in-memory caches (Google access tokens, parsed keys) stay warm. Run more than one instance only with shared stores. `http.createServer(toNodeHandler(issuer))` works without Express.
 

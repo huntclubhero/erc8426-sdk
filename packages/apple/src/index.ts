@@ -11,7 +11,7 @@ export {
 export type { AppleCertificates, PassJsonOptions, BuildPkpassOptions } from "./pkpass.js";
 export { fetchImage, resolveImage, isPng, isPrivateAddress } from "./images.js";
 export type { ImageFetchOptions } from "./images.js";
-export { MemoryApplePassStore, newPassRecord, rotatedRecord, retiredReasonFor, MAX_RETIRED_TOKENS, MAX_REGISTRATIONS_PER_PASS, MAX_PUSH_TOKENS_PER_PASS, SUPERSEDED_PUSH_WINDOW_MS } from "./store.js";
+export { MemoryApplePassStore, newPassRecord, rotatedRecord, retiredAtFor, retiredReasonFor, MAX_RETIRED_TOKENS, MAX_REGISTRATIONS_PER_PASS, MAX_PUSH_TOKENS_PER_PASS, SUPERSEDED_PUSH_WINDOW_MS } from "./store.js";
 export type {
   ApplePassRecord,
   ApplePassStore,
@@ -19,10 +19,10 @@ export type {
   DeviceRegistration,
   DeviceRegistrationStore,
 } from "./store.js";
-export { applePassKitWebService, defaultAuthenticate, MAX_LOG_BODY_BYTES, MAX_REGISTRATION_BODY_BYTES } from "./webservice.js";
+export { applePassKitWebService, defaultAuthenticate, passEtag, MAX_LOG_BODY_BYTES, MAX_REGISTRATION_BODY_BYTES } from "./webservice.js";
 export type { PassKitWebServiceOptions, BuildPassArgs, PassAuthResult } from "./webservice.js";
-export { createApnsClient } from "./apns.js";
-export type { ApnsClient, ApnsClientOptions, ApnsTokenAuth, ApnsCertificateAuth, PushOutcome } from "./apns.js";
-export { appleFormatProvider, supersededContent } from "./provider.js";
+export { APNS_RETRY_AFTER_SECONDS, DEFAULT_APNS_RETRY, apnsRetryAdvice, createApnsClient } from "./apns.js";
+export type { ApnsClient, ApnsClientOptions, ApnsRetryOptions, ApnsTokenAuth, ApnsCertificateAuth, PushOutcome } from "./apns.js";
+export { SUPERSEDED_EXPIRY_BACKDATE_MS, appleFormatProvider, supersededContent } from "./provider.js";
 export type { AppleFormatProvider, AppleFormatProviderOptions } from "./provider.js";
 export { randomToken } from "./util.js";

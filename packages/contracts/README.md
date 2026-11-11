@@ -1,6 +1,6 @@
 # @erc8426/contracts
 
-Solidity for [ERC-8426](https://github.com/ethereum/ERCs/pull/2036), the Wallet Pass Extension for NFTs: the interface, an OpenZeppelin base contract, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and seven worked use cases with full Foundry tests.
+Solidity for [ERC-8426](https://eips.ethereum.org/EIPS/eip-8426), the Wallet Pass Extension for NFTs (merged as a Draft): the interface, an OpenZeppelin base contract, the optional issuer identity commitment, an ERC-4907 rental extension, an on-chain bound for pass-reachable actions, and seven worked use cases with full Foundry tests.
 
 ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wallet, Google Wallet). On chain it adds only discovery (`passURI`) and a freshness signal (`PassUpdate`, `BatchPassUpdate`); pass generation, signing, delivery and the authorization of pass actions live off chain (see the other packages in this SDK).
 
@@ -9,6 +9,8 @@ ERC-8426 lets an ERC-721 token advertise a native mobile wallet pass (Apple Wall
 | `src/IERC721WalletPass.sol` | The interface, exactly as in the spec. ERC-165 id `0xef5f1e71`. |
 | `src/ERC721WalletPass.sol` | Abstract OZ `ERC721` extension: `passURI`, settable base, `_passUpdate`, `_batchPassUpdate`, pass update on transfer, optional ERC-4906 mirror. |
 | `src/extensions/ERC721WalletPassRentable.sol` | ERC-4907 rentals with a documented entitlement precedence (`passHolderOf`). |
+| `src/IERC721WalletPassIssuer.sol` | The OPTIONAL issuer identity commitment interface, exactly as in the spec. ERC-165 id `0x470be7e9`. |
+| `src/extensions/ERC721WalletPassIssuer.sol` | The base plus the commitment: `passIssuer()` returns the JSON object the manifest's `issuer` member carries, with an internal setter. |
 | `src/utils/BoundedAction.sol` | The on-chain half of the spec's capability configuration: operator actions limited by action id, rate and value, inspectable, revocable per token by its owner. |
 | `src/examples/*.sol` | `PetPass`, `StoredValueCard`, `StakingPass`, `EventTicketPass`, `MembershipPass`, `IdentityCredential`, `RentalPass`. |
 | `src/mocks/*.sol` | `MockERC20` (6 decimal stablecoin stand-in), `MockERC721` (open minting), and `MockSmartAccount` (one-signer ERC-1271 contract account that holds ERC-721s), for tests and local demos only. |
@@ -81,6 +83,24 @@ What you get:
 ### Rentals (ERC-4907)
 
 Inherit `ERC721WalletPassRentable` instead. `setUser` emits `UpdateUser` and `PassUpdate`, a transfer clears the rental, and `passHolderOf(tokenId)` returns the one account entitled to pass actions right now: the active renter if there is one, otherwise the owner. That is the precedence rule the spec asks for ("a rental entitlement SHOULD be exclusive of the owner"). Verifiers must read it fresh on every request. Rental expiry is passive (no event); render it as a relative date on the pass.
+
+### Committing to the platform signer (optional)
+
+ERC-8426 lets a contract say on chain who signs its passes, so a client can check a pass against something the contract asserts and not only the endpoint. Inherit `ERC721WalletPassIssuer` and give it the JSON object your manifests carry as `issuer`:
+
+```solidity
+import {ERC721WalletPassIssuer} from "@erc8426/contracts/src/extensions/ERC721WalletPassIssuer.sol";
+
+contract Card is ERC721WalletPassIssuer, Ownable {
+    constructor(string memory passBaseURI_, string memory passIssuer_)
+        ERC721("Card", "CARD") ERC721WalletPass(passBaseURI_) ERC721WalletPassIssuer(passIssuer_) Ownable(msg.sender) {}
+
+    function setPassIssuer(string calldata json) external onlyOwner { _setPassIssuer(json); }
+}
+// passIssuer_: {"apple":{"teamIdentifier":"A1B2C3D4E5","passTypeIdentifier":"pass.example.card"},"google":{"issuerId":"3388000000012345678"}}
+```
+
+`supportsInterface(0x470be7e9)` is then true, and the standard obliges your Pass Issuer to send `issuer` in every manifest for the contract, equal member for member to what `passIssuer()` returns (`manifestIssuer` in `@erc8426/issuer`). The contract stores the string as given and does not parse it, so check it before you set it (`parsePassIssuerJson` in `@erc8426/core`). An issuer migration is a transaction: change the contract and the manifest together, since a client that sees them differ is asked not to install the pass. The constructor and `_setPassIssuer` refuse an empty string, so a contract that reports the interface always has an identity to return; do not inherit the extension before you know yours.
 
 ### Bounding a pass-reachable action
 

@@ -11,8 +11,8 @@ export interface ControlProof {
 
 export interface ProofHeadersOptions {
   /// Also send the pre-0.3.0 X- names, so an issuer that has not moved to
-  ///  the RFC 6648 names still reads the proof. Default true for this
-  ///  release; a later minor flips the default and then drops the names.
+  ///  the RFC 6648 names still reads the proof. Default true; pass false
+  ///  to send only the RFC 6648 names.
   legacy?: boolean;
 }
 
@@ -83,7 +83,10 @@ export function readProofHeaders(headers: HeaderSource): ReadProofResult {
   } else {
     return { kind: "absent" };
   }
-  if (!/^0x[0-9a-fA-F]+$/.test(signature) || signature.length % 2 !== 0) {
+  // Hex or nothing, as the reference server checks it. The length is the
+  // verifier's call: a contract account's signature can be any length, and a
+  // verifier refuses what it cannot decode as signature_invalid.
+  if (!/^0x[0-9a-fA-F]*$/.test(signature)) {
     return { kind: "malformed", reason: "signature" };
   }
   let message: string;

@@ -1,6 +1,6 @@
 # ERC-8426 SDK
 
-**Put any NFT in Apple Wallet and Google Wallet.** A complete, MIT licensed toolkit for [ERC-8426: Wallet Pass Extension for NFTs](https://github.com/ethereum/ERCs/pull/2036): Solidity contracts, a pass server, Apple and Google delivery, a client for wallets and marketplaces, React components, and a conformance suite that checks any implementation against the spec.
+**Put any NFT in Apple Wallet and Google Wallet.** A complete, MIT licensed toolkit for [ERC-8426: Wallet Pass Extension for NFTs](https://eips.ethereum.org/EIPS/eip-8426): Solidity contracts, a pass server, Apple and Google delivery, a client for wallets and marketplaces, React components, and a conformance suite that checks any implementation against the spec.
 
 A wallet pass is a card that ships on nearly every phone. It shows live state, links into web experiences, and receives push updates, without the holder installing an app. ERC-8426 is the shared seam between a token and that card:
 
@@ -10,7 +10,7 @@ A wallet pass is a card that ships on nearly every phone. It shows live state, l
 
 This SDK implements all three, end to end.
 
-> **Status.** ERC-8426 is a Draft (ethereum/ERCs PR #2036, discussion on [Ethereum Magicians](https://ethereum-magicians.org/t/erc-8426-wallet-pass-extension-for-nfts/29358)). The SDK is `0.x` and tracks the current draft; breaking changes follow the spec until it is final. The example contracts are tested, not audited.
+> **Status.** ERC-8426 was merged into ethereum/ERCs on 2026-10-24 with status Draft: [the text](https://eips.ethereum.org/EIPS/eip-8426), discussion on [Ethereum Magicians](https://ethereum-magicians.org/t/erc-8426-wallet-pass-extension-for-nfts/29358). The SDK is `0.x` and tracks the merged text; breaking changes follow the spec until it is final. The example contracts are tested, not audited.
 
 ## Packages
 
@@ -121,9 +121,10 @@ The partner app pattern is where the programmability opens up: a static pass lin
 
 ## Built with ERC-8426
 
-These are production systems by the author of the standard. They are the reason the spec reads the way it does.
+These were built by the author of the standard. They are the reason the spec reads the way it does.
 
-- **[WALLETCHI](https://www.playwalletchi.com)**: a pixel pet that lives in Apple Wallet and Google Wallet. Mint with an email, care for the pet from the pass, and every tap is an on-chain transaction. Its token contract implements `IERC721WalletPass` and its server runs the gated configuration with capability links for care actions, bounded on chain by a session key scoped to the one function pass links invoke. Live on Robinhood Chain testnet. Its deployment is described in the non-normative [deployment notes](docs/deployment-notes.md) (moved here from the ERC's assets, which now keep only product-neutral platform notes).
+- **[Pocket](https://pocketpad.io)** (Robinhood Chain mainnet, live since 2026-11-07): an ERC-721 collection whose plants live in Apple Wallet and Google Wallet and are watered from the pass. A second implementation of ERC-8426: its contract implements `IERC721WalletPass` and its server is its own code, not this SDK. Checked from outside with `npx @erc8426/conformance` on 2026-11-11, without an owner key: 24 MUST checks pass, 0 fail, 8 skipped.
+- **[WALLETCHI](https://www.playwalletchi.com)** (testnet experiment, concluded 2026-11-06): a pixel pet that lived in Apple Wallet and Google Wallet. Holders minted with an email and cared for the pet from the pass, and every tap was an on-chain transaction. Its token contract implemented `IERC721WalletPass` and its server ran the gated configuration with capability links for care actions, bounded on chain by a session key scoped to the one function pass links invoke. It ran on Robinhood Chain testnet and issued about 1,000 passes before it was closed. How it was built, and what it taught, is in the non-normative [deployment notes](docs/deployment-notes.md) (moved here from the ERC's assets, which now keep only product-neutral platform notes).
 - **[Rare Friends Pass](https://rare-friends-pass.vercel.app)** ([source](https://github.com/Halldon-Inc/rare-friends-pass)): a wallet pass for every activated Rare Friend on Robinhood Chain, showing claimable and pending rewards live. Claim runs from the pass with no signature, because the underlying claim can only pay the Friend's own wallet; withdraw needs the owner's confirmation. The collection predates ERC-8426, so the site acts as a gated resolver for an existing collection.
 - **PUNCHCARD** (July 2026, retired): the stablecoin spending card. Bought with an email and a debit card, it held real digital dollars in the card's own account and spent them at a counter within per-transaction and daily caps enforced on chain, punching the card on every purchase. It ran on Robinhood Chain testnet before WALLETCHI replaced it; its pattern lives on as the `StoredValueCard` example.
 

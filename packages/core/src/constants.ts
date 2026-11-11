@@ -5,6 +5,10 @@
 ///  (`passURI(uint256)`, the only function in the interface).
 export const WALLET_PASS_INTERFACE_ID = "0xef5f1e71" as const;
 
+/// The ERC-165 identifier of `IERC721WalletPassIssuer`, the OPTIONAL issuer
+///  identity commitment (`passIssuer()`, the only function in the interface).
+export const WALLET_PASS_ISSUER_INTERFACE_ID = "0x470be7e9" as const;
+
 /// Prefix of the action URN carried as the second SIWE resource.
 export const ACTION_URN_PREFIX = "urn:wallet-pass:action:" as const;
 
@@ -17,23 +21,25 @@ export const ACQUIRE_ACTION = "acquire" as const;
 export const ROTATE_ACTION = "rotate" as const;
 
 /// Headers a client sends to resolve a gated manifest (Gated acquisition).
-///  Named without the X- prefix per RFC 6648 (ethereum/ERCs PR #2036). The
+///  Named without the X- prefix per RFC 6648, as the standard does. The
 ///  X- names of earlier drafts are still read by issuers, and `proofHeaders`
-///  still sends them beside the new ones for this release, so a 0.3.0 client
-///  resolves a 0.2.x issuer's manifest; a later minor stops sending them.
+///  still sends them beside the new ones, so a client resolves a 0.2.x
+///  issuer's manifest. They remain accepted and sent; no release is set for
+///  dropping them.
 export const PROOF_HEADER = "Wallet-Pass-Proof" as const;
 export const SIGNATURE_HEADER = "Wallet-Pass-Signature" as const;
-/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
-///  alongside the new names until a later minor drops them.
+/// @deprecated The pre-0.3.0 header names. Still accepted on read and sent
+///  alongside the new names.
 export const LEGACY_PROOF_HEADER = "X-Wallet-Pass-Proof" as const;
-/// @deprecated The pre-0.3.0 header names. Still accepted on read; sent
-///  alongside the new names until a later minor drops them.
+/// @deprecated The pre-0.3.0 header names. Still accepted on read and sent
+///  alongside the new names.
 export const LEGACY_SIGNATURE_HEADER = "X-Wallet-Pass-Signature" as const;
 /// Every header name that may carry a proof, in the order an issuer reads
 ///  them (the new name wins when both are present). For CORS allow lists.
 export const PROOF_HEADER_NAMES = [PROOF_HEADER, SIGNATURE_HEADER, LEGACY_PROOF_HEADER, LEGACY_SIGNATURE_HEADER] as const;
 
-/// The manifest's optional `version` member. 1 is the only value defined.
+/// The manifest's `version` member: REQUIRED of a Pass Issuer, read as 1 by a
+///  Client when absent. 1 is the only value defined.
 export const MANIFEST_VERSION = 1 as const;
 
 /// Media type an `apple` acquisition URL MUST be served with.

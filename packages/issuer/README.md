@@ -108,8 +108,8 @@ Refusals carry the `error` codes of the spec's refusal table (Refusal responses)
 | `proof_required` | 401 | No control proof was presented | Fresh challenge |
 | `nonce_invalid` | 401 | Unknown or already spent nonce | Fresh challenge |
 | `challenge_expired` | 401 | Expiration Time has passed | Fresh challenge |
-| `not_yet_valid` | 401 | Not Before is in the future (being added to the table in PR #2036) | Fresh challenge |
-| `signature_invalid` | 401 | The signature is not valid for the claimed account | Fresh challenge |
+| `not_yet_valid` | 401 | Not Before is in the future | Fresh challenge |
+| `signature_invalid` | 401 | The signature is not valid for the claimed account. That includes a hex string no verifier can decode (`0x`, an odd number of digits, a wrong length): only a value that is not `0x`-prefixed hex is a malformed request | Fresh challenge |
 | `not_owner` | 403 | A verified proof from an account that is not entitled (fresh read). Reserved: nothing else answers 403 | No |
 | `unknown_capability` | 404 | The capability URL, download link, token or route does not resolve, for example after rotation | No |
 | `method_not_allowed` | 405 | Wrong method (SDK code) | No |
@@ -118,7 +118,7 @@ Refusals carry the `error` codes of the spec's refusal table (Refusal responses)
 | `action_failed`, `internal_error` | 500 | The action threw, or the issuer did (SDK codes) | Later |
 | `read_failed` | 503 | The fresh entitlement read could not be taken | After `Retry-After` |
 
-Until 0.4.0 the client and `isWalletPassErrorCode` also accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
+The client and `isWalletPassErrorCode` still accept the 0.2.x names `malformed_proof`, `invalid_address`, `invalid_token` (now `invalid_request`) and `link_invalid`, `not_found` (now `unknown_capability`); the issuer no longer emits them.
 
 ## CORS
 
@@ -162,6 +162,22 @@ createIssuer({ ...config, entitlement: anyOf(rental4907(), delegateRegistry()) }
 - `rental4907({ exclusive = true, actions? })`: an active ERC-4907 user is entitled, and by default exclusive of the owner (and everyone else) for covered actions. An expired rental falls back to the owner.
 - `delegateRegistry({ registry?, rights? })`: delegate.xyz v2 delegates of the current owner are entitled in addition to the owner. Because delegation is additive, a delegate's claim does not void the owner's pass: while the holder of record is still entitled, another entitled account shares that pass (same serial, same links, acting on the holder's entitlement). The residual: revoking a delegation does not retire links the delegate already holds; the owner rotates on request to cut them off, then re-adds the pass.
 - `anyOf(...)` precedence: any veto (an exclusive rental) wins, otherwise the first allow, otherwise refused.
+
+## Issuer identity (optional)
+
+The manifest may say who signs the passes, so a client can compare it with the pass it acquires. Set `manifestIssuer` and every manifest carries it as `issuer`:
+
+```ts
+createIssuer({
+  ...config,
+  manifestIssuer: {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  },
+});
+```
+
+Use the identifiers your providers sign with. If the contract implements the issuer identity commitment (`IERC721WalletPassIssuer`, `supportsInterface(0x470be7e9)`), the standard makes this member REQUIRED and equal, member for member, to what `passIssuer()` returns. The issuer does not read the contract: keep the two equal yourself, change them together on a migration, and let `@erc8426/conformance` check it (`manifest.issuer-commitment`). A shape that is not the standard's is refused at startup.
 
 ## Chain events
 

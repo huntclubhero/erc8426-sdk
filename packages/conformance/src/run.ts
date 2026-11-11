@@ -5,19 +5,24 @@ import {
   ACQUIRE_ACTION,
   PKPASS_MEDIA_TYPE,
   WALLET_PASS_INTERFACE_ID,
+  WALLET_PASS_ISSUER_INTERFACE_ID,
   actionUrn,
   assetId,
+  diffPassIssuer,
   erc165Abi,
   erc721Abi,
   normalizeTokenId,
   parseAssetId,
   parseChallenge,
   parseManifest,
+  parsePassIssuerJson,
   proofHeaders,
   readMetadataMirror,
   sameToken,
   tokenRef,
   walletPassAbi,
+  walletPassIssuerAbi,
+  type PassIssuerIdentity,
   type PassManifest,
   type TokenRef,
 } from "@erc8426/core";
@@ -29,6 +34,7 @@ const APPLE_MEDIA_TYPE_TITLE = `The apple URL is served as ${PKPASS_MEDIA_TYPE} 
 
 const S = {
   contract: "Contract interface",
+  issuer: "Issuer identity commitment",
   manifest: "Pass manifest",
   mirror: "Metadata mirror",
   acquisition: "Acquisition URLs",
@@ -109,7 +115,28 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     ok: false,
   };
 
+  // The OPTIONAL issuer identity commitment: what the contract returns from
+  // passIssuer(), when it implements the interface and the answer parses.
+  let commitment: PassIssuerIdentity | null = null;
+  // "none": the contract does not implement it. "unreadable": it claims to
+  // and the answer is not the defined object, so there is nothing to compare.
+  let commitmentState: "none" | "unreadable" | "read" = "none";
+  let commitmentCompared = false;
+  const ISSUER_EQUAL_TITLE = "The manifest's issuer equals the contract's passIssuer(), member for member";
+
   const finish = (): ConformanceReport => {
+    if (!commitmentCompared && report.manifestUrl !== null) {
+      const gated = report.configuration === "gated";
+      const reason =
+        commitmentState === "none"
+          ? "the contract makes no issuer identity commitment"
+          : commitmentState === "unreadable"
+            ? "passIssuer() could not be read as an issuer object"
+            : gated
+              ? "the gated manifest was not resolved (supply the owner key to compare)"
+              : "no manifest was resolved to compare";
+      record(`${gated ? "gated.manifest" : "manifest"}.issuer-commitment`, ISSUER_EQUAL_TITLE, S.issuer, "MUST", "skip", reason);
+    }
     for (const c of checks) {
       if (c.status === "pass") report.summary.pass++;
       else if (c.status === "skip") report.summary.skip++;
@@ -145,6 +172,40 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   record("contract.erc165-invalid", "supportsInterface(0xffffffff) is false (ERC-165)", S.contract, "MUST", invalid === false ? "pass" : "fail", describe(invalid));
   const wp = await supports(WALLET_PASS_INTERFACE_ID);
   record("contract.interface-id", `supportsInterface(${WALLET_PASS_INTERFACE_ID}) is true`, S.contract, "MUST", wp === true ? "pass" : "fail", describe(wp));
+
+  // Issuer identity commitment (OPTIONAL). A contract that implements it MUST
+  // return a JSON object with the shape of the manifest's issuer member.
+  const COMMITMENT_TITLE = `passIssuer() returns the issuer object as JSON (optional interface ${WALLET_PASS_ISSUER_INTERFACE_ID})`;
+  const claims = await supports(WALLET_PASS_ISSUER_INTERFACE_ID);
+  // A revert or empty return is the contract's own answer (no ERC-165, so
+  // nothing optional is claimed). Anything else is a read that failed, and a
+  // failed read is not evidence that the interface is absent.
+  const answeredNo = claims === false || (claims instanceof Error && /revert|returned no data/i.test(claims.message));
+  if (claims instanceof Error && !answeredNo) {
+    commitmentState = "unreadable";
+    record("issuer.commitment", COMMITMENT_TITLE, S.issuer, "MUST", "fail", `supportsInterface(${WALLET_PASS_ISSUER_INTERFACE_ID}) could not be read: ${claims.message.split("\n")[0]}`);
+  } else if (answeredNo) {
+    record("issuer.commitment", COMMITMENT_TITLE, S.issuer, "MUST", "skip", "the contract does not implement the optional interface");
+  } else {
+    commitmentState = "unreadable";
+    try {
+      const text = await readContract(publicClient, { address: contract, abi: walletPassIssuerAbi, functionName: "passIssuer" });
+      const parsed = parsePassIssuerJson(text);
+      if (parsed.ok) {
+        commitment = parsed.issuer;
+        commitmentState = "read";
+        record("issuer.commitment", COMMITMENT_TITLE, S.issuer, "MUST", "pass", `formats: ${Object.keys(parsed.issuer).join(", ") || "(none)"}`);
+      } else {
+        record("issuer.commitment", COMMITMENT_TITLE, S.issuer, "MUST", "fail", parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; "));
+      }
+    } catch (e) {
+      const message = (e as Error).message.split("\n")[0]!;
+      const detail = /revert|returned no data/i.test((e as Error).message)
+        ? `the contract claims the interface, but passIssuer() reverted or returned nothing: ${message}`
+        : `passIssuer() could not be read: ${message}`;
+      record("issuer.commitment", COMMITMENT_TITLE, S.issuer, "MUST", "fail", detail);
+    }
+  }
 
   let passUri: string | null = null;
   try {
@@ -193,27 +254,55 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   };
 
   // Manifest validation shared by the public response and the owner's gated one.
-  // `version` is optional (1 when present) and its absence is tolerated.
+  // `version` is REQUIRED of a Pass Issuer (the integer 1), and a Client reads
+  // its absence as version 1. So a manifest without it still parses and the
+  // checks that need it run; the omission is reported on its own, as a MUST
+  // failure of the issuer, and a present value other than 1 fails the shape check.
   const checkManifest = async (body: unknown, idPrefix: string): Promise<PassManifest | null> => {
     const parsed = parseManifest(body);
     if (!parsed.ok) {
       const detail = parsed.issues.filter((i) => i.level === "error").map((i) => `${i.path || "(root)"}: ${i.message}`).join("; ");
-      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)", S.manifest, "MUST", "fail", detail);
+      record(`${idPrefix}.valid`, "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds, a version that is understood)", S.manifest, "MUST", "fail", detail);
       return null;
     }
     const platforms = Object.keys(parsed.manifest.formats).join(", ");
     record(
       `${idPrefix}.valid`,
-      "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds)",
+      "The manifest has the required shape (formats, https acquisition URLs, updatedAt in seconds, a version that is understood)",
       S.manifest,
       "MUST",
       "pass",
-      `formats: ${platforms}; version: ${parsed.manifest.version ?? "(absent, tolerated)"}`,
+      `formats: ${platforms}`,
+    );
+    // "When a Contract implements this interface, the Pass Issuer MUST include
+    // `issuer` in every manifest it serves for that Contract, equal member for
+    // member to the object the Contract returns."
+    if (commitment !== null) {
+      commitmentCompared = true;
+      const served = parsed.manifest.issuer;
+      const diffs = served === undefined ? null : diffPassIssuer(commitment, served);
+      record(
+        `${idPrefix}.issuer-commitment`,
+        ISSUER_EQUAL_TITLE,
+        S.issuer,
+        "MUST",
+        diffs !== null && diffs.length === 0 ? "pass" : "fail",
+        diffs === null ? "the manifest carries no issuer member" : diffs.length === 0 ? undefined : `differs at: ${diffs.join(", ")}`,
+      );
+    }
+    const hasVersion = parsed.manifest.version !== undefined;
+    record(
+      `${idPrefix}.version`,
+      "The manifest carries version 1 (`version` is REQUIRED; a Client reads its absence as 1, the Pass Issuer still has to send it)",
+      S.manifest,
+      "MUST",
+      hasVersion ? "pass" : "fail",
+      hasVersion ? `version: ${parsed.manifest.version}` : "version is absent; add \"version\": 1",
     );
     const warnings = parsed.issues.filter((i) => i.level === "warning");
     record(
       `${idPrefix}.lint`,
-      "No likely mistakes (updatedAt in seconds, google URL shape, manifest version)",
+      "No likely mistakes (updatedAt in seconds, google URL shape)",
       S.manifest,
       "SHOULD",
       warnings.length === 0 ? "pass" : "fail",
