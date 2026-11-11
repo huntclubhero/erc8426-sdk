@@ -1,6 +1,8 @@
 import { PKPASS_MEDIA_TYPE } from "@erc8426/core";
 
-import type { ApplePassRecord, ApplePassStore } from "./store.js";
+import { createHash } from "node:crypto";
+
+import { retiredAtFor, retiredReasonFor, type ApplePassRecord, type ApplePassStore } from "./store.js";
 import { readJsonCapped, responseBody, safeEqual } from "./util.js";
 
 /// Apple's PassKit Web Service as one Fetch API handler, so it mounts in any
@@ -70,6 +72,31 @@ export function defaultAuthenticate(token: string, record: ApplePassRecord): Pas
   let retired = false;
   for (const t of record.retiredAuthenticationTokens) if (safeEqual(t, token)) retired = true;
   return retired ? "retired" : null;
+}
+
+/// The entity tag of the pass a token is served. It is derived from the same
+///  value that drives `Last-Modified` and the 304 decision, the record's
+///  `updatedAt` (at its full millisecond resolution), so the two validators
+///  cannot disagree about whether the record changed; and from the token, so
+///  a tag is only ever good for the pass that token is entitled to. A retired
+///  token's superseded rendering has a tag of its own (it also covers why and
+///  when the token was retired), which the live pass's tag never equals.
+///  Like `Last-Modified`, the tag follows the record: a change to how passes
+///  are rendered that leaves the record untouched does not change it, so
+///  push such a change with `notifyUpdate`, which touches the record.
+export function passEtag(record: ApplePassRecord, token: string, retired: boolean): string {
+  const parts = retired
+    ? ["superseded", record.serial, token, String(record.updatedAt.getTime()), retiredReasonFor(record, token) ?? "", String(retiredAtFor(record, token) ?? "")]
+    : ["current", record.serial, token, String(record.updatedAt.getTime())];
+  return `"${createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32)}"`;
+}
+
+/// RFC 9110, 13.1.2: `If-None-Match` carries a list of entity tags, compared
+///  weakly (a `W/` prefix is ignored). The `*` form is deliberately not
+///  honoured: it claims "any representation", and a device holding the live
+///  pass under a token since retired would be told 304 and keep it.
+function noneMatchHolds(header: string, etag: string): boolean {
+  return header.split(",").some((candidate) => candidate.trim().replace(/^W\//, "") === etag);
 }
 
 export function applePassKitWebService(opts: PassKitWebServiceOptions): (request: Request) => Promise<Response> {
@@ -176,11 +203,20 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
       const retired = a.result === "retired";
       // HTTP dates have one-second resolution, so compare at that grain.
       const modifiedSec = Math.floor(record.updatedAt.getTime() / 1000);
+      const etag = passEtag(record, a.token, retired);
+      const validators = { ETag: etag, "Last-Modified": record.updatedAt.toUTCString() };
+      // RFC 9110, 13.2.2: when If-None-Match is present it is evaluated and
+      // If-Modified-Since is ignored. The tag is bound to the token, so a
+      // device that still holds the live pass under a token since retired
+      // never matches the superseded rendering it is now owed.
+      const noneMatch = req.headers.get("if-none-match");
       const since = req.headers.get("if-modified-since");
-      if (!retired && since) {
+      if (noneMatch !== null) {
+        if (noneMatchHolds(noneMatch, etag)) return empty(304, validators);
+      } else if (!retired && since) {
         const sinceMs = Date.parse(since);
         if (Number.isFinite(sinceMs) && modifiedSec <= Math.floor(sinceMs / 1000)) {
-          return empty(304, { "Last-Modified": record.updatedAt.toUTCString() });
+          return empty(304, validators);
         }
       }
       const bytes = await opts.buildPass({ serial, record, retired, authenticationToken: a.token });
@@ -188,7 +224,7 @@ export function applePassKitWebService(opts: PassKitWebServiceOptions): (request
         status: 200,
         headers: {
           "Content-Type": PKPASS_MEDIA_TYPE,
-          "Last-Modified": record.updatedAt.toUTCString(),
+          ...validators,
           "Cache-Control": "no-store",
         },
       });

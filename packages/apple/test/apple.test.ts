@@ -26,6 +26,7 @@ import {
   SUPERSEDED_PUSH_WINDOW_MS,
   hexToRgb,
   newPassRecord,
+  passEtag,
   rotatedRecord,
   toPassJson,
   type ApnsClient,
@@ -700,6 +701,73 @@ describe("PassKit web service", () => {
       headers: { "if-modified-since": new Date(record.updatedAt.getTime() - 5000).toUTCString() },
     });
     expect(stale.status).toBe(200);
+  });
+
+  // ERC-8426 asks an issuer to evaluate If-None-Match as well as
+  // If-Modified-Since (RFC 9110, Section 13). The tag comes from the same
+  // value as Last-Modified, the record's updatedAt, and from the token.
+  describe("If-None-Match", () => {
+    const path = `/v1/passes/${PASS_TYPE}/s3r1al`;
+
+    it("answers a matching tag 304 without building, and a tag that does not match 200", async () => {
+      const { call, record, built } = await setup();
+      const res = await call("GET", path, { token: record.authenticationToken });
+      const etag = res.headers.get("etag")!;
+      expect(etag).toMatch(/^"[0-9a-f]{32}"$/);
+      expect(etag).toBe(passEtag(record, record.authenticationToken, false));
+      const cached = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": etag } });
+      expect(cached.status).toBe(304);
+      expect(cached.headers.get("etag")).toBe(etag);
+      expect(cached.headers.get("last-modified")).toBe(record.updatedAt.toUTCString());
+      expect(built).toHaveLength(1);
+      // A list, and a weak tag, compare the same way (RFC 9110, 13.1.2).
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": `"other", W/${etag}` } })).status).toBe(304);
+      for (const stale of ['"0123456789abcdef0123456789abcdef"', "garbage", etag.slice(1, -1), ""]) {
+        expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": stale } })).status, stale).toBe(200);
+      }
+    });
+
+    it("changes with every update, even two inside one second, where If-Modified-Since cannot tell them apart", async () => {
+      const { call, record, store } = await setup();
+      const first = (await call("GET", path, { token: record.authenticationToken })).headers;
+      const bumped = { ...record, updatedAt: new Date(record.updatedAt.getTime() + 1) };
+      await store.putPass(bumped);
+      const res = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": first.get("etag")! } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("etag")).not.toBe(first.get("etag"));
+    });
+
+    it("wins over If-Modified-Since when both are sent", async () => {
+      const { call, record } = await setup();
+      const etag = (await call("GET", path, { token: record.authenticationToken })).headers.get("etag")!;
+      const fresh = record.updatedAt.toUTCString();
+      const old = new Date(record.updatedAt.getTime() - 60_000).toUTCString();
+      // The tag does not match: 200, although the date alone would say not modified.
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": '"nope"', "if-modified-since": fresh } })).status).toBe(200);
+      // The tag matches: 304, although the date alone would say modified.
+      expect((await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": etag, "if-modified-since": old } })).status).toBe(304);
+    });
+
+    it("a superseded pass has its own tag: the live pass's tag never earns a retired token a 304", async () => {
+      const { call, record, store, built } = await setup();
+      const liveTag = (await call("GET", path, { token: record.authenticationToken })).headers.get("etag")!;
+      const next = rotatedRecord(record, OWNER_B);
+      await store.putPass(next);
+      // The old device still holds the live pass and its tag.
+      const res = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": liveTag, "if-modified-since": new Date(Date.now() + 60_000).toUTCString() } });
+      expect(res.status).toBe(200);
+      expect(built.at(-1)).toEqual({ retired: true, token: record.authenticationToken });
+      const supersededTag = res.headers.get("etag")!;
+      expect(supersededTag).not.toBe(liveTag);
+      // Once it holds the superseded rendering, a repeat is not rebuilt.
+      const again = await call("GET", path, { token: record.authenticationToken, headers: { "if-none-match": supersededTag } });
+      expect(again.status).toBe(304);
+      expect(built).toHaveLength(2);
+      // Neither tag is the new holder's.
+      const current = await call("GET", path, { token: next.authenticationToken, headers: { "if-none-match": `${liveTag}, ${supersededTag}` } });
+      expect(current.status).toBe(200);
+      expect(current.headers.get("etag")).not.toBe(supersededTag);
+    });
   });
 
   it("serves a retired token the superseded rendering, lets it unregister, never register", async () => {
