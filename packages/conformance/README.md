@@ -26,6 +26,8 @@ Each check has a stable id, the spec section it enforces, and its level.
 | `contract.erc165` | MUST | Contract interface | `supportsInterface(0x01ffc9a7)` is true |
 | `contract.erc165-invalid` | MUST | Contract interface | `supportsInterface(0xffffffff)` is false |
 | `contract.interface-id` | MUST | Contract interface | `supportsInterface(0xef5f1e71)` is true |
+| `issuer.commitment` | MUST | Issuer identity commitment | only for a contract whose `supportsInterface(0x470be7e9)` is true (the interface is optional; skipped otherwise): `passIssuer()` returns a JSON object with the shape of the manifest's `issuer` member |
+| `manifest.issuer-commitment` | MUST | Issuer identity commitment | when the contract commits: the manifest carries `issuer`, equal member for member to `passIssuer()`. Reported as `gated.manifest.issuer-commitment` on the owner's gated manifest, and skipped when no manifest could be resolved to compare |
 | `contract.passuri` | MUST | Contract interface | `passURI(tokenId)` returns a URI |
 | `contract.passuri-nonexistent` | MUST | Contract interface | `passURI` reverts for a nonexistent token |
 | `manifest.reachable` | MUST | Pass manifest | the endpoint answers 200 (public) or 401 (gated) |

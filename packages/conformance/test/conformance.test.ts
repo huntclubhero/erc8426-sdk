@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getAddress, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { WALLET_PASS_INTERFACE_ID, parseChallenge, readProofHeaders } from "@erc8426/core";
+import { WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID, parseChallenge, readProofHeaders } from "@erc8426/core";
 import { formatReport, parseArgs, runCli, runConformance, type ConformanceReport } from "@erc8426/conformance";
 
 import { RevertError, fakeChain, fakeIssuer, type FakeContract, type IssuerFaults } from "../../client/test/fixtures.js";
@@ -11,7 +11,14 @@ const CONTRACT = getAddress("0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1");
 /// The fake issuer serves no `version` unless told to (a pre-0.3.0 issuer);
 ///  a conformant world carries the REQUIRED `version: 1`, and `versionless`
 ///  leaves it out.
-function world(opts: { mode: "public" | "gated"; faults?: IssuerFaults; contract?: Partial<FakeContract>; mirror?: unknown; versionless?: boolean }) {
+function world(opts: {
+  mode: "public" | "gated";
+  faults?: IssuerFaults;
+  contract?: Partial<FakeContract>;
+  mirror?: unknown;
+  versionless?: boolean;
+  manifestIssuer?: unknown;
+}) {
   const ownerKey = generatePrivateKey();
   const owner = privateKeyToAccount(ownerKey);
   const issuer = fakeIssuer({
@@ -19,6 +26,7 @@ function world(opts: { mode: "public" | "gated"; faults?: IssuerFaults; contract
     mode: opts.mode,
     ownerOf: (id) => (id === "7" ? owner.address : null),
     faults: { ...(opts.versionless ? {} : { manifestVersion: 1 }), ...opts.faults },
+    ...(opts.manifestIssuer !== undefined ? { manifestIssuer: opts.manifestIssuer } : {}),
   });
   const chain = fakeChain({
     contracts: {
@@ -230,6 +238,70 @@ function proofsFor(requests: ReadonlyArray<{ headers: Headers }>, account: Addre
 }
 
 const OWNER_CHECKS = ["gated.owner-200", "gated.no-store", "gated.replay-refused"] as const;
+
+describe("issuer identity commitment (optional)", () => {
+  const identity = {
+    apple: { teamIdentifier: "A1B2C3D4E5", passTypeIdentifier: "pass.example.card" },
+    google: { issuerId: "3388000000012345678" },
+  };
+  const committing = (json: string): Partial<FakeContract> => ({
+    interfaces: [WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID],
+    passIssuer: () => json,
+  });
+
+  it("is skipped for a contract that does not implement it, and a manifest issuer alone is fine", async () => {
+    const r = await world({ mode: "public", manifestIssuer: identity }).run();
+    expect(byId(r, "issuer.commitment")).toMatchObject({ status: "skip" });
+    expect(byId(r, "manifest.issuer-commitment")).toMatchObject({ status: "skip" });
+    expect(byId(r, "manifest.valid").status).toBe("pass");
+    expect(r.ok).toBe(true);
+  });
+
+  it("passes when the manifest's issuer equals what the contract returns", async () => {
+    const pub = await world({ mode: "public", contract: committing(JSON.stringify(identity)), manifestIssuer: identity }).run();
+    expect(byId(pub, "issuer.commitment")).toMatchObject({ level: "MUST", status: "pass" });
+    expect(byId(pub, "manifest.issuer-commitment")).toMatchObject({ level: "MUST", status: "pass" });
+    expect(pub.checks.filter((c) => c.status === "fail")).toEqual([]);
+    const gated = world({ mode: "gated", contract: committing(JSON.stringify(identity)), manifestIssuer: identity });
+    const g = await gated.run({ ownerPrivateKey: gated.ownerKey });
+    expect(byId(g, "gated.manifest.issuer-commitment")).toMatchObject({ level: "MUST", status: "pass" });
+    expect(g.ok).toBe(true);
+  });
+
+  it("fails when the contract commits and the manifest omits issuer or differs", async () => {
+    const omitted = await world({ mode: "public", contract: committing(JSON.stringify(identity)) }).run();
+    expect(byId(omitted, "manifest.issuer-commitment")).toMatchObject({ level: "MUST", status: "fail" });
+    expect(omitted.ok).toBe(false);
+    const differs = await world({
+      mode: "public",
+      contract: committing(JSON.stringify(identity)),
+      manifestIssuer: { ...identity, google: { issuerId: "1111111111111111111" } },
+    }).run();
+    expect(byId(differs, "manifest.issuer-commitment")).toMatchObject({ status: "fail" });
+    expect(byId(differs, "manifest.issuer-commitment").detail).toMatch(/google\.issuerId/);
+    expect(differs.ok).toBe(false);
+  });
+
+  it("fails a commitment that is not the JSON object the standard defines", async () => {
+    for (const json of ["", "A1B2C3D4E5", JSON.stringify({ apple: { teamIdentifier: "A1B2C3D4E5" } })]) {
+      const r = await world({ mode: "public", contract: committing(json), manifestIssuer: identity }).run();
+      expect(byId(r, "issuer.commitment"), json).toMatchObject({ level: "MUST", status: "fail" });
+      expect(byId(r, "manifest.issuer-commitment").status, json).toBe("skip");
+      expect(r.ok).toBe(false);
+    }
+    // Claims the interface, and the read reverts.
+    const reverts = await world({ mode: "public", contract: { interfaces: [WALLET_PASS_INTERFACE_ID, WALLET_PASS_ISSUER_INTERFACE_ID] } }).run();
+    expect(byId(reverts, "issuer.commitment")).toMatchObject({ status: "fail" });
+  });
+
+  it("a gated manifest cannot be compared without the owner key, and says so", async () => {
+    const r = await world({ mode: "gated", contract: committing(JSON.stringify(identity)), manifestIssuer: identity }).run();
+    expect(byId(r, "issuer.commitment").status).toBe("pass");
+    expect(byId(r, "gated.manifest.issuer-commitment")).toMatchObject({ status: "skip" });
+    expect(byId(r, "gated.manifest.issuer-commitment").detail).toMatch(/owner/);
+    expect(r.ok).toBe(true);
+  });
+});
 
 describe("client requirement: a challenge is signed only if it names the verifier, token and action it was asked for", () => {
   it("a challenge naming the serving host is signed (control)", async () => {

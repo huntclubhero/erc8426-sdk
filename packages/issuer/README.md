@@ -177,7 +177,7 @@ createIssuer({
 });
 ```
 
-Use the identifiers your providers sign with. If the contract implements the issuer identity commitment (`IERC721WalletPassIssuer`, `supportsInterface(0x470be7e9)`), the standard makes this member REQUIRED and equal, member for member, to what `passIssuer()` returns. The issuer does not read the contract: keep the two equal yourself, change them together on a migration, and let `@erc8426/conformance` check it (`issuer.manifest-equal`). A shape that is not the standard's is refused at startup.
+Use the identifiers your providers sign with. If the contract implements the issuer identity commitment (`IERC721WalletPassIssuer`, `supportsInterface(0x470be7e9)`), the standard makes this member REQUIRED and equal, member for member, to what `passIssuer()` returns. The issuer does not read the contract: keep the two equal yourself, change them together on a migration, and let `@erc8426/conformance` check it (`manifest.issuer-commitment`). A shape that is not the standard's is refused at startup.
 
 ## Chain events
 
