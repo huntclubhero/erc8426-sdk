@@ -90,6 +90,16 @@ const missed = await passes.getPassUpdates({ fromBlock: lastSeenBlock, toBlock: 
 
 The `wallet_pass` metadata mirror is available through `readMetadataMirror(token)`. It is marked `authoritative: false`: when both exist the manifest behind `passURI` wins, and a gated issuer must not mirror URLs at all.
 
+## Checking who signs the passes
+
+A manifest may carry an `issuer` member naming the platform signer of its passes (`manifest.issuer.apple.teamIdentifier` and `passTypeIdentifier`, `manifest.issuer.google.issuerId`), and a contract may commit to the same object on chain through `passIssuer()`. With `verifyIssuer: true` (per call, or as the client's default) the client reads the commitment and refuses the manifest (`invalid_manifest`, `source: "client"`) unless its `issuer` equals it member for member; a contract that makes no commitment passes, and the result's `issuerCommitment` says which case it was.
+
+```ts
+const { manifest, issuerCommitment } = await passes.getManifest(token, { verifyIssuer: true });
+```
+
+This compares the contract with the manifest. Comparing either with the signer identifiers inside the pass file a device receives is platform-specific and is not done by this package. The check costs four contract reads per manifest, which is why it is off unless asked for.
+
 ## Signed actions
 
 For pass-reachable actions on the signed path (the user signs each action), `signedAction` requests a challenge for the action, checks its scope, signs it, and POSTs `{ message, signature, params, chainId, contract, tokenId, action }`:
@@ -133,15 +143,17 @@ The first manifest request is a plain GET, so it needs no preflight. The gated r
 | `trustedChallengeDomains` | extra SIWE domains to accept, for development only |
 | `allowCrossOriginChallenge` | follow a challenge URL on another origin than the proof's endpoint, for development only |
 | `allowInsecureHttp` | fetch plain http from non-loopback hosts, for server-side development only |
+| `verifyIssuer` | default for the `verifyIssuer` option of `getManifest`, `getAcquisitionUrl` and `addToWallet`; off unless set |
 
 Returns:
 
 | method | |
 | - | - |
 | `supportsWalletPass(contract)` | `Promise<boolean>` |
+| `getIssuerCommitment(contract)` | `Promise<PassIssuerIdentity \| null>`: the identity the contract commits to through `passIssuer()` (ERC-165 id `0x470be7e9`), or `null` when it makes no commitment |
 | `getPassURI(token)` | `Promise<string>` raw `passURI` |
 | `resolvePassURI(uri)` | gateway-rewritten URL (http, https, data pass through) |
-| `getManifest(token, { signer?, signal? })` | `Promise<{ manifest, configuration, passUri, url, issues }>` |
+| `getManifest(token, { signer?, signal?, verifyIssuer? })` | `Promise<{ manifest, configuration, passUri, url, issues, issuerCommitment? }>` |
 | `getAcquisitionUrl(token, platform, { signer? })` | `Promise<string>` |
 | `addToWallet(token, { signer?, platform?, userAgent? })` | `Promise<{ url, platform, configuration, manifest }>` |
 | `readMetadataMirror(token)` | `Promise<{ authoritative: false, tokenUri, result }>` |

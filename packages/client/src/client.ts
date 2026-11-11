@@ -4,18 +4,23 @@ import {
   ACQUIRE_ACTION,
   ROTATE_ACTION,
   WALLET_PASS_INTERFACE_ID,
+  WALLET_PASS_ISSUER_INTERFACE_ID,
+  diffPassIssuer,
   erc165Abi,
   erc721Abi,
   isValidActionName,
   manifestPlatforms,
   parseManifest,
+  parsePassIssuerJson,
   proofHeaders,
   readMetadataMirror as readMirror,
   tokenRef,
   walletPassAbi,
+  walletPassIssuerAbi,
   type ManifestIssue,
   type ManifestParseResult,
   type ParsedChallenge,
+  type PassIssuerIdentity,
   type PassManifest,
   type TokenRef,
 } from "@erc8426/core";
@@ -58,6 +63,11 @@ export interface WalletPassClientOptions extends GatewayOptions {
   /// Fetch plain http from non-loopback hosts. Off by default (https, or
   ///  http on localhost only). Server-side development only.
   allowInsecureHttp?: boolean;
+  /// Default for `verifyIssuer` on `getManifest`, `getAcquisitionUrl` and
+  ///  `addToWallet`: check every manifest against the contract's issuer
+  ///  identity commitment. Off by default (the standard makes the read a
+  ///  MAY, and it costs four contract reads per manifest).
+  verifyIssuer?: boolean;
 }
 
 export type ManifestConfiguration = "public" | "gated";
@@ -73,6 +83,10 @@ export interface ManifestResult {
   url: string;
   /// Warnings from validation (errors throw).
   issues: ManifestIssue[];
+  /// Set only when `verifyIssuer` was on: the identity the contract commits
+  ///  to through `passIssuer()`, which the manifest's `issuer` was found
+  ///  equal to, or null when the contract makes no commitment.
+  issuerCommitment?: PassIssuerIdentity | null;
 }
 
 export interface GetManifestOptions {
@@ -80,6 +94,13 @@ export interface GetManifestOptions {
   ///  gated manifest throws `proof_required`.
   signer?: WalletPassSigner;
   signal?: AbortSignal;
+  /// Read the contract's issuer identity commitment (`passIssuer()`) and
+  ///  refuse the manifest unless its `issuer` member equals it member for
+  ///  member. A contract that makes no commitment passes. Defaults to the
+  ///  client's `verifyIssuer` option. This compares the contract with the
+  ///  manifest; checking the signer identifiers of the pass file itself is
+  ///  platform-specific and is not done here.
+  verifyIssuer?: boolean;
 }
 
 export interface AddToWalletOptions extends GetManifestOptions {
@@ -341,6 +362,61 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     }
   }
 
+  /// The identity a contract commits to on chain (Issuer identity
+  ///  commitment), or null when it does not implement the interface
+  ///  (ERC-165 id 0x470be7e9). A contract that claims the interface and
+  ///  then reverts, or returns something that is not the JSON object the
+  ///  standard defines, throws: that is not the same as making no commitment.
+  async function getIssuerCommitment(contract: Address | string): Promise<PassIssuerIdentity | null> {
+    const address = getAddress(contract);
+    const call = (interfaceId: Hex) =>
+      readContract(publicClient, { address, abi: erc165Abi, functionName: "supportsInterface", args: [interfaceId] });
+    let claims: boolean;
+    try {
+      const [erc165, invalid, commitment] = await Promise.all([call("0x01ffc9a7"), call("0xffffffff"), call(WALLET_PASS_ISSUER_INTERFACE_ID)]);
+      claims = erc165 === true && invalid === false && commitment === true;
+    } catch (e) {
+      const err = errorFromChainRead(e, "supportsInterface");
+      // No ERC-165 at all (a revert, or no data) is a contract that commits
+      // to nothing. An RPC that could not answer is not: it is retried.
+      if (err.code === "network") throw err;
+      return null;
+    }
+    if (!claims) return null;
+    const text = await readToken("passIssuer", () => readContract(publicClient, { address, abi: walletPassIssuerAbi, functionName: "passIssuer" }));
+    const parsed = parsePassIssuerJson(text);
+    if (!parsed.ok) {
+      const detail = parsed.issues.map((i) => `${i.path}: ${i.message}`).join("; ");
+      throw new WalletPassClientError("invalid_manifest", `the contract's passIssuer() is not an issuer object: ${detail}`, { source: "chain" });
+    }
+    return parsed.issuer;
+  }
+
+  /// "When a Contract implements this interface, the Pass Issuer MUST include
+  ///  `issuer` in every manifest it serves for that Contract, equal member for
+  ///  member to the object the Contract returns", and a Client SHOULD NOT
+  ///  install a pass that does not match.
+  async function checkIssuer(token: TokenInput, result: ManifestResult, opts: GetManifestOptions): Promise<ManifestResult> {
+    if (!(opts.verifyIssuer ?? options.verifyIssuer ?? false)) return result;
+    const commitment = await getIssuerCommitment(token.contract);
+    if (commitment === null) return { ...result, issuerCommitment: null };
+    const served = result.manifest.issuer;
+    if (served === undefined) {
+      throw new WalletPassClientError("invalid_manifest", "the contract commits to an issuer identity and the manifest carries no issuer member", {
+        source: "client",
+      });
+    }
+    const diffs = diffPassIssuer(commitment, served);
+    if (diffs.length > 0) {
+      throw new WalletPassClientError(
+        "invalid_manifest",
+        `the manifest's issuer differs from the identity the contract commits to (${diffs.join(", ")}): the endpoint may be serving passes signed by someone the contract does not name`,
+        { source: "client" },
+      );
+    }
+    return { ...result, issuerCommitment: commitment };
+  }
+
   /// Every token read goes through here so a nonexistent or burned token is
   ///  a typed `unknown_capability` and an RPC failure a retryable `network` error,
   ///  never a raw viem error.
@@ -435,7 +511,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       } catch {
         throw new WalletPassClientError("invalid_manifest", "passURI data: URI is not JSON", { source: "server" });
       }
-      return { ...validManifest(body, "data: URI"), configuration: "public", passUri, url };
+      return checkIssuer(token, { ...validManifest(body, "data: URI"), configuration: "public", passUri, url }, opts);
     }
 
     const signalInit = opts.signal ? { signal: opts.signal } : {};
@@ -443,7 +519,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     // preflight; only the gated retry carries the proof headers.
     const first = await request(url, { method: "GET", headers: { accept: "application/json" }, ...signalInit });
     if (first.res.status === 200) {
-      return { ...validManifest(first.body, url), configuration: "public", passUri, url };
+      return checkIssuer(token, { ...validManifest(first.body, url), configuration: "public", passUri, url }, opts);
     }
     if (first.res.status !== 401) throw errorFromResponse(first.res.status, first.res.headers, first.body);
 
@@ -469,7 +545,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
       ...signalInit,
     });
     if (second.res.status !== 200) throw errorFromResponse(second.res.status, second.res.headers, second.body);
-    return { ...validManifest(second.body, url), configuration: "gated", passUri, url };
+    return checkIssuer(token, { ...validManifest(second.body, url), configuration: "gated", passUri, url }, opts);
   }
 
   async function getAcquisitionUrl(
@@ -706,6 +782,7 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     publicClient,
     chainId,
     supportsWalletPass,
+    getIssuerCommitment,
     getPassURI,
     resolvePassURI,
     getManifest,

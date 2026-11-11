@@ -28,9 +28,10 @@ import {
   sameToken,
   tokenRef,
   walletPassAbi,
+  walletPassIssuerAbi,
 } from "@erc8426/core";
 
-const chainAbi = [...erc165Abi, ...erc721Abi, ...walletPassAbi] as const;
+const chainAbi = [...erc165Abi, ...erc721Abi, ...walletPassAbi, ...walletPassIssuerAbi] as const;
 
 export interface FakeContract {
   /// Interface ids the contract claims. `null` models a contract without
@@ -40,6 +41,8 @@ export interface FakeContract {
   passURI?: (tokenId: bigint) => string;
   tokenURI?: (tokenId: bigint) => string;
   ownerOf?: (tokenId: bigint) => Address;
+  /// Answer for passIssuer() (the issuer identity commitment); throw to revert.
+  passIssuer?: () => string;
 }
 
 export interface FakeLog {
@@ -125,6 +128,10 @@ export function fakeChain(opts: { chainId?: number; contracts: Record<string, Fa
           case "passURI": {
             if (!c.passURI) throw new RevertError();
             return encodeFunctionResult({ abi: walletPassAbi, functionName: "passURI", result: c.passURI(decoded.args[0] as bigint) });
+          }
+          case "passIssuer": {
+            if (!c.passIssuer) throw new RevertError();
+            return encodeFunctionResult({ abi: walletPassIssuerAbi, functionName: "passIssuer", result: c.passIssuer() });
           }
           case "tokenURI": {
             if (!c.tokenURI) throw new RevertError();
@@ -222,6 +229,8 @@ export interface FakeIssuerOptions {
   customActionError?: string;
   /// Answer the fresh read as failed (503).
   readFails?: boolean;
+  /// Serve this as the manifest's `issuer` member.
+  manifestIssuer?: unknown;
 }
 
 /// A fetch function implementing an issuer with routes:
@@ -249,6 +258,7 @@ export function fakeIssuer(opts: FakeIssuerOptions) {
           : `https://pay.google.com/gp/v/save/jwt${tokenId}r${rotation}`,
     },
     updatedAt: 1754500000,
+    ...(opts.manifestIssuer !== undefined ? { issuer: opts.manifestIssuer } : {}),
   });
   const manifestHeaders = (): Record<string, string> => ({ "cache-control": "no-store", ...(faults.manifestAsText ? { "content-type": "text/plain" } : {}) });
   // A 0.2.x issuer knows only the X- names.
