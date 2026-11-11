@@ -143,10 +143,11 @@ function isTransient(err: unknown): boolean {
 ///  notification limit. Google documents the limit (three messages that
 ///  trigger a push notification in a 24 hour period) and names the answer a
 ///  "QuotaExceededException response"; it does not document the HTTP status
-///  or the body, so this matches the documented name in the error body and
-///  nothing else. A rate limit that does not carry the name is not this.
+///  or the body, so this matches the documented name, `QuotaExceededException`,
+///  exactly as written, in the error body and nothing else. A rate limit or
+///  another quota error that does not carry that name is not this.
 export function isNotifyQuotaError(err: unknown): boolean {
-  return err instanceof GoogleWalletApiError && /QuotaExceeded/i.test(err.body);
+  return err instanceof GoogleWalletApiError && err.body.includes("QuotaExceededException");
 }
 
 function hashOf(value: unknown): string {
@@ -337,12 +338,13 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
         // whole. Google's own advice is to send it as TEXT: the words still
         // reach the card, without the notification, and the caller is told.
         if (!msg?.notify || !isNotifyQuotaError(err)) return report(err, `setMessages ${object.resource.id}`);
-        report(err, `notify quota exceeded for ${object.resource.id}: message sent as TEXT`);
         try {
           await client.setMessages(type, object.resource.id, [{ ...msg, notify: false }], { expiresAt });
         } catch (again) {
-          report(again, `setMessages ${object.resource.id}`);
+          report(err, `notify quota exceeded for ${object.resource.id}: the TEXT write failed too`);
+          return report(again, `setMessages ${object.resource.id}`);
         }
+        report(err, `notify quota exceeded for ${object.resource.id}: message sent as TEXT`);
       }
     },
 

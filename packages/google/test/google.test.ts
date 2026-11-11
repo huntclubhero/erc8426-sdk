@@ -268,7 +268,7 @@ function fakeGoogle() {
   let failPatches = 0;
   /// When set, a PATCH whose messages ask for a notification is refused with
   ///  this status and a body naming Google's documented exception.
-  let notifyRefusal: { status: number; body: string } | null = null;
+  let notifyRefusal: { status: number; body: string; thenFailNextPatch?: boolean } | null = null;
   const reject401 = new Set<string>();
 
   const fetchFn = (async (input: string | URL, init: RequestInit = {}) => {
@@ -316,6 +316,7 @@ function fakeGoogle() {
         return new Response("boom", { status: 503 });
       }
       if (notifyRefusal && Array.isArray(body.messages) && body.messages.some((m: { messageType?: string }) => m.messageType === "TEXT_AND_NOTIFY")) {
+        if (notifyRefusal.thenFailNextPatch) failPatches = 1;
         return new Response(notifyRefusal.body, { status: notifyRefusal.status });
       }
       const merged = { ...existing, ...body };
@@ -343,8 +344,8 @@ function fakeGoogle() {
     failPatches(n: number) {
       failPatches = n;
     },
-    refuseNotify(status: number, body: string) {
-      notifyRefusal = { status, body };
+    refuseNotify(status: number, body: string, thenFailNextPatch = false) {
+      notifyRefusal = { status, body, thenFailNextPatch };
     },
   };
 }
@@ -475,6 +476,27 @@ describe("googleFormatProvider", () => {
       expect(stored.map((m) => m.messageType)).toEqual(["TEXT"]);
       // And the caller is told the notification did not go out.
       expect(errors.filter((e) => /notify quota/.test(e))).toEqual([`notify quota exceeded for ${id}: message sent as TEXT`]);
+    }
+  });
+
+  it("says the message was sent as TEXT only once that write has landed", async () => {
+    const quota = JSON.stringify({ error: { code: 429, message: "QuotaExceededException" } });
+    const { g, p, errors } = setup({ messageFor: () => ({ header: "Last chance", body: "Your pass lapses in 2h.", notify: true }) });
+    const first = await verifySaveJwt(await p.acquisitionUrl(ctx(OWNER_A)));
+    const id = (first.payload.genericObjects as Array<{ id: string }>)[0]!.id;
+    g.refuseNotify(429, quota, true);
+    const before = g.messages.length;
+    await p.notifyUpdate!(ctx(OWNER_A, content({ headline: "Lapsing" })));
+    expect(g.messages.length).toBe(before);
+    expect(errors.some((e) => /sent as TEXT/.test(e))).toBe(false);
+    expect(errors).toEqual([`notify quota exceeded for ${id}: the TEXT write failed too`, `setMessages ${id}`]);
+  });
+
+  it("matches only the name Google documents, exactly", () => {
+    const err = (body: string) => new GoogleWalletApiError("PATCH", "genericObject/x", 429, body);
+    expect(isNotifyQuotaError(err("QuotaExceededException"))).toBe(true);
+    for (const body of ["quotaexceededexception", "quotaExceeded", "Quota exceeded for quota metric", "rateLimitExceeded"]) {
+      expect(isNotifyQuotaError(err(body)), body).toBe(false);
     }
   });
 
