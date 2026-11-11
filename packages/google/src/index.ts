@@ -28,7 +28,7 @@ export type {
 export { createSaveUrl, saveOrigins, importServiceAccountKey, SAVE_URL_SOFT_LIMIT } from "./save.js";
 export type { SaveUrlOptions, ServiceAccount, ObjectReference } from "./save.js";
 export { assertIssuerId, assertSuffix, resourceId, suffixForSerial } from "./ids.js";
-export { googleFormatProvider, defaultSupersededMessage, MemoryGoogleObjectStore } from "./provider.js";
+export { googleFormatProvider, defaultSupersededMessage, isNotifyQuotaError, MemoryGoogleObjectStore } from "./provider.js";
 export {
   CALLBACK_PROTOCOL_VERSION,
   GOOGLE_PAY_PASSES_SENDER_ID,

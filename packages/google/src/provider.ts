@@ -139,6 +139,16 @@ function isTransient(err: unknown): boolean {
   return true;
 }
 
+/// Whether a failed write is Google's answer to a notifying message past the
+///  notification limit. Google documents the limit (three messages that
+///  trigger a push notification in a 24 hour period) and names the answer a
+///  "QuotaExceededException response"; it does not document the HTTP status
+///  or the body, so this matches the documented name in the error body and
+///  nothing else. A rate limit that does not carry the name is not this.
+export function isNotifyQuotaError(err: unknown): boolean {
+  return err instanceof GoogleWalletApiError && /QuotaExceeded/i.test(err.body);
+}
+
 function hashOf(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -318,10 +328,21 @@ export function googleFormatProvider(opts: GoogleFormatProviderOptions): GoogleF
       // so a reminder disappears once the action it asked for has landed.
       if (ctx.content.voided || !opts.messageFor) return;
       const msg = opts.messageFor(ctx);
+      const type = `${object.vertical}Object` as const;
+      const expiresAt = new Date(Date.now() + messageTtlMs);
       try {
-        await client.setMessages(`${object.vertical}Object`, object.resource.id, msg ? [msg] : [], { expiresAt: new Date(Date.now() + messageTtlMs) });
+        await client.setMessages(type, object.resource.id, msg ? [msg] : [], { expiresAt });
       } catch (err) {
-        report(err, `setMessages ${object.resource.id}`);
+        // Past Google's notification limit the notifying message is refused
+        // whole. Google's own advice is to send it as TEXT: the words still
+        // reach the card, without the notification, and the caller is told.
+        if (!msg?.notify || !isNotifyQuotaError(err)) return report(err, `setMessages ${object.resource.id}`);
+        report(err, `notify quota exceeded for ${object.resource.id}: message sent as TEXT`);
+        try {
+          await client.setMessages(type, object.resource.id, [{ ...msg, notify: false }], { expiresAt });
+        } catch (again) {
+          report(again, `setMessages ${object.resource.id}`);
+        }
       }
     },
 
