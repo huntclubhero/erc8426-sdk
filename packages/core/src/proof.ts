@@ -83,7 +83,10 @@ export function readProofHeaders(headers: HeaderSource): ReadProofResult {
   } else {
     return { kind: "absent" };
   }
-  if (!/^0x[0-9a-fA-F]+$/.test(signature) || signature.length % 2 !== 0) {
+  // Hex or nothing, as the reference server checks it. The length is the
+  // verifier's call: a contract account's signature can be any length, and a
+  // verifier refuses what it cannot decode as signature_invalid.
+  if (!/^0x[0-9a-fA-F]*$/.test(signature)) {
     return { kind: "malformed", reason: "signature" };
   }
   let message: string;

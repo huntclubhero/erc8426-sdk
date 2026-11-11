@@ -314,6 +314,20 @@ describe("proof headers", () => {
     expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "" })).toEqual({ kind: "absent" });
     expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": "zz" })).toEqual({ kind: "malformed", reason: "signature" });
   });
+  it("takes any 0x-prefixed hex string as a signature and leaves its length to the verifier", () => {
+    // As the reference server does (hex or nothing): an ERC-1271 signature can
+    // be any length, so "0x" and an odd number of digits are a signature the
+    // verifier will refuse, not a malformed request.
+    for (const signature of ["0x", "0xabc", "0xdeadbeef"]) {
+      expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": signature }), signature).toEqual({
+        kind: "present",
+        proof: { message: "{}", signature },
+      });
+    }
+    for (const signature of ["nothex", "0xzz", "abcd", "0x 12", "0X12"]) {
+      expect(readProofHeaders({ "wallet-pass-proof": "e30", "wallet-pass-signature": signature }), signature).toEqual({ kind: "malformed", reason: "signature" });
+    }
+  });
   it("names the proof headers per RFC 6648 and, for this release, sends the X- names beside them", () => {
     expect(PROOF_HEADER).toBe("Wallet-Pass-Proof");
     expect(SIGNATURE_HEADER).toBe("Wallet-Pass-Signature");

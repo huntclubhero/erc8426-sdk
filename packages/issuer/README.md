@@ -109,7 +109,7 @@ Refusals carry the `error` codes of the spec's refusal table (Refusal responses)
 | `nonce_invalid` | 401 | Unknown or already spent nonce | Fresh challenge |
 | `challenge_expired` | 401 | Expiration Time has passed | Fresh challenge |
 | `not_yet_valid` | 401 | Not Before is in the future (being added to the table in PR #2036) | Fresh challenge |
-| `signature_invalid` | 401 | The signature is not valid for the claimed account | Fresh challenge |
+| `signature_invalid` | 401 | The signature is not valid for the claimed account. That includes a hex string no verifier can decode (`0x`, an odd number of digits, a wrong length): only a value that is not `0x`-prefixed hex is a malformed request | Fresh challenge |
 | `not_owner` | 403 | A verified proof from an account that is not entitled (fresh read). Reserved: nothing else answers 403 | No |
 | `unknown_capability` | 404 | The capability URL, download link, token or route does not resolve, for example after rotation | No |
 | `method_not_allowed` | 405 | Wrong method (SDK code) | No |

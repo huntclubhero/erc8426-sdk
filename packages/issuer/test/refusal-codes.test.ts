@@ -49,6 +49,23 @@ describe.each(routes)("refusal codes on the %s route", (_name, send) => {
     expect(await errorOf(res)).toBe("invalid_request");
   });
 
+  // The reference server checks only that the signature is hex and leaves its
+  // length to the verifier, which refuses what it cannot decode: an empty or
+  // odd-length hex string is a signature that is not valid for the claimed
+  // account (401), not a malformed request (400).
+  it("a hex signature the verifier cannot decode is signature_invalid, as on the reference server", async () => {
+    for (const signature of ["0x", "0xabc", "0xdeadbeef"]) {
+      const h = buildHarness();
+      const owner = newSigner();
+      h.chain.setOwner(TOKEN_ID, owner.address);
+      const action = _name === "gated manifest" ? "acquire" : _name === "rotate" ? "rotate" : "feed";
+      const p = await signChallenge(h, owner, TOKEN_ID, action);
+      const res = await send(h, { [PROOF_HEADER]: encodeBase64Url(p.message), [SIGNATURE_HEADER]: signature });
+      expect(res.status, signature).toBe(401);
+      expect(await errorOf(res), signature).toBe("signature_invalid");
+    }
+  });
+
   it("an oversize signature is invalid_request, hex or not, and the hex check comes first", async () => {
     const h = buildHarness();
     for (const signature of ["z".repeat(9000), `0x${"ab".repeat(4500)}`]) {
@@ -96,6 +113,18 @@ describe("refusal codes for a proof in the body", () => {
     const res = await h.post(ACTION, { message, signature: "nothex" });
     expect(res.status).toBe(400);
     expect(await errorOf(res)).toBe("invalid_request");
+  });
+
+  it("a body proof with a hex signature the verifier cannot decode is signature_invalid", async () => {
+    for (const signature of ["0x", "0xabc", "0xdeadbeef"]) {
+      const h = buildHarness();
+      const owner = newSigner();
+      h.chain.setOwner(TOKEN_ID, owner.address);
+      const p = await signChallenge(h, owner, TOKEN_ID, "feed");
+      const res = await h.post(ACTION, { message: p.message, signature });
+      expect(res.status, signature).toBe(401);
+      expect(await errorOf(res), signature).toBe("signature_invalid");
+    }
   });
 
   it("a body proof whose message is not a challenge is invalid_message", async () => {
