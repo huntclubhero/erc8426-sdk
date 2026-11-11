@@ -12,6 +12,7 @@ import {
   featuredActionsFor,
   passImages,
   validateSignerCertificate,
+  apnsRetryAdvice,
   createApnsClient,
   fetchImage,
   isPng,
@@ -775,6 +776,20 @@ describe("APNs client", () => {
   const GONE = "d".repeat(64);
   let ecPublicPem: string;
   let ecPrivatePem: string;
+  /// Answers the stand-in gateway gives a token before its default 200, in
+  ///  order: an APNs status and reason, or "stall" for no answer.
+  const script = new Map<string, Array<{ status: number; reason: string } | "stall">>();
+  const sendsTo = (token: string) => seen.filter((s) => s.path.endsWith(token)).length;
+  const client = (extra: Partial<Parameters<typeof createApnsClient>[0]> = {}) =>
+    createApnsClient({
+      keyId: "KEY1234567",
+      teamId: TEAM,
+      privateKeyP8: ecPrivatePem,
+      origin,
+      passTypeIdentifier: PASS_TYPE,
+      retry: { baseDelayMs: 5 },
+      ...extra,
+    } as Parameters<typeof createApnsClient>[0]);
 
   beforeAll(async () => {
     const ec = generateKeyPairSync("ec", {
@@ -799,7 +814,13 @@ describe("APNs client", () => {
           authorization: headers.authorization as string | undefined,
           body,
         });
-        if (path.endsWith(GONE)) {
+        const scripted = script.get(path.slice("/3/device/".length))?.shift();
+        if (scripted === "stall") {
+          // No answer at all: the client's stream timeout is the only way out.
+        } else if (scripted) {
+          stream.respond({ ":status": scripted.status, "content-type": "application/json" });
+          stream.end(JSON.stringify({ reason: scripted.reason }));
+        } else if (path.endsWith(GONE)) {
           stream.respond({ ":status": 410, "content-type": "application/json" });
           stream.end(JSON.stringify({ reason: "Unregistered", timestamp: Date.now() }));
         } else {
@@ -820,7 +841,7 @@ describe("APNs client", () => {
     seen.length = 0;
     const apns = createApnsClient({ keyId: "KEY1234567", teamId: TEAM, privateKeyP8: ecPrivatePem, origin, passTypeIdentifier: PASS_TYPE });
     const out = await apns.send(["c".repeat(64), "c".repeat(64)]);
-    expect(out).toEqual([{ token: "c".repeat(64), ok: true, status: 200 }]);
+    expect(out).toEqual([{ token: "c".repeat(64), ok: true, status: 200, attempts: 1 }]);
     expect(seen).toHaveLength(1);
     const s = seen[0]!;
     expect(s.path).toBe(`/3/device/${"c".repeat(64)}`);
@@ -861,11 +882,108 @@ describe("APNs client", () => {
       origin: "http://127.0.0.1:1",
       passTypeIdentifier: PASS_TYPE,
       connectTimeoutMs: 2000,
+      retry: { baseDelayMs: 5 },
     });
     const out = await apns.send([PUSH_TOKEN]);
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ ok: false });
+    // Every attempt failed to connect; a later push may land.
+    expect(out[0]).toMatchObject({ ok: false, attempts: 3, retryable: true });
     expect(out[0]!.reason).toMatch(/^connect/);
+  });
+
+  // Apple, "Handling notification responses from APNs": "You can retry with a
+  // delay, if you get the error code TooManyRequests."
+  it("resends a push APNs answered 429 TooManyRequests, after a delay, and reports the sends it took", async () => {
+    seen.length = 0;
+    const token = "1a".repeat(32);
+    script.set(token, [
+      { status: 429, reason: "TooManyRequests" },
+      { status: 429, reason: "TooManyRequests" },
+    ]);
+    const apns = client();
+    const out = await apns.send([token, PUSH_TOKEN]);
+    expect(out.find((o) => o.token === token)).toEqual({ token, ok: true, status: 200, attempts: 3 });
+    // The token that landed first is not sent again.
+    expect(out.find((o) => o.token === PUSH_TOKEN)).toEqual({ token: PUSH_TOKEN, ok: true, status: 200, attempts: 1 });
+    expect(sendsTo(token)).toBe(3);
+    expect(sendsTo(PUSH_TOKEN)).toBe(1);
+    apns.close();
+  });
+
+  it("stops at the bound and says a later push may land", async () => {
+    seen.length = 0;
+    const token = "2b".repeat(32);
+    script.set(token, Array.from({ length: 10 }, () => ({ status: 429, reason: "TooManyRequests" })));
+    const apns = client({ retry: { attempts: 2, baseDelayMs: 5 } });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, status: 429, reason: "TooManyRequests", attempts: 2, retryable: true }]);
+    expect(sendsTo(token)).toBe(2);
+    script.delete(token);
+    apns.close();
+  });
+
+  it("resends a push that got no answer", async () => {
+    seen.length = 0;
+    const token = "3c".repeat(32);
+    script.set(token, ["stall"]);
+    const apns = client({ streamTimeoutMs: 150 });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: true, status: 200, attempts: 2 }]);
+    apns.close();
+  });
+
+  // Apple: "After 15 minutes, you can retry JSON payloads that receive
+  // response status codes that begin with 5XX." Too long to wait in a send,
+  // so it is reported for the caller's queue instead.
+  it("does not resend a 5xx at once, and marks it for a later push", async () => {
+    seen.length = 0;
+    const token = "4d".repeat(32);
+    script.set(token, [{ status: 503, reason: "ServiceUnavailable" }]);
+    const apns = client();
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, status: 503, reason: "ServiceUnavailable", attempts: 1, retryable: true }]);
+    expect(sendsTo(token)).toBe(1);
+    apns.close();
+  });
+
+  // Apple: "Don't retry notification responses with the error code
+  // BadDeviceToken, DeviceTokenNotForTopic, Forbidden, ExpiredToken,
+  // Unregistered, or PayloadTooLarge."
+  it("never resends a 400, a 403 or a 410", async () => {
+    seen.length = 0;
+    const bad = "5e".repeat(32);
+    const forbidden = "6f".repeat(32);
+    script.set(bad, [{ status: 400, reason: "BadDeviceToken" }]);
+    script.set(forbidden, [{ status: 403, reason: "Forbidden" }]);
+    const apns = client();
+    const out = await apns.send([bad, forbidden, GONE]);
+    expect(out.find((o) => o.token === bad)).toEqual({ token: bad, ok: false, status: 400, reason: "BadDeviceToken", attempts: 1, retryable: false });
+    expect(out.find((o) => o.token === forbidden)).toMatchObject({ status: 403, attempts: 1, retryable: false });
+    expect(out.find((o) => o.token === GONE)).toMatchObject({ status: 410, attempts: 1, retryable: false });
+    expect(seen).toHaveLength(3);
+    apns.close();
+  });
+
+  it("retry: false sends each push once", async () => {
+    seen.length = 0;
+    const token = "7a".repeat(32);
+    script.set(token, [{ status: 429, reason: "TooManyRequests" }]);
+    const apns = client({ retry: false });
+    const out = await apns.send([token]);
+    expect(out).toEqual([{ token, ok: false, status: 429, reason: "TooManyRequests", attempts: 1, retryable: true }]);
+    expect(sendsTo(token)).toBe(1);
+    script.delete(token);
+    apns.close();
+  });
+
+  it("classifies an outcome by what Apple documents for its status", () => {
+    expect(apnsRetryAdvice({ token: "t", ok: true, status: 200 })).toBe("never");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyRequests" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, reason: "stream timeout" })).toBe("now");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 429, reason: "TooManyProviderTokenUpdates" })).toBe("later");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 500, reason: "InternalServerError" })).toBe("later");
+    expect(apnsRetryAdvice({ token: "t", ok: false, status: 503, reason: "Shutdown" })).toBe("later");
+    for (const status of [400, 403, 404, 405, 410, 413]) expect(apnsRetryAdvice({ token: "t", ok: false, status }), String(status)).toBe("never");
   });
 
   it("authenticates with the pass certificate over mutual TLS", async () => {

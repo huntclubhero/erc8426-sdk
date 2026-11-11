@@ -29,6 +29,48 @@ export interface PushOutcome {
   status?: number;
   /// APNs `reason`, for example "Unregistered", or a transport error.
   reason?: string;
+  /// How many times this push was sent before it settled to this outcome.
+  attempts?: number;
+  /// On a failure: whether pushing again LATER can land. True for a push
+  ///  that got no answer, a 429 and a 5xx; false for an answer a resend
+  ///  cannot change (400, 403, 404, 405, 410, 413). A queue-backed caller
+  ///  re-pushes the serial when any outcome carries `retryable: true`.
+  retryable?: boolean;
+}
+
+/// Bounded resend of a push inside one `send`. Only what Apple documents as
+///  resendable after a short delay is resent here: a 429 `TooManyRequests`
+///  ("You can retry with a delay") and a push that got no HTTP answer at all
+///  (a failed connect, a stream error or timeout). A 5xx is NOT resent here:
+///  Apple asks for 15 minutes before retrying one, which is a job for the
+///  caller's queue, so it settles with `retryable: true`.
+export interface ApnsRetryOptions {
+  /// Total sends per push token, the first included. Default 3.
+  attempts?: number;
+  /// Delay before the second send; it doubles for each one after. Default 500.
+  baseDelayMs?: number;
+  /// Ceiling for one delay. Default 5000.
+  maxDelayMs?: number;
+}
+
+export const DEFAULT_APNS_RETRY = { attempts: 3, baseDelayMs: 500, maxDelayMs: 5_000 } as const;
+
+/// What Apple's documentation ("Handling notification responses from APNs")
+///  says about sending a push again, by its outcome:
+///  - "now": resend after a short delay. A 429 `TooManyRequests`, or no HTTP
+///    answer at all. A pass push is an empty payload that tells the device to
+///    ask the web service, so a duplicate costs the device one list call.
+///  - "later": do not resend at once, but a later push can land. A 5xx
+///    (Apple: retry after 15 minutes) and a 429 `TooManyProviderTokenUpdates`
+///    (the provider token is minted at most every 20 minutes).
+///  - "never": a resend cannot change the answer (400, 403, 404, 405, 410,
+///    413), or the push landed.
+export function apnsRetryAdvice(outcome: PushOutcome): "now" | "later" | "never" {
+  if (outcome.ok) return "never";
+  if (outcome.status === undefined || outcome.status === 0) return "now";
+  if (outcome.status === 429) return outcome.reason === "TooManyProviderTokenUpdates" ? "later" : "now";
+  if (outcome.status >= 500) return "later";
+  return "never";
 }
 
 export interface ApnsTokenAuth {
@@ -56,16 +98,23 @@ export type ApnsClientOptions = (ApnsTokenAuth | ApnsCertificateAuth) & {
   connectTimeoutMs?: number;
   streamTimeoutMs?: number;
   idleCloseMs?: number;
+  /// Resend a push that was throttled or got no answer (see
+  ///  `ApnsRetryOptions`). On by default with `DEFAULT_APNS_RETRY`; `false`
+  ///  sends every push exactly once, as before 0.4.0.
+  retry?: ApnsRetryOptions | false;
   /// Diagnostic hook: session drops, non-200 answers, token refreshes.
   onEvent?(event: { type: string; detail?: string; token?: string; status?: number }): void;
 };
 
 export interface ApnsClient {
   /// Push an empty payload to each token. Never rejects: every token settles
-  ///  to exactly one outcome.
+  ///  to exactly one outcome, after the bounded resends of `retry`. A failed
+  ///  outcome says whether a later push can land (`retryable`).
   send(pushTokens: string[], options?: { topic?: string }): Promise<PushOutcome[]>;
   /// Push to every device registered for this serial, and drop tokens APNs
-  ///  answers 410 Unregistered for.
+  ///  answers 410 Unregistered for. Safe to call again for the same serial:
+  ///  it is how a caller re-pushes after a `retryable` failure, and it
+  ///  reaches superseded registrations for as long as the store returns them.
   pushPassUpdate(serial: string): Promise<PushOutcome[]>;
   /// Close the held session.
   close(): void;
@@ -84,6 +133,8 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
   const streamTimeoutMs = options.streamTimeoutMs ?? 10_000;
   const idleCloseMs = options.idleCloseMs ?? 10 * 60_000;
   const emit = options.onEvent ?? (() => undefined);
+  const retry = options.retry === false ? { attempts: 1, baseDelayMs: 0, maxDelayMs: 0 } : { ...DEFAULT_APNS_RETRY, ...options.retry };
+  const maxAttempts = Math.max(1, Math.floor(retry.attempts));
   const tokenAuth = "privateKeyP8" in options ? options : null;
   const certAuth = "certificate" in options ? options.certificate : null;
 
@@ -272,6 +323,30 @@ export function createApnsClient(options: ApnsClientOptions): ApnsClient {
     if (!topic) throw new Error("APNs topic required: pass the Pass Type ID as passTypeIdentifier or topic");
     const tokens = [...new Set(pushTokens)];
     if (tokens.length === 0) return [];
+    const settled: PushOutcome[] = [];
+    let pending = tokens;
+    for (let attempt = 1; pending.length > 0; attempt++) {
+      if (attempt > 1) {
+        const delay = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempt - 2));
+        await new Promise((r) => setTimeout(r, delay));
+      }
+      const again: string[] = [];
+      for (const outcome of await sendOnce(pending, topic)) {
+        const advice = apnsRetryAdvice(outcome);
+        if (advice === "now" && attempt < maxAttempts) {
+          emit({ type: "push_retry", token: outcome.token, status: outcome.status, detail: outcome.reason });
+          again.push(outcome.token);
+        } else {
+          settled.push({ ...outcome, attempts: attempt, ...(outcome.ok ? {} : { retryable: advice !== "never" }) });
+        }
+      }
+      pending = again;
+    }
+    return settled;
+  }
+
+  /// One pass over the tokens: every token gets at most one stream.
+  async function sendOnce(tokens: string[], topic: string): Promise<PushOutcome[]> {
     activeBatches += 1;
     const held: http2.ClientHttp2Session[] = [];
     try {
