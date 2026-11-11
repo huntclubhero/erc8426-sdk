@@ -22,6 +22,7 @@ import {
   MAX_LOG_BODY_BYTES,
   MAX_REGISTRATIONS_PER_PASS,
   MAX_PUSH_TOKENS_PER_PASS,
+  SUPERSEDED_EXPIRY_BACKDATE_MS,
   SUPERSEDED_PUSH_WINDOW_MS,
   hexToRgb,
   newPassRecord,
@@ -1177,6 +1178,28 @@ describe("appleFormatProvider", () => {
     expect(Date.parse(superseded.expirationDate)).toBeLessThan(Date.now());
     // The same date on every fetch, so a refresh does not look like a change.
     expect((await refreshOld(p, oldToken)).expirationDate).toBe(superseded.expirationDate);
+    // It is the moment of the supersede: later updates for the new holder do not move it.
+    await new Promise((r) => setTimeout(r, 1100));
+    await p.notifyUpdate!(ctx(OWNER_B, content({ primary: [{ key: "bal", label: "BALANCE", value: "14" }] })));
+    expect((await refreshOld(p, oldToken)).expirationDate).toBe(superseded.expirationDate);
+    const retiredAt = (await p.store.getPass("s3r1al"))!.retiredAt![0]!;
+    expect(Date.parse(superseded.expirationDate)).toBe(Math.floor((retiredAt - SUPERSEDED_EXPIRY_BACKDATE_MS) / 1000) * 1000);
+
+    // An expiry the content already carries wins when it is earlier, and loses when it is later.
+    const dated = (expiresAt: Date) =>
+      provider(fakeApns(), { expireSuperseded: true, supersede: (c, reason) => ({ ...supersededContent(c, reason), expiresAt }) }).p;
+    for (const [expiresAt, keeps] of [
+      [new Date("2020-01-01T00:00:00Z"), true],
+      [new Date("2099-01-01T00:00:00Z"), false],
+    ] as Array<[Date, boolean]>) {
+      const q = dated(expiresAt);
+      await q.acquisitionUrl(ctx(OWNER_A));
+      const before = (await q.store.getPass("s3r1al"))!.authenticationToken;
+      await q.acquisitionUrl(ctx(OWNER_B));
+      const got = Date.parse((await refreshOld(q, before)).expirationDate);
+      if (keeps) expect(got).toBe(expiresAt.getTime());
+      else expect(got).toBeLessThan(Date.now());
+    }
     // The new holder's pass is live.
     const next = JSON.parse(unzip(new Uint8Array(await (await p.handle(new Request(newUrl))).arrayBuffer()))["pass.json"]!.toString());
     expect(next.expirationDate).toBeUndefined();
