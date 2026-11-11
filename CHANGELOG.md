@@ -1,8 +1,47 @@
 # Changelog
 
-## Unreleased (core)
+## 0.4.0 (every package to 0.4.0, contracts to 0.3.0)
 
-- `@erc8426/core`: `parseManifest` refuses a manifest whose `version` is present and is not `1` with an error on `version`, instead of accepting it with a warning. ERC-8426 says a Client MUST NOT act on a manifest whose `version` it does not understand, and clients built on the SDK (`getManifest`, `getAcquisitionUrl`, `addToWallet`) used its acquisition URLs. A manifest without `version` is still read as version `1`.
+Catching up with the merged text of ERC-8426 (Draft since 2026-10-24, [eips.ethereum.org/EIPS/eip-8426](https://eips.ethereum.org/EIPS/eip-8426)), and what a mainnet launch taught about delivery. A minor bump because three verdicts change for a consumer (marked **Breaking**); each is something the standard or its reference server requires. `@erc8426/react` has no code change: it is republished so that its range on core and client admits 0.4.0 (in 0.x a `^0.3.0` range does not, and an install would carry two copies of core).
+
+**Breaking**
+
+- `@erc8426/core`: `parseManifest` refuses a manifest whose `version` is present and is not `1` with an error on `version`, instead of accepting it with a warning. ERC-8426 says a Client MUST NOT act on a manifest whose `version` it does not understand, and clients built on the SDK (`getManifest`, `getAcquisitionUrl`, `addToWallet`) used its acquisition URLs. A manifest without `version` is still read as version `1`. Contributed by pucedoteth (#18).
+- `@erc8426/core`: `parseManifest` refuses a manifest whose `issuer` member (new, below) is present and does not have the shape the standard defines. Until now an `issuer` member was an unknown member and was ignored whatever it held.
+- `@erc8426/core`, `@erc8426/issuer`: a signature that is `0x` or an odd number of hex digits is no longer a malformed request. `readProofHeaders` and the issuer's body proof check accept any `0x`-prefixed hex string and leave the length to the verifier, as the reference server does (a contract account's signature can be any length), so those two cases answer 401 `signature_invalid` where they answered 400 `invalid_request`. A value that is not `0x`-prefixed hex is still 400 `invalid_request`. This was the leftover noted when 0.3.3 shipped.
+
+**The issuer identity commitment (new, all optional)**
+
+ERC-8426 defines an OPTIONAL manifest member `issuer` (format keys to objects of string members naming the platform signer: `apple` with `teamIdentifier` and `passTypeIdentifier`, `google` with `issuerId`) and an OPTIONAL contract interface `IERC721WalletPassIssuer` (ERC-165 id `0x470be7e9`) whose `passIssuer()` returns the same object as JSON. A contract that implements it obliges its Pass Issuer to send `issuer` in every manifest, equal member for member. The SDK had neither.
+
+- `@erc8426/core`: `PassManifest.issuer` and the `PassIssuerIdentity` type; `parsePassIssuer`, `parsePassIssuerJson` (the contract's string) and `diffPassIssuer` (member for member comparison, returning the paths that differ); `createManifest(formats, updatedAt, { issuer })`; `WALLET_PASS_ISSUER_INTERFACE_ID` and `walletPassIssuerAbi`. Members of format keys other than `apple` and `google` are kept as given.
+- `@erc8426/contracts` 0.3.0: `src/IERC721WalletPassIssuer.sol` (the interface as in the specification) and `src/extensions/ERC721WalletPassIssuer.sol` (the base plus the commitment: the JSON is stored as given, set through an internal `_setPassIssuer` that emits `PassIssuerUpdated`, and `passIssuer()` reverts while unset). ABIs for both. Nothing existing changes.
+- `@erc8426/issuer`: `manifestIssuer` on `createIssuer` puts `issuer` in every manifest, public and gated, after checking its shape at startup. The issuer does not read the contract; keeping the two equal is the integrator's job, and conformance checks it.
+- `@erc8426/client`: `getIssuerCommitment(contract)` reads the commitment (null when the contract makes none). `verifyIssuer`, per call on `getManifest`, `getAcquisitionUrl` and `addToWallet` or as the client's default, refuses a manifest (`invalid_manifest`) whose `issuer` is missing or differs from the commitment; off by default, since the standard makes the read a MAY. It compares contract and manifest; the signer identifiers inside a pass file are not read.
+- `@erc8426/conformance`: `issuer.commitment` (for a contract that claims `0x470be7e9`: `passIssuer()` returns the defined object) and `manifest.issuer-commitment` / `gated.manifest.issuer-commitment` (the manifest's `issuer` equals it), both MUST and both skipped, with the reason, when they do not apply.
+
+**Manifest version**
+
+- `@erc8426/conformance`: the merged text makes `version` REQUIRED of a Pass Issuer and tells a Client to read its absence as `1`. A manifest without it is reported under a new check, `manifest.version` (and `gated.manifest.version`), at SHOULD level: an advisory for the issuer, not a MUST failure, because the manifest still resolves. A present value other than `1` fails `manifest.valid`. `manifest.lint` no longer covers the version.
+- `@erc8426/core`: comments that called `version` optional now say REQUIRED of an issuer; `createManifest` always emitted `1` and a test now pins it.
+
+**Apple**
+
+- `@erc8426/apple`: the APNs client resends a push that APNs answered 429 `TooManyRequests`, or that got no HTTP answer (a failed connect, a stream error or timeout), after a doubling delay: three sends per token by default (`retry: { attempts, baseDelayMs, maxDelayMs }`, `retry: false` for the old single send). Before, only a token that never got a stream was retried, so one throttled or unanswered push for a transfer or a reset left the old pass looking live until the device next asked. A 5xx is deliberately not resent inside `send`, because Apple asks for 15 minutes before retrying one; 400, 403, 404, 405, 410 and 413 are never resent. Every `PushOutcome` now carries `attempts`, and a failed one `retryable`, so `onPush` can queue `apns.pushPassUpdate(serial)` again. `apnsRetryAdvice` and `DEFAULT_APNS_RETRY` are exported. With the default, a `send` whose pushes keep failing takes longer to settle than before (the delays, plus one stream timeout per attempt).
+- `@erc8426/apple`: `expireSuperseded: true` on `appleFormatProvider` gives a superseded pass an `expirationDate` in the past as well as `voided`. Off by default. Apple's reference defines both keys and does not say where Wallet shows a pass in either state; the option exists because one deployment saw an only-voided pass stay among the current passes on at least one phone and usually move to the expired passes once it also carried a past date. The docs state that as an observation, not as Apple's behaviour.
+- Docs: `docs/deploy.md` has a note on signing cost under a burst (every served pass file is built and signed, the conditional fetch is what bounds it) and on why the web service issues no `ETag`: Apple's documentation asks for `If-Modified-Since` and nowhere mentions `If-None-Match`.
+
+**Google**
+
+- `@erc8426/google`: when a message with `notify: true` is refused and the error body carries the name Google documents for the notification limit (`QuotaExceededException`), `notifyUpdate` sends the same message once more as `TEXT`, so the words still reach the card, and reports `notify quota exceeded for <object id>: message sent as TEXT` through `onError`. Any other failure is reported as before. `isNotifyQuotaError` is exported. Google does not document the status or body of that answer, so the match is on the name only and the path has not been observed against the live API.
+- Docs: "per day" is now Google's own wording, three notifying messages in a 24 hour period. `docs/platforms/google.md` no longer says the SDK does not verify save and delete callbacks (it has since 0.3.0), and notes that Google describes the notification for `addMessage` while the provider writes messages with a PATCH.
+
+**Docs**
+
+- ERC-8426 is linked at eips.ethereum.org instead of the pull request, and `not_yet_valid` is no longer described as a pending addition to the refusal table.
+- WALLETCHI, the reference deployment, was a testnet experiment that closed on 2026-11-06; the README says so.
+- `docs/deployment-notes.md` is no longer about WALLETCHI alone: a section on session grants on a shared account (reproduced: concurrent grant requests can collide, sequential ones did not, a simulation does not catch the loser) and lessons 15 to 27 from a mainnet launch, each marked reproduced, measured or observed.
+- `docs/security.md`: checklist items for "a link is never a login", one session grant at a time per account, and the fresh read under RPC failure.
 
 ## 0.3.3 (issuer)
 
