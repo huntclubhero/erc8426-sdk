@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased (documentation only, no package change)
+
+- `docs/deployment-notes.md`: a section on session grants on a shared account. Two grant requests for one account that are in flight together can be assigned the same validation slot (reproduced on a test network; the provider confirmed the cause from its logs), the first session to act wins, the other fails at send on every try while a simulation passes for it. New lesson 15, serialize session grants per account; lessons 15 to 26 become 16 to 27.
+- `docs/security.md`: checklist item for one session grant at a time per account.
+
 ## 0.4.0 (every package to 0.4.0, contracts to 0.3.0)
 
 Catching up with the merged text of ERC-8426 (Draft since 2026-10-24, [eips.ethereum.org/EIPS/eip-8426](https://eips.ethereum.org/EIPS/eip-8426)), and what a mainnet launch taught about delivery.
