@@ -192,7 +192,10 @@ export function EditionDetail() {
     run(`signed-${action}`, async () => {
       if (!signer) return;
       try {
-        const r = await passes.signedAction({ token, action, signer });
+        if (!state?.proposal) return;
+        // The proposal is named with the vote: the signature covers the
+        // action, and the request says which proposal it is for.
+        const r = await passes.signedAction({ token, action, signer, params: { proposalId: state.proposal.proposalId } });
         const tx = (r.body as { result?: { transactionHash?: string } }).result?.transactionHash;
         log(`Vote ${VOTE_LABEL[action]} (signed path)`, true, `HTTP ${r.status}. The issuer verified your signature and read your balance fresh; the contract counted your units at the snapshot${tx ? `, transaction ${shortHex(tx)}` : ""}. A signed vote is final.`);
       } catch (e) {
@@ -468,7 +471,7 @@ export function EditionDetail() {
                 <div className="button-row">
                   {links.map((l) => (
                     <button key={l.key} type="button" className="btn" onClick={() => void followLink(l.key, l.url)} disabled={busy !== null}>
-                      {l.label} with the pass link
+                      {l.label}, with the pass link
                     </button>
                   ))}
                 </div>

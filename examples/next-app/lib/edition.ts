@@ -4,6 +4,7 @@ import { assetId, walletPassAbi, type PassContent } from "@erc8426/core";
 import {
   ActionError,
   createIssuer,
+  newAttempt,
   kvRateLimiter,
   kvStores,
   watchPassUpdates,
@@ -62,6 +63,7 @@ export const editionAbi = parseAbi([
   "error VoteEditionNoVotingPower(uint256 proposalId, address account)",
   "error VoteEditionAlreadyVoted(uint256 proposalId, address account)",
   "error VoteEditionNotOperator(address caller)",
+  "error VoteEditionUnknownProposal(uint256 proposalId)",
 ]);
 
 export const VOTE_ACTIONS = ["vote-yes", "vote-no"] as const;
@@ -89,6 +91,17 @@ export interface BallotView {
   choice: "none" | "yes" | "no";
   /// False for a vote cast through a pass link.
   signed: boolean;
+}
+
+const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/// The proposal a vote request names: `?p=` on a pass link (the capability
+/// path), `params.proposalId` beside a proof (the signed path). Null when it
+/// names none or names nonsense.
+function namedProposal(path: "signed" | "capability", request: Request, params: unknown): string | null {
+  const raw = path === "capability" ? new URL(request.url).searchParams.get("p") : (params as { proposalId?: unknown } | null)?.proposalId;
+  const text = typeof raw === "number" || typeof raw === "bigint" ? raw.toString() : typeof raw === "string" ? raw : "";
+  return /^[1-9][0-9]{0,30}$/.test(text) ? text : null;
 }
 
 function revertName(e: unknown): string | undefined {
@@ -133,14 +146,16 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
   const id = edition.id.toString();
 
   const contract = { address: edition.contract, abi: editionAbi } as const;
+  const proposalById = async (proposalId: bigint): Promise<ProposalView> => {
+    const [p, votable] = await Promise.all([
+      publicClient.readContract({ ...contract, functionName: "proposal", args: [proposalId] }),
+      publicClient.readContract({ ...contract, functionName: "votable", args: [proposalId] }),
+    ]);
+    return { proposalId: proposalId.toString(), title: p.title, snapshot: Number(p.snapshot), closes: Number(p.closes), yes: p.yes.toString(), no: p.no.toString(), votable };
+  };
   const currentProposal = async (): Promise<ProposalView | null> => {
     const count = await publicClient.readContract({ ...contract, functionName: "proposalCount" });
-    if (count === 0n) return null;
-    const [p, votable] = await Promise.all([
-      publicClient.readContract({ ...contract, functionName: "proposal", args: [count] }),
-      publicClient.readContract({ ...contract, functionName: "votable", args: [count] }),
-    ]);
-    return { proposalId: count.toString(), title: p.title, snapshot: Number(p.snapshot), closes: Number(p.closes), yes: p.yes.toString(), no: p.no.toString(), votable };
+    return count === 0n ? null : proposalById(count);
   };
   const ballot = async (proposalId: string, account: Address): Promise<BallotView> => {
     const [power, b] = await Promise.all([
@@ -210,7 +225,14 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
             "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature: anyone holding this pass can use them, once per proposal. The holder can replace a link vote with a signed vote on the demo site while the proposal is open, and can reset these links at any time.",
         },
       ],
-      links: superseded || !canLinkVote ? [] : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: VOTE_LABEL[a], url: links[a]! })),
+      // Each link names the proposal it was printed for. A link names an
+      // action, and "vote yes" on its own would land on whichever proposal
+      // is newest when it is tapped, which may not be the one this pass
+      // shows.
+      links:
+        superseded || !canLinkVote
+          ? []
+          : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: `${VOTE_LABEL[a]} on proposal ${proposal!.proposalId}`, url: `${links[a]!}?p=${proposal!.proposalId}` })),
       barcode: { format: "qr", message: assetId(token), altText: `Edition #${token.tokenId}` },
     };
     return content;
@@ -263,9 +285,12 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     capability: true,
     bound:
       "At most one vote per account per proposal, enforced on chain. Its weight is the account's balance at the proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast, and the holder can replace it once with a signed vote while the proposal is open. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
-    async execute({ account, path, notifyUpdate }) {
-      const proposal = await currentProposal();
-      if (!proposal) throw new ActionError(409, "no_proposal", "No proposal has been opened yet.");
+    async execute({ account, path, request, params, notifyUpdate }) {
+      // The request says which proposal. It is never "the newest one": a
+      // new proposal can open between a pass being read and a link tapped.
+      const proposalId = namedProposal(path, request, params);
+      if (!proposalId) throw new ActionError(400, "proposal_required", "The request does not say which proposal the vote is for. Open the pass again and use its current link.");
+      const proposal = { proposalId };
       const support = action === "vote-yes";
       let hash: Hex;
       try {
@@ -280,6 +305,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
         });
       } catch (e) {
         const name = revertName(e);
+        if (name === "VoteEditionUnknownProposal") throw new ActionError(404, "unknown_proposal", `There is no proposal ${proposal.proposalId}.`);
         if (name === "VoteEditionNotVotable") throw new ActionError(409, "voting_closed", `Proposal ${proposal.proposalId} is not open for votes.`);
         if (name === "VoteEditionNoVotingPower") {
           throw new ActionError(409, "no_voting_power", `This account held no unit when proposal ${proposal.proposalId} opened, so it has no vote on it. Units that arrive after the snapshot do not carry a vote.`);
@@ -318,7 +344,27 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     },
     providers,
     render,
-    capability: { enabled: true },
+    capability: {
+      enabled: true,
+      // What a phone shows when a vote link on the pass is tapped. It says
+      // which proposal the vote is for, and nothing happens until Confirm.
+      async confirmPage(ctx) {
+        const proposalId = namedProposal("capability", ctx.request, null);
+        const found = proposalId ? await proposalById(BigInt(proposalId)).catch(() => null) : null;
+        const support = ctx.action === "vote-yes" ? "Yes" : "No";
+        const shell = (title: string, body: string) =>
+          new Response(
+            `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${escapeHtml(title)}</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1.25rem}button{font:inherit;padding:.75rem 1.5rem;border-radius:.5rem;border:0;background:#3b2f63;color:#fff}small{color:#666}</style></head><body>${body}</body></html>`,
+            { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+          );
+        if (!found) return shell("This link is out of date", "<h1>This link is out of date</h1><p>It does not name a proposal. Open your pass again and use the link it shows now.</p>");
+        if (!found.votable) return shell("Voting is closed", `<h1>Voting is closed</h1><p>Proposal ${escapeHtml(found.proposalId)}, ${escapeHtml(found.title)}, is no longer open for votes.</p>`);
+        return shell(
+          `Vote ${support}`,
+          `<h1>Vote ${support}?</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><form method="post" action="${escapeHtml(`${ctx.postUrl}?p=${found.proposalId}`)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><input type="hidden" name="attempt" value="${escapeHtml(newAttempt())}"><button type="submit">Confirm: vote ${support}</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,
+        );
+      },
+    },
     actions: Object.fromEntries(VOTE_ACTIONS.map((a) => [a, vote(a)])),
   });
 

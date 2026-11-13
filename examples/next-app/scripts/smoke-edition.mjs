@@ -170,7 +170,12 @@ step(parseChallenge(challenge.message)?.token?.standard === "erc1155" && challen
 const p1 = await openProposal();
 step(Boolean(p1), "a proposal opened", `proposal ${p1}`);
 const a1 = await manifestOf(alice);
-step(typeof a1.yes === "string" && typeof a1.no === "string", "A's pass carries vote links");
+step(typeof a1.yes === "string" && a1.yes.endsWith(`?p=${p1}`) && typeof a1.no === "string", "A's pass carries vote links that name the proposal");
+const bareLink = await post(a1.yes.split("?")[0]);
+step(bareLink.res.status === 400 && bareLink.body?.error === "proposal_required", "a vote link that names no proposal does nothing: 400 proposal_required", `HTTP ${bareLink.res.status} ${bareLink.body?.error ?? ""}`);
+const confirm = await fetch(a1.yes, { headers: { accept: "text/html" } });
+const confirmHtml = await confirm.text();
+step(confirm.status === 200 && confirmHtml.includes(`Proposal ${p1}`) && (await state(alice)).holder.ballot.choice === "none", "opening the link shows which proposal it is for and votes nothing");
 step((await state(alice)).holder.ballot.power === "3", "A has 3 votes on it (its balance at the snapshot)");
 const bNone = await refusal(() => passes.getManifest(token, { signer: bob }));
 step(bNone?.status === 403 && bNone?.code === "not_owner", "B holds none: 403 not_owner", `${bNone?.status} ${bNone?.code}`);
@@ -182,7 +187,7 @@ const a2 = await manifestOf(alice);
 step(a2.yes === a1.yes && a2.no === a1.no, "A sent 1 and still holds: its links are unchanged");
 const b1 = await manifestOf(bob);
 step(Boolean(b1.manifest.formats.preview) && !b1.yes && !b1.no, "B gets its own pass, with no vote links: it held nothing at the snapshot");
-const bVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: bob }));
+const bVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: bob, params: { proposalId: p1 } }));
 step(bVote?.status === 409 && bVote?.serverCode === "no_voting_power", "B's signed vote with the moved unit is refused: no_voting_power", `${bVote?.status} ${bVote?.serverCode ?? bVote?.code}`);
 
 // 6. A votes from the pass link. It weighs 3: what A held at the snapshot,
@@ -197,11 +202,11 @@ const a3 = await manifestOf(alice);
 step(!a3.yes && !a3.no, "after voting, A's pass no longer shows vote links");
 
 // 7. The holder disagrees with what the link did, and signs.
-const signedNo = await refusal(() => passes.signedAction({ token, action: "vote-no", signer: alice }));
+const signedNo = await refusal(() => passes.signedAction({ token, action: "vote-no", signer: alice, params: { proposalId: p1 } }));
 step(signedNo === null, "A replaces the link vote with a signed vote", signedNo ? `${signedNo.status} ${signedNo.serverCode ?? signedNo.code}` : "200");
 p = (await state(alice)).proposal;
 step(p.yes === "0" && p.no === "3", "the tally moved with it", `yes ${p.yes}, no ${p.no}`);
-const again = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice }));
+const again = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice, params: { proposalId: p1 } }));
 step(again?.status === 409 && again?.serverCode === "already_voted", "a signed vote is final: 409 already_voted", `${again?.status} ${again?.serverCode ?? again?.code}`);
 const b = (await state(alice)).holder.ballot;
 step(b.choice === "no" && b.signed === true, "the chain records A's vote as No, signed");
@@ -242,7 +247,7 @@ await sendUnits(bob, alice, 1n);
 const a4 = await manifestOf(alice);
 step(a4.content.serial !== a1.content.serial, "A holds again: a new pass, not the retired one");
 step((await post(a1.yes)).res.status === 404, "A's retired link stays retired");
-const lateVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice }));
+const lateVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice, params: { proposalId: p2 } }));
 step(lateVote?.status === 409 && lateVote?.serverCode === "no_voting_power", "A's returned unit carries no vote on the open proposal", `${lateVote?.status} ${lateVote?.serverCode ?? lateVote?.code}`);
 p = (await state()).proposal;
 step(BigInt(p.yes) + BigInt(p.no) <= 3n, "votes on the proposal never exceed the units that existed at its snapshot", `yes ${p.yes}, no ${p.no}`);

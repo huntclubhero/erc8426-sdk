@@ -510,7 +510,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       }
     }
     const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
-    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
+    // The query string is part of what was asked: an issuer may put a
+    // harmless choice there (which poll, which slot), and a tap that names
+    // another choice is another request.
+    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${new URL(request.url).search}:${await bodyHash(request, text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
