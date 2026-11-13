@@ -32,6 +32,7 @@ const CONTRACTS = [
   ["IERC1155WalletPass.sol", "IERC1155WalletPass"],
   ["ERC1155WalletPass.sol", "ERC1155WalletPass"],
   ["SwapOnRedeemTicket.sol", "SwapOnRedeemTicket"],
+  ["EditionPass.sol", "EditionPass"],
   ["MockERC20.sol", "MockERC20"],
   ["MockERC721.sol", "MockERC721"],
   ["MockSmartAccount.sol", "MockSmartAccount"],
