@@ -77,7 +77,9 @@ const existing = await rpcAnswers();
 if (existing === null) {
   const bin = anvilBinary();
   console.log(`Starting ${bin} on port ${port}...`);
-  anvil = spawn(bin, ["--port", String(port), "--chain-id", "31337", "--silent"], { stdio: ["ignore", "inherit", "inherit"] });
+  // A block every second, so chain time moves without a transaction: the
+  // edition's vote snapshot is a second that has to end before votes count.
+  anvil = spawn(bin, ["--port", String(port), "--chain-id", "31337", "--block-time", "1", "--silent"], { stdio: ["ignore", "inherit", "inherit"] });
   anvil.on("error", (e) => {
     console.error(`Could not start anvil (${e.message}). Install Foundry (https://getfoundry.sh) or set ANVIL_BIN.`);
     process.exit(1);
@@ -129,9 +131,9 @@ const opHash = await wallet.writeContract({
 await publicClient.waitForTransactionReceipt({ hash: opHash });
 
 // The ERC-1155 edition (working draft of the ERC-1155 binding): an open
-// claim of up to 3 units per account, served by a second issuer under
-// /edition-pass.
-const editionArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/EditionPass.json"), "utf8"));
+// claim of up to 3 units per account, one unit one vote, served by a second
+// issuer under /edition-pass. The operator relays votes and opens proposals.
+const editionArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/VoteEditionPass.json"), "utf8"));
 const editionHash = await wallet.deployContract({
   abi: editionArtifact.abi,
   bytecode: editionArtifact.bytecode,
@@ -142,6 +144,8 @@ const edition = editionReceipt.contractAddress;
 if (!edition) throw new Error("the edition deployment produced no contract address");
 const openHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setOpen", args: [1n, true] });
 await publicClient.waitForTransactionReceipt({ hash: openHash });
+const voteOpHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setVoteOperator", args: [operator.address, true] });
+await publicClient.waitForTransactionReceipt({ hash: voteOpHash });
 
 writeEnv({
   EDITION_CONTRACT_ADDRESS: edition,

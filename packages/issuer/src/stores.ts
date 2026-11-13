@@ -51,6 +51,12 @@ export interface PassRecord {
   ///  the holding returns. The acquisition URLs were retired when it went
   ///  dark.
   dark?: boolean;
+  /// ERC-1155 binding only: the newest block the node had when this account
+  ///  was last issued the pass (decimal string), when the chain reader can
+  ///  tell. A transfer log from an earlier block says nothing about this
+  ///  pass: whatever the balance did then, the account was read as holding
+  ///  afterwards and only then got its URLs.
+  issuedAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.

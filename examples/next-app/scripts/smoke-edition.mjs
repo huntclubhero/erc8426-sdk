@@ -112,7 +112,8 @@ const sendUnits = async (from, to, amount) => {
 const manifestOf = async (who) => {
   const r = await passes.getManifest(token, { signer: who });
   const preview = await getJson(r.manifest.formats.preview, { headers: { accept: "application/json" } });
-  return { manifest: r.manifest, content: preview.body, link: preview.body?.links?.find((l) => l.key === "stamp")?.url };
+  const link = (key) => preview.body?.links?.find((l) => l.key === key)?.url;
+  return { manifest: r.manifest, content: preview.body, yes: link("vote-yes"), no: link("vote-no") };
 };
 const refusal = async (fn) => {
   try {
@@ -122,6 +123,26 @@ const refusal = async (fn) => {
     return e;
   }
 };
+const state = async (who) => (await getJson(`${BASE}/api/edition${who ? `?account=${who.address}` : ""}`)).body;
+/// Open a demo proposal, waiting out the gap the demo keeps between them,
+/// then wait until the contract accepts votes on it.
+const openProposal = async () => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await post(`${BASE}/api/edition/proposal`);
+    if (r.res.ok) {
+      const pid = r.body.proposal.proposalId;
+      await until(async () => {
+        const p = (await state()).proposal;
+        return p?.proposalId === pid && p.votable;
+      }, 30_000, 1000);
+      return pid;
+    }
+    if (r.res.status !== 429 || !r.body?.retryAfter) throw new Error(`could not open a proposal: HTTP ${r.res.status} ${JSON.stringify(r.body)}`);
+    console.log(`      (waiting ${r.body.retryAfter}s: the demo keeps a gap between proposals)`);
+    await new Promise((res) => setTimeout(res, (r.body.retryAfter + 2) * 1000));
+  }
+  throw new Error("could not open a proposal");
+};
 console.log(`Edition ${id} at ${contract} on chain ${chain.id}, issuer ${BASE}`);
 console.log(`A ${alice.address}\nB ${bob.address}`);
 
@@ -129,12 +150,13 @@ console.log(`A ${alice.address}\nB ${bob.address}`);
 const supports = (iid) => publicClient.readContract({ address: contract, abi, functionName: "supportsInterface", args: [iid] });
 step((await supports("0xef5f1e71")) && (await supports("0xd9b67a26")) && !(await supports("0x80ac58cd")), "contract is ERC-1155 and answers the ERC-8426 interface id 0xef5f1e71");
 
-// 2. A claims three units; B is emptied into A so the run starts clean.
+// 2. A ends up with exactly 3 units and B with none, so the run starts clean.
 const startB = await balance(bob);
 if (startB > 0n) await write(bob, "safeTransferFrom", [bob.address, alice.address, id, startB, "0x"]);
-const startA = await balance(alice);
+let startA = await balance(alice);
 if (startA < 3n) await write(alice, "claim", [id, 3n - startA]);
-step((await settled(alice, startA < 3n ? 3n : startA + startB)) && (await balance(alice)) >= 3n, "A holds at least 3 units", `${await balance(alice)}`);
+if (startA > 3n) await write(alice, "safeTransferFrom", [alice.address, "0x000000000000000000000000000000000000dEaD", id, startA - 3n, "0x"]);
+step(await settled(alice, 3n), "A holds 3 units, B holds none");
 const passUri = await passes.getPassURI(token);
 step(passUri === `${BASE}/edition-pass/${id}`, "passURI points at the edition issuer", passUri);
 
@@ -144,67 +166,86 @@ step(bare.res.status === 401 && bare.body.error === "proof_required", "manifest 
 const challenge = await passes.requestChallenge(token, "acquire", alice.address);
 step(parseChallenge(challenge.message)?.token?.standard === "erc1155" && challenge.message.toLowerCase().includes(`/erc1155:${contract.toLowerCase()}/${id}`), "the challenge names the token under erc1155");
 
-// 4. A's pass; B, holding none, is refused.
+// 4. A proposal opens: the snapshot is now, with A holding 3 and B none.
+const p1 = await openProposal();
+step(Boolean(p1), "a proposal opened", `proposal ${p1}`);
 const a1 = await manifestOf(alice);
-step(Boolean(a1.manifest.formats.preview) && /unit/.test(JSON.stringify(a1.content.primary)), "A resolves its pass", JSON.stringify(a1.content.primary?.[0]?.value));
-step(typeof a1.link === "string", "A's pass carries a stamp link");
+step(typeof a1.yes === "string" && typeof a1.no === "string", "A's pass carries vote links");
+step((await state(alice)).holder.ballot.power === "3", "A has 3 votes on it (its balance at the snapshot)");
 const bNone = await refusal(() => passes.getManifest(token, { signer: bob }));
 step(bNone?.status === 403 && bNone?.code === "not_owner", "B holds none: 403 not_owner", `${bNone?.status} ${bNone?.code}`);
 
-// 5. Both paths to the action.
-const cap = await post(a1.link);
-step(cap.res.status === 200 || cap.res.status === 429, "capability link stamps (or the daily bound is reached)", `HTTP ${cap.res.status}`);
-const signed = await refusal(() => passes.signedAction({ token, action: "stamp", signer: alice }));
-step(signed === null || signed.status === 429, "signed stamp is accepted (or the daily bound is reached)", signed ? `${signed.status} ${signed.code}` : "200");
-
-// 6. Send some, keep some: nothing changes for A; B gets its own pass.
-const held = await balance(alice);
+// 5. The cheat: move a unit to a second account after the snapshot and vote
+// with it there too.
 await sendUnits(alice, bob, 1n);
 const a2 = await manifestOf(alice);
-step(a2.link === a1.link, "A sent 1 and still holds: its link is unchanged");
-const still = await post(a1.link);
-step(still.res.status === 200 || still.res.status === 429, "A's link still works", `HTTP ${still.res.status}`);
+step(a2.yes === a1.yes && a2.no === a1.no, "A sent 1 and still holds: its links are unchanged");
 const b1 = await manifestOf(bob);
-step(typeof b1.link === "string" && b1.link !== a1.link, "B claims its own pass with its own link");
+step(Boolean(b1.manifest.formats.preview) && !b1.yes && !b1.no, "B gets its own pass, with no vote links: it held nothing at the snapshot");
+const bVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: bob }));
+step(bVote?.status === 409 && bVote?.serverCode === "no_voting_power", "B's signed vote with the moved unit is refused: no_voting_power", `${bVote?.status} ${bVote?.serverCode ?? bVote?.code}`);
 
-// 7. Send the rest: the fresh read refuses at once, then the link is retired.
-await sendUnits(alice, bob, held - 1n);
-const gone = await post(a1.link);
+// 6. A votes from the pass link. It weighs 3: what A held at the snapshot,
+// though A holds 2 now.
+const linkYes = await post(a1.yes);
+step(linkYes.res.status === 200, "A votes yes with the pass link (no signature)", `HTTP ${linkYes.res.status} ${linkYes.body?.error ?? ""}`);
+let p = (await state(alice)).proposal;
+step(p.yes === "3" && p.no === "0", "the vote weighs 3, the snapshot balance", `yes ${p.yes}, no ${p.no}`);
+const linkNo = await post(a1.no);
+step(linkNo.res.status === 409 && linkNo.body?.error === "already_voted", "a link cannot change the vote: 409 already_voted", `HTTP ${linkNo.res.status} ${linkNo.body?.error ?? ""}`);
+const a3 = await manifestOf(alice);
+step(!a3.yes && !a3.no, "after voting, A's pass no longer shows vote links");
+
+// 7. The holder disagrees with what the link did, and signs.
+const signedNo = await refusal(() => passes.signedAction({ token, action: "vote-no", signer: alice }));
+step(signedNo === null, "A replaces the link vote with a signed vote", signedNo ? `${signedNo.status} ${signedNo.serverCode ?? signedNo.code}` : "200");
+p = (await state(alice)).proposal;
+step(p.yes === "0" && p.no === "3", "the tally moved with it", `yes ${p.yes}, no ${p.no}`);
+const again = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice }));
+step(again?.status === 409 && again?.serverCode === "already_voted", "a signed vote is final: 409 already_voted", `${again?.status} ${again?.serverCode ?? again?.code}`);
+const b = (await state(alice)).holder.ballot;
+step(b.choice === "no" && b.signed === true, "the chain records A's vote as No, signed");
+
+// 8. A sends the rest: the fresh read refuses at once, then the links are retired.
+await sendUnits(alice, bob, 2n);
+const gone = await post(a1.yes);
 step(gone.res.status === 403 || gone.res.status === 404, "A holds none: its link is refused", `HTTP ${gone.res.status} ${gone.body?.error ?? ""}`);
 const aNone = await refusal(() => passes.getManifest(token, { signer: alice }));
 step(aNone?.status === 403 && aNone?.code === "not_owner", "A's signature is refused too: 403 not_owner");
 const retired = await until(async () => {
   await post(`${BASE}/api/edition`);
-  return (await post(a1.link)).res.status === 404;
+  return (await post(a1.yes)).res.status === 404;
 }, 100_000, 5000);
-step(retired, "the issuer caught up and retired A's link (404)");
-const bStill = await post(b1.link);
-step(bStill.res.status === 200 || bStill.res.status === 429, "B was not touched by A's loss", `HTTP ${bStill.res.status}`);
+step(retired, "the issuer caught up and retired A's links (404)");
 
-// 8. A holder resets its own links, and only its own.
+// 9. A new proposal: now B holds 3 and A none.
+const p2 = await openProposal();
+step(Boolean(p2) && p2 !== p1, "a second proposal opened", `proposal ${p2}`);
+const b2 = await manifestOf(bob);
+step(typeof b2.yes === "string" && (await state(bob)).holder.ballot.power === "3", "B has 3 votes on the new proposal, and vote links");
+
+// 10. A holder resets its own links, and only its own.
 const aRotate = await refusal(() => passes.rotatePassLinks(token, { signer: alice }));
 step(aRotate?.status === 403, "A, holding none, cannot reset anything", `${aRotate?.status} ${aRotate?.code}`);
 await passes.rotatePassLinks(token, { signer: bob });
-step((await post(b1.link)).res.status === 404, "B reset its links: the old one is 404");
-const b2 = await manifestOf(bob);
-step(typeof b2.link === "string" && b2.link !== b1.link, "B's next claim carries a new link");
+const oldB = await post(b2.yes);
+step(oldB.res.status === 404, "B reset its links: the old one is 404 and did not vote", `HTTP ${oldB.res.status}`);
+const b3 = await manifestOf(bob);
+step(typeof b3.yes === "string" && b3.yes !== b2.yes, "B's next claim carries new links");
+const bLink = await fetch(b3.yes, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+const bTap2 = await fetch(b3.yes, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+p = (await state(bob)).proposal;
+step(bLink.status === 200 && bTap2.status === 200 && bTap2.headers.get("x-wallet-pass-repeat") === "true" && p.yes === "3", "B votes with the new link; a double tap counts once", `HTTP ${bLink.status}/${bTap2.status}, yes ${p.yes}`);
 
-// 9. Coming back is a first claim, never the retired links.
+// 11. Coming back is a first claim, never the retired links.
 await sendUnits(bob, alice, 1n);
-const a3 = await manifestOf(alice);
-step(typeof a3.link === "string" && a3.link !== a1.link, "A holds again: a new pass with a new link");
-step((await post(a1.link)).res.status === 404, "A's retired link stays retired");
-
-// 10. A double tap counts once: an identical repeat gets the first outcome.
-const before = (await getJson(`${BASE}/api/edition?account=${bob.address}`)).body.holder.stamps;
-const tap1 = await fetch(b2.link, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-const tap2 = await fetch(b2.link, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-const after = (await getJson(`${BASE}/api/edition?account=${bob.address}`)).body.holder.stamps;
-step(
-  tap1.status === tap2.status && tap2.headers.get("x-wallet-pass-repeat") === "true" && after - before <= 1,
-  "a double tap on the link stamps once",
-  `HTTP ${tap1.status}, stamps ${before} to ${after}`,
-);
+const a4 = await manifestOf(alice);
+step(a4.content.serial !== a1.content.serial, "A holds again: a new pass, not the retired one");
+step((await post(a1.yes)).res.status === 404, "A's retired link stays retired");
+const lateVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice }));
+step(lateVote?.status === 409 && lateVote?.serverCode === "no_voting_power", "A's returned unit carries no vote on the open proposal", `${lateVote?.status} ${lateVote?.serverCode ?? lateVote?.code}`);
+p = (await state()).proposal;
+step(BigInt(p.yes) + BigInt(p.no) <= 3n, "votes on the proposal never exceed the units that existed at its snapshot", `yes ${p.yes}, no ${p.no}`);
 
 console.log(failures === 0 ? "\nAll edition checks passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1,14 +1,14 @@
 import { getAddress, isAddress } from "viem";
 
-import { editionAbi, getEditionRuntime, STAMPS_PER_DAY } from "@/lib/edition";
+import { editionAbi, getEditionRuntime, PROPOSAL_MIN_GAP_SECONDS } from "@/lib/edition";
 import { json } from "@/lib/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/// Public state of the edition, and of one account's holding when `account`
-/// is given. Everything here is readable by anyone from the chain, except
-/// the stamp count, which is the issuer's own and is not secret.
+/// Public state of the edition and its newest proposal, and of one account's
+/// holding and ballot when `account` is given. All of it is readable by
+/// anyone from the chain; nothing here is gated.
 /// POST runs the catch-up a watcher would do (throttled to once a minute).
 export async function GET(request: Request): Promise<Response> {
   const ed = await getEditionRuntime().catch((e: Error) => e);
@@ -20,23 +20,35 @@ export async function GET(request: Request): Promise<Response> {
   const { publicClient } = ed.rt;
   const base = { address: ed.edition.contract, abi: editionAbi } as const;
   const id = ed.edition.id;
-  const [supply, limit, open] = await Promise.all([
+  const [supply, limit, open, proposal] = await Promise.all([
     publicClient.readContract({ ...base, functionName: "totalSupply", args: [id] }),
     publicClient.readContract({ ...base, functionName: "claimLimit" }),
     publicClient.readContract({ ...base, functionName: "open", args: [id] }),
+    ed.currentProposal(),
   ]);
   let holder = null;
   if (account) {
     const who = getAddress(account);
-    const [balance, claimed, gas, stamps] = await Promise.all([
+    const [balance, claimed, gas, ballot] = await Promise.all([
       publicClient.readContract({ ...base, functionName: "balanceOf", args: [who, id] }),
       publicClient.readContract({ ...base, functionName: "claimed", args: [id, who] }),
       publicClient.getBalance({ address: who }),
-      ed.stamps(who),
+      proposal ? ed.ballot(proposal.proposalId, who) : null,
     ]);
-    holder = { account: who, balance, claimed, hasGas: gas > 0n, stamps };
+    holder = { account: who, balance, claimed, hasGas: gas > 0n, ballot };
   }
-  return json({ contract: ed.edition.contract, id, supply, claimLimit: limit, open, stampsPerDay: STAMPS_PER_DAY, passUri: ed.issuer.passUri(id.toString()), holder });
+  return json({
+    contract: ed.edition.contract,
+    id,
+    supply,
+    claimLimit: limit,
+    open,
+    passUri: ed.issuer.passUri(id.toString()),
+    proposal,
+    proposalMinGapSeconds: PROPOSAL_MIN_GAP_SECONDS,
+    now: Math.floor(Date.now() / 1000),
+    holder,
+  });
 }
 
 export async function POST(): Promise<Response> {

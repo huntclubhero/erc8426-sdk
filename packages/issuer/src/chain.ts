@@ -24,6 +24,10 @@ export interface ChainReader {
   ///  `blockNumber`, when given, takes the read at that block in place of
   ///  the reader's tag (the holdings check for an observed transfer).
   balanceOf?(token: TokenRef, account: Address, blockNumber?: bigint): Promise<bigint>;
+  /// The newest block the node has. Optional. The ERC-1155 binding notes it
+  ///  when a pass is issued, so that a transfer log from an earlier block is
+  ///  not held against a pass that was claimed after it.
+  blockNumber?(): Promise<bigint>;
   /// ERC-4907 rental state. `user` is null when there is no user. Needed only
   ///  by the `rental4907` policy.
   userOf?(token: TokenRef): Promise<{ user: Address | null; expires: bigint }>;
@@ -55,6 +59,7 @@ export type ReadBlockTag = "latest" | "safe" | "finalized";
 ///  any chain's client type is accepted.
 export interface ReadContractClient {
   readContract(parameters: any): Promise<unknown>;
+  getBlockNumber?(parameters?: any): Promise<bigint>;
 }
 
 /// delegate.xyz v2, deployed at the same address on every supported chain.
@@ -160,6 +165,14 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       if (typeof balance !== "bigint") throw new Error(`unexpected read result: ${String(balance)}`);
       return balance;
     },
+
+    ...(typeof client.getBlockNumber === "function"
+      ? {
+          // cacheTime 0: viem otherwise answers from a cached number, and a
+          // stale one would date a pass earlier than it was issued.
+          blockNumber: () => client.getBlockNumber!({ cacheTime: 0 }),
+        }
+      : {}),
 
     async userOf(token) {
       const args = [BigInt(token.tokenId)] as const;

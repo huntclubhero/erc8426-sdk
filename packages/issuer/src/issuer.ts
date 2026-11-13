@@ -656,7 +656,13 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         // between two reads. For a pass that is retired on loss that gap
         // counts, so the block of the transfer that was reported is read
         // as well. A dark pass comes back anyway, so there it is skipped.
-        if (holds && opts.blockNumber !== undefined && config.lostEntitlement === "retire") {
+        // It is skipped as well for a pass issued after that block: the
+        // account was read as holding after whatever the log reports, and
+        // only then got its URLs. Without this, a log delivered late (a
+        // catch-up job, a redelivered webhook) retires the pass an account
+        // claimed after its unit came back.
+        const issuedAfter = opts.blockNumber !== undefined && record.issuedAtBlock !== undefined && BigInt(record.issuedAtBlock) > opts.blockNumber;
+        if (holds && opts.blockNumber !== undefined && config.lostEntitlement === "retire" && !issuedAfter) {
           holds = (
             await checkEntitlement(entitlement, { token: token(id), account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: opts.blockNumber })
           ).entitled;
@@ -746,6 +752,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (mine.lastIssuedTo !== null && !mine.dark) return mine;
         const wasDark = mine.dark === true && mine.lastIssuedTo !== null;
         mine.lastIssuedTo = account;
+        // Date the issuance, so a transfer log from before it is not held
+        // against this pass (see checkHoldings). Best effort: without it the
+        // check falls back to reading the log's block for every pass.
+        const head = await chain?.blockNumber?.().catch(() => undefined);
+        if (head === undefined) delete mine.issuedAtBlock;
+        else mine.issuedAtBlock = head.toString();
         if (wasDark) await revive(mine);
         else {
           delete mine.dark;

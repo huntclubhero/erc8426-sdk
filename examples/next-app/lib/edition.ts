@@ -1,4 +1,4 @@
-import { parseAbi, type Address } from "viem";
+import { BaseError, ContractFunctionRevertedError, parseAbi, type Address, type Hex } from "viem";
 import { after } from "next/server";
 import { assetId, walletPassAbi, type PassContent } from "@erc8426/core";
 import {
@@ -8,6 +8,7 @@ import {
   kvStores,
   watchPassUpdates,
   watchTransfers1155,
+  type ActionDefinition,
   type Issuer,
   type IssuerProvider,
 } from "@erc8426/issuer";
@@ -15,23 +16,31 @@ import { appleFormatProvider, createApnsClient, MemoryApplePassStore, type Apple
 import { googleFormatProvider, googleWalletClient } from "@erc8426/google";
 
 import type { EditionEnv } from "./config";
-import { redisApplePassStore, redisGoogleObjectStore, underLimit, upstashKv } from "./kv";
+import { redisApplePassStore, redisGoogleObjectStore, upstashKv } from "./kv";
 import { shortHex } from "./pet";
 import { solidPng } from "./png";
 import { previewProvider } from "./previewProvider";
 import { getRuntime, type Runtime } from "./server";
 
 /// The ERC-1155 edition: a second issuer in the same app, for the working
-/// draft of the ERC-1155 binding. It shares the chain client, the store and
-/// the wallet credentials with the pet issuer and nothing else: its own
-/// contract, its own path (/edition-pass), its own records.
+/// draft of the ERC-1155 binding. It shares the chain client, the store, the
+/// operator and the wallet credentials with the pet issuer and nothing else:
+/// its own contract, its own path (/edition-pass), its own records.
 ///
 /// What differs from the pet: there is no "the owner". A pass belongs to a
 /// pair, an id and an account, and an account is entitled while a fresh
 /// `balanceOf(account, id)` is at least 1. Sending away one unit of three
 /// changes nothing; sending the last one retires that account's links.
+///
+/// The action is a vote: one unit, one vote. It is the case that shows why a
+/// balance is not a unit. The fresh read admits the request (the account
+/// holds now), but it is the contract that decides what the vote weighs: the
+/// balance at the proposal's snapshot. A unit that moves to another account
+/// after the snapshot cannot vote again, however many accounts it visits.
 
 export const editionAbi = parseAbi([
+  "struct Proposal { uint256 id; uint48 snapshot; uint48 closes; uint256 yes; uint256 no; string title; }",
+  "struct Ballot { uint8 choice; bool signed; uint208 weight; }",
   "function balanceOf(address account, uint256 id) view returns (uint256)",
   "function totalSupply(uint256 id) view returns (uint256)",
   "function claimed(uint256 id, address account) view returns (uint256)",
@@ -40,20 +49,63 @@ export const editionAbi = parseAbi([
   "function passURI(uint256 id) view returns (string)",
   "function claim(uint256 id, uint256 amount)",
   "function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data)",
+  "function proposalCount() view returns (uint256)",
+  "function proposal(uint256 proposalId) view returns (Proposal)",
+  "function ballotOf(uint256 proposalId, address account) view returns (Ballot)",
+  "function votable(uint256 proposalId) view returns (bool)",
+  "function votingPower(uint256 proposalId, address account) view returns (uint256)",
+  "function propose(uint256 id, string title, uint48 duration) returns (uint256)",
+  "function castVoteFor(address account, uint256 proposalId, bool support, bool signed)",
   "event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)",
   "event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)",
+  "error VoteEditionNotVotable(uint256 proposalId)",
+  "error VoteEditionNoVotingPower(uint256 proposalId, address account)",
+  "error VoteEditionAlreadyVoted(uint256 proposalId, address account)",
+  "error VoteEditionNotOperator(address caller)",
 ]);
 
-export const STAMPS_PER_DAY = 5;
+export const VOTE_ACTIONS = ["vote-yes", "vote-no"] as const;
+export type VoteAction = (typeof VOTE_ACTIONS)[number];
+const VOTE_LABEL: Record<VoteAction, string> = { "vote-yes": "Vote yes", "vote-no": "Vote no" };
+
+/// How long a demo proposal stays open, and how soon another may be opened.
+export const PROPOSAL_SECONDS = 15 * 60;
+export const PROPOSAL_MIN_GAP_SECONDS = 3 * 60;
 const EDITION_COLOR = "#3b2f63";
+
+export interface ProposalView {
+  proposalId: string;
+  title: string;
+  snapshot: number;
+  closes: number;
+  yes: string;
+  no: string;
+  votable: boolean;
+}
+
+export interface BallotView {
+  /// Voting power on the proposal: the balance at its snapshot.
+  power: string;
+  choice: "none" | "yes" | "no";
+  /// False for a vote cast through a pass link.
+  signed: boolean;
+}
+
+function revertName(e: unknown): string | undefined {
+  if (!(e instanceof BaseError)) return undefined;
+  const reverted = e.walk((x) => x instanceof ContractFunctionRevertedError);
+  return reverted instanceof ContractFunctionRevertedError ? reverted.data?.errorName : undefined;
+}
 
 export interface EditionRuntime {
   rt: Runtime;
   edition: EditionEnv;
   issuer: Issuer;
   apple: AppleFormatProvider | null;
-  /// Stamps an account has collected (issuer state, not chain state).
-  stamps(account: Address): Promise<number>;
+  /// The newest proposal, or null when none was ever opened.
+  currentProposal(): Promise<ProposalView | null>;
+  /// An account's power and ballot on a proposal.
+  ballot(proposalId: string, account: Address): Promise<BallotView>;
   /// Catch up with the chain: read every issued account's balance, and apply
   ///  transfer and PassUpdate logs since the last call.
   sync(): Promise<{ checked: number; retired: number; transfers: number; updates: number } | null>;
@@ -80,26 +132,45 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
   const prefix = `erc8426-demo:${config.chainId}:${edition.contract.toLowerCase()}:`;
   const id = edition.id.toString();
 
-  // Stamps are the issuer's own record of the account, shown on its pass.
-  // They are a count and nothing else: no token and no value moves.
-  const memoryStamps = new Map<string, number>();
-  const memoryToday = new Map<string, number>();
-  const stampKey = (account: Address) => `${prefix}stamps:${account.toLowerCase()}`;
-  const stamps = async (account: Address) =>
-    redis ? Number((await redis.get<string>(stampKey(account))) ?? 0) : (memoryStamps.get(account.toLowerCase()) ?? 0);
-  const underDailyBound = async (account: Address) => {
-    const day = Math.floor(Date.now() / 86_400_000);
-    if (redis) return underLimit(redis, `${prefix}stamp-day:${day}:${account.toLowerCase()}`, STAMPS_PER_DAY, 86_400);
-    const k = `${day}:${account.toLowerCase()}`;
-    const n = (memoryToday.get(k) ?? 0) + 1;
-    memoryToday.set(k, n);
-    return n <= STAMPS_PER_DAY;
+  const contract = { address: edition.contract, abi: editionAbi } as const;
+  const currentProposal = async (): Promise<ProposalView | null> => {
+    const count = await publicClient.readContract({ ...contract, functionName: "proposalCount" });
+    if (count === 0n) return null;
+    const [p, votable] = await Promise.all([
+      publicClient.readContract({ ...contract, functionName: "proposal", args: [count] }),
+      publicClient.readContract({ ...contract, functionName: "votable", args: [count] }),
+    ]);
+    return { proposalId: count.toString(), title: p.title, snapshot: Number(p.snapshot), closes: Number(p.closes), yes: p.yes.toString(), no: p.no.toString(), votable };
+  };
+  const ballot = async (proposalId: string, account: Address): Promise<BallotView> => {
+    const [power, b] = await Promise.all([
+      publicClient.readContract({ ...contract, functionName: "votingPower", args: [BigInt(proposalId), account] }),
+      publicClient.readContract({ ...contract, functionName: "ballotOf", args: [BigInt(proposalId), account] }),
+    ]);
+    return { power: power.toString(), choice: b.choice === 1 ? "yes" : b.choice === 2 ? "no" : "none", signed: b.signed };
   };
   const balanceOf = (account: Address) =>
     publicClient.readContract({ address: edition.contract, abi: editionAbi, functionName: "balanceOf", args: [account, edition.id] });
 
   const render: Parameters<typeof createIssuer>[0]["render"] = async ({ token, owner, serial, links, superseded, supersededReason, updatedAt }) => {
-    const [held, count] = await Promise.all([balanceOf(owner).catch(() => null), stamps(owner)]);
+    const [held, proposal] = await Promise.all([balanceOf(owner).catch(() => null), currentProposal().catch(() => null)]);
+    const mine = proposal ? await ballot(proposal.proposalId, owner).catch(() => null) : null;
+    const power = mine ? BigInt(mine.power) : 0n;
+    const voteText = !proposal
+      ? "No proposal yet"
+      : !mine
+        ? "Unknown"
+        : mine.choice !== "none"
+          ? `${mine.choice === "yes" ? "Yes" : "No"} (${mine.signed ? "signed, final" : "by pass link"})`
+          : power === 0n
+            ? "No vote on this one"
+            : proposal.votable
+              ? "Not cast yet"
+              : "Not cast";
+    // The links are offered only while they can do something: the proposal
+    // is open, the account has power on it, and it has not voted. A link
+    // cannot change a vote, so after a vote they leave the pass.
+    const canLinkVote = Boolean(proposal?.votable && mine && mine.choice === "none" && power > 0n);
     const content: PassContent = {
       serial,
       style: "generic",
@@ -118,10 +189,16 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
         },
       ],
       secondary: [
-        { key: "stamps", label: "STAMPS", value: String(count), changeMessage: "Stamps: %@" },
-        { key: "holder", label: "HOLDER", value: shortHex(owner) },
+        { key: "proposal", label: proposal ? `PROPOSAL ${proposal.proposalId}` : "PROPOSAL", value: proposal ? proposal.title : "None open", changeMessage: "New proposal: %@" },
+        { key: "vote", label: "YOUR VOTE", value: voteText, changeMessage: "Your vote: %@" },
       ],
+      auxiliary: proposal ? [{ key: "power", label: "VOTES AT SNAPSHOT", value: mine ? mine.power : "?" }] : [],
       back: [
+        ...(proposal
+          ? [
+              { key: "tally", label: `Proposal ${proposal.proposalId} when this pass last updated`, value: `Yes ${proposal.yes}, No ${proposal.no}. Closes ${new Date(proposal.closes * 1000).toISOString()}` },
+            ]
+          : []),
         { key: "contract", label: "Issuing contract (ERC-1155)", value: edition.contract },
         { key: "chain", label: "Chain", value: String(config.chainId) },
         { key: "owner", label: "Issued to", value: owner },
@@ -130,10 +207,10 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           key: "about",
           label: "About this pass",
           value:
-            "This pass belongs to one account's holding of this edition, not to the edition. Every holder has their own. It works while that account holds at least one unit; the issuer reads the balance on chain before every action. Anyone holding this pass can use the link below until the holder resets it.",
+            "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature: anyone holding this pass can use them, once per proposal. The holder can replace a link vote with a signed vote on the demo site while the proposal is open, and can reset these links at any time.",
         },
       ],
-      links: links.stamp ? [{ key: "stamp", label: "Stamp", url: links.stamp }] : [],
+      links: superseded || !canLinkVote ? [] : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: VOTE_LABEL[a], url: links[a]! })),
       barcode: { format: "qr", message: assetId(token), altText: `Edition #${token.tokenId}` },
     };
     return content;
@@ -177,6 +254,53 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     );
   }
 
+  // A vote, relayed by the operator. Reachable from the link on the pass
+  // (capability path) and with a signature (signed path); the contract is
+  // told which, and treats them differently. What makes it safe as a link is
+  // enforced on chain, not here.
+  const vote = (action: VoteAction): ActionDefinition => ({
+    description: `${VOTE_LABEL[action]} on the open proposal`,
+    capability: true,
+    bound:
+      "At most one vote per account per proposal, enforced on chain. Its weight is the account's balance at the proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast, and the holder can replace it once with a signed vote while the proposal is open. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
+    async execute({ account, path, notifyUpdate }) {
+      const proposal = await currentProposal();
+      if (!proposal) throw new ActionError(409, "no_proposal", "No proposal has been opened yet.");
+      const support = action === "vote-yes";
+      let hash: Hex;
+      try {
+        hash = await rt.withOperator(async (nonce) => {
+          const { request } = await publicClient.simulateContract({
+            account: rt.operator.account,
+            ...contract,
+            functionName: "castVoteFor",
+            args: [account, BigInt(proposal.proposalId), support, path === "signed"],
+          });
+          return rt.operator.writeContract({ ...request, nonce });
+        });
+      } catch (e) {
+        const name = revertName(e);
+        if (name === "VoteEditionNotVotable") throw new ActionError(409, "voting_closed", `Proposal ${proposal.proposalId} is not open for votes.`);
+        if (name === "VoteEditionNoVotingPower") {
+          throw new ActionError(409, "no_voting_power", `This account held no unit when proposal ${proposal.proposalId} opened, so it has no vote on it. Units that arrive after the snapshot do not carry a vote.`);
+        }
+        if (name === "VoteEditionAlreadyVoted") {
+          throw new ActionError(
+            409,
+            "already_voted",
+            path === "signed" ? "This account's signed vote is final." : "This account has already voted. A pass link cannot change a vote; the holder can, once, with a signature.",
+          );
+        }
+        console.warn(`[edition vote] ${(e as Error).message.split("\n")[0]}`);
+        throw new ActionError(502, "action_failed", "The vote transaction could not be sent.");
+      }
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new ActionError(502, "action_failed", "The vote transaction reverted.");
+      await notifyUpdate();
+      return { action, proposalId: proposal.proposalId, support, signed: path === "signed", transactionHash: hash };
+    },
+  });
+
   const issuer = createIssuer({
     domain: config.domain,
     baseUrl: config.baseUrl,
@@ -195,29 +319,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     providers,
     render,
     capability: { enabled: true },
-    actions: {
-      // Reachable both ways: from the link on the pass (capability path) and
-      // with a signature (signed path). Safe as a link because it is bounded
-      // and moves nothing.
-      stamp: {
-        description: "Stamp the pass",
-        capability: true,
-        bound: `At most ${STAMPS_PER_DAY} stamps per account per day, counted by the issuer. A stamp is a number on the pass: it moves no tokens and no value, and cannot transfer, approve or change any balance.`,
-        async execute({ account, notifyUpdate }) {
-          if (!(await underDailyBound(account))) {
-            throw new ActionError(429, "bound_reached", `This account has used its ${STAMPS_PER_DAY} stamps for today.`);
-          }
-          let total: number;
-          if (redis) total = await redis.incr(stampKey(account));
-          else {
-            total = (memoryStamps.get(account.toLowerCase()) ?? 0) + 1;
-            memoryStamps.set(account.toLowerCase(), total);
-          }
-          await notifyUpdate();
-          return { action: "stamp", account, stamps: total };
-        },
-      },
-    },
+    actions: Object.fromEntries(VOTE_ACTIONS.map((a) => [a, vote(a)])),
   });
 
   // For this binding a transfer is a hint. The issuer answers it with a fresh
@@ -275,7 +377,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     return { checked: summary.checked, retired: summary.retired.length, transfers, updates };
   };
 
-  return { rt, edition, issuer, apple, stamps, sync };
+  return { rt, edition, issuer, apple, currentProposal, ballot, sync };
 }
 
 /// On serverless hosts (no watchers), catch up after the response is sent.

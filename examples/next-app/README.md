@@ -38,9 +38,22 @@ The **Edition** page tries out a draft binding of ERC-8426 to ERC-1155. It is no
 - A holder can reset its own links and nobody else's.
 - The contract reuses the ERC-8426 interface id (`0xef5f1e71`): `passURI(uint256)` is the same function.
 
-On the page: claim up to 3 units of edition 1 (free, open, testnet only), unlock your pass, stamp it with a signature or with the pass link, send units to another address and try the old link.
+On the page: claim up to 3 units of edition 1 (free, open, testnet only), unlock your pass, vote, send units to another address and try the old links.
 
-It is a second issuer in the same app (`lib/edition.ts`), with `standard: "erc1155"`, under `/edition-pass`, against `EditionPass` from `@erc8426/contracts`. It is off unless `EDITION_CONTRACT_ADDRESS` is set; `pnpm chain` deploys one locally. `node scripts/smoke-edition.mjs` runs the whole flow headlessly against the running app.
+### One unit, one vote
+
+The action on the edition pass is a vote, because it is the case that shows what a balance read cannot do. A fresh `balanceOf` proves an account holds a unit now. It cannot prove the unit has not voted: admit a vote on the fresh read, record it against the account, and one unit votes, moves to a second account, and votes again.
+
+So the issuer's fresh read only admits the request, and the contract (`VoteEditionPass`) decides what the vote weighs: the account's balance at the proposal's snapshot, read from checkpoints it writes on every transfer. A unit that moves after the snapshot carries no vote, and the votes of all accounts never add up to more than the supply at the snapshot.
+
+A vote can be cast two ways, and the contract is told which:
+
+- **With a signature** (the signed path). Final.
+- **With the link on the pass** (the capability path), which is what a tap in Apple Wallet or Google Wallet does. Whoever holds the pass holds the link, so it is the weaker proof. A link can cast an account's vote once and can never change a vote, and the holder can replace a link vote with a signed one, once, while the proposal is open. That is the bound ERC-8426 asks of a capability action, enforced on chain.
+
+"Open a new proposal" is a demo button (in a real deployment proposals come from governance). It exists because a visitor who claims after the last snapshot has no vote on that proposal, which is the lesson and also a dead end without it.
+
+It is a second issuer in the same app (`lib/edition.ts`), with `standard: "erc1155"`, under `/edition-pass`, against `VoteEditionPass` from `@erc8426/contracts`. It is off unless `EDITION_CONTRACT_ADDRESS` is set; `pnpm chain` deploys one locally. `node scripts/smoke-edition.mjs` runs the whole flow headlessly against the running app, including the attempt to vote twice with one unit.
 
 ## Architecture
 

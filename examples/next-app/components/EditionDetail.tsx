@@ -14,12 +14,29 @@ import { NeedWallet, useWallet } from "./wallet";
 
 /// The ERC-1155 edition page: the working draft of the ERC-1155 binding for
 /// ERC-8426, made clickable. Claim a few units, unlock the pass that belongs
-/// to your holding, send units away and watch what the issuer does.
+/// to your holding, vote with it, send units away and watch what the issuer
+/// and the contract do.
 
 const editionAbi = parseAbi([
   "function claim(uint256 id, uint256 amount)",
   "function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data)",
 ]);
+
+interface ProposalView {
+  proposalId: string;
+  title: string;
+  snapshot: number;
+  closes: number;
+  yes: string;
+  no: string;
+  votable: boolean;
+}
+
+interface BallotView {
+  power: string;
+  choice: "none" | "yes" | "no";
+  signed: boolean;
+}
 
 interface EditionState {
   contract: `0x${string}`;
@@ -27,10 +44,15 @@ interface EditionState {
   supply: string;
   claimLimit: string;
   open: boolean;
-  stampsPerDay: number;
   passUri: string;
-  holder: { account: string; balance: string; claimed: string; hasGas: boolean; stamps: number } | null;
+  proposal: ProposalView | null;
+  proposalMinGapSeconds: number;
+  now: number;
+  holder: { account: string; balance: string; claimed: string; hasGas: boolean; ballot: BallotView | null } | null;
 }
+
+type VoteAction = "vote-yes" | "vote-no";
+const VOTE_LABEL: Record<VoteAction, string> = { "vote-yes": "Yes", "vote-no": "No" };
 
 interface Unlocked {
   manifest: PassManifest;
@@ -137,17 +159,17 @@ export function EditionDetail() {
     if (res.ok) setUnlocked({ manifest: unlocked.manifest, content: (await res.json()) as PassContent });
   };
 
-  const signedStamp = () =>
-    run("signed-stamp", async () => {
+  const signedVote = (action: VoteAction) =>
+    run(`signed-${action}`, async () => {
       if (!signer) return;
       try {
-        const r = await passes.signedAction({ token, action: "stamp", signer });
-        const total = (r.body as { result?: { stamps?: number } }).result?.stamps;
-        log("Stamp (signed path)", true, `HTTP ${r.status}. The issuer verified your signature and read your balance fresh.${total ? ` Stamps: ${total}.` : ""}`);
-        await Promise.all([load(), refreshPreview()]);
+        const r = await passes.signedAction({ token, action, signer });
+        const tx = (r.body as { result?: { transactionHash?: string } }).result?.transactionHash;
+        log(`Vote ${VOTE_LABEL[action]} (signed path)`, true, `HTTP ${r.status}. The issuer verified your signature and read your balance fresh; the contract counted your units at the snapshot${tx ? `, transaction ${shortHex(tx)}` : ""}. A signed vote is final.`);
       } catch (e) {
-        log("Stamp (signed path)", false, describe(e));
+        log(`Vote ${VOTE_LABEL[action]} (signed path)`, false, describe(e));
       }
+      await Promise.all([load(), refreshPreview()]);
     });
 
   const followLink = (key: string, url: string, label = "Pass link") =>
@@ -155,12 +177,26 @@ export function EditionDetail() {
       const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: "{}" });
       const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
       if (res.ok) {
-        log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}. No signature: the link stood in for it, and the issuer still read the balance of the account it was issued to.`);
-        await Promise.all([load(), refreshPreview()]);
+        log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}. No signature: the link stood in for it. The contract recorded it as a link vote, which you can replace once with a signed vote while the proposal is open.`);
       } else {
         const why = res.status === 403 ? " The link is still known, but the account it was issued to no longer holds a unit." : res.status === 404 ? " The link has been retired." : "";
         log(`${label}: ${key} (capability path)`, false, `HTTP ${res.status} ${body?.error ?? ""}${body?.message ? `: ${body.message}` : ""}.${why}`);
       }
+      await Promise.all([load(), refreshPreview()]);
+    });
+
+  const openProposal = () =>
+    run("propose", async () => {
+      const res = await fetch("/api/edition/proposal", { method: "POST" });
+      const body = (await res.json().catch(() => null)) as { error?: string; message?: string; proposal?: ProposalView } | null;
+      if (res.ok && body?.proposal) {
+        log("Proposal opened", true, `Proposal ${body.proposal.proposalId}: "${body.proposal.title}". Its snapshot is now: whoever holds units at this moment votes with them. Every holder's pass is told.`);
+      } else {
+        log("Proposal not opened", false, `HTTP ${res.status} ${body?.error ?? ""}${body?.message ? `: ${body.message}` : ""}`);
+      }
+      // The snapshot second has to end before votes are accepted.
+      await new Promise((r) => setTimeout(r, 2000));
+      await Promise.all([load(), refreshPreview()]);
     });
 
   const rotate = () =>
@@ -216,6 +252,8 @@ export function EditionDetail() {
   const balance = BigInt(holder?.balance ?? "0");
   const remaining = BigInt(state.claimLimit) - BigInt(holder?.claimed ?? "0");
   const links = unlocked?.content.links ?? [];
+  const proposal = state.proposal;
+  const ballot = holder?.ballot ?? null;
 
   return (
     <>
@@ -224,7 +262,7 @@ export function EditionDetail() {
           <p className="eyebrow">ERC-1155 binding, working draft</p>
           <h1>Edition {state.id}</h1>
           <p className="muted">
-            One id, many holders. Every holder gets their own pass, and it works while that account holds at least one unit. Not part of ERC-8426 yet: this page exists so the draft can be tried before it is proposed.
+            One id, many holders. Every holder gets their own pass, and it works while that account holds at least one unit. Each unit is one vote. Not part of ERC-8426 yet: this page exists so the draft can be tried before it is proposed.
           </p>
         </div>
         <dl className="issuer-box" aria-label="Issuer">
@@ -332,26 +370,69 @@ export function EditionDetail() {
         </div>
 
         <div className="stack">
-          <section className="card" aria-labelledby="stamp-h">
-            <h2 id="stamp-h" className="h-small">
-              Stamp the pass
+          <section className="card" aria-labelledby="vote-h">
+            <h2 id="vote-h" className="h-small">
+              Vote: one unit, one vote
             </h2>
-            <p className="muted small">
-              A stamp is a number on your pass, kept by the issuer: at most {state.stampsPerDay} a day, and it moves nothing. It can be reached two ways.
-            </p>
+            {proposal ? (
+              <>
+                <p>
+                  <strong>
+                    Proposal {proposal.proposalId}: {proposal.title}
+                  </strong>
+                </p>
+                <p className="muted small">
+                  Yes {proposal.yes}, No {proposal.no}. {proposal.votable ? `Open for about ${minutesLeft(proposal.closes, state.now)}.` : proposal.closes < state.now ? "Closed." : "Opening..."}
+                </p>
+                {address && ballot ? (
+                  <p className="small">
+                    Your votes on this proposal: <strong>{ballot.power}</strong> (what you held when it opened).{" "}
+                    {ballot.choice !== "none" ? (
+                      <>
+                        You voted <strong>{ballot.choice === "yes" ? "Yes" : "No"}</strong>, {ballot.signed ? "signed. That is final." : "by pass link. You can replace it once with a signed vote."}
+                      </>
+                    ) : null}
+                  </p>
+                ) : null}
+                {address && ballot && ballot.power === "0" && balance > 0n ? (
+                  <p className="notice small">
+                    You hold units now, but you held none when this proposal opened, so they carry no vote on it. That is deliberate: otherwise one unit could vote, move to a second wallet and vote again. Open a new proposal and your units count.
+                  </p>
+                ) : null}
+              </>
+            ) : (
+              <p className="muted small">No proposal has been opened yet.</p>
+            )}
+            {signer && proposal?.votable && ballot && ballot.power !== "0" && !(ballot.choice !== "none" && ballot.signed) ? (
+              <div className="button-row">
+                {(["vote-yes", "vote-no"] as const).map((a) => (
+                  <button key={a} type="button" className="btn" onClick={() => void signedVote(a)} disabled={busy !== null} aria-busy={busy === `signed-${a}`}>
+                    Vote {VOTE_LABEL[a]} with a signature
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {links.length > 0 ? (
+              <>
+                <p className="muted small">Or the way a phone does it, with the links printed on your pass. No signature, so anyone holding the pass could tap them: that is why a link can vote only once and cannot change a vote.</p>
+                <div className="button-row">
+                  {links.map((l) => (
+                    <button key={l.key} type="button" className="btn" onClick={() => void followLink(l.key, l.url)} disabled={busy !== null}>
+                      {l.label} with the pass link
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : unlocked ? (
+              <p className="muted small">Your pass carries vote links only while they can do something: a proposal is open, you have votes on it, and you have not voted.</p>
+            ) : (
+              <p className="muted small">Unlock the pass to get its vote links.</p>
+            )}
             <div className="button-row">
-              {signer ? (
-                <button type="button" className="btn" onClick={() => void signedStamp()} disabled={busy !== null} aria-busy={busy === "signed-stamp"}>
-                  Stamp with a signature
-                </button>
-              ) : null}
-              {links.map((l) => (
-                <button key={l.key} type="button" className="btn" onClick={() => void followLink(l.key, l.url)} disabled={busy !== null}>
-                  Stamp with the pass link
-                </button>
-              ))}
+              <button type="button" className="btn btn-quiet" onClick={() => void openProposal()} disabled={busy !== null} aria-busy={busy === "propose"}>
+                Open a new proposal (demo)
+              </button>
             </div>
-            {links.length === 0 ? <p className="muted small">Unlock the pass to get its link.</p> : null}
             {previousLinks && Object.keys(previousLinks).length > 0 ? (
               <div className="old-links">
                 <p className="small">Links from before the last reset, or from before you sent your last unit:</p>
@@ -412,6 +493,11 @@ export function EditionDetail() {
       </div>
     </>
   );
+}
+
+function minutesLeft(closes: number, now: number): string {
+  const s = Math.max(0, closes - now);
+  return s >= 120 ? `${Math.round(s / 60)} more minutes` : s >= 60 ? "1 more minute" : `${s} more seconds`;
 }
 
 function linksOf(u: Unlocked | null): Record<string, string> | null {

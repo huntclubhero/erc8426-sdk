@@ -22,6 +22,12 @@ class FakeChain1155 extends FakeChain {
   setBalanceAt(block: bigint, id: string, account: Address, balance: bigint): void {
     this.atBlock.set(`${block}:${this.key(id, account)}`, balance);
   }
+  /// The newest block. Undefined stands for a reader that cannot tell.
+  head: bigint | undefined = undefined;
+  blockNumber = async (): Promise<bigint> => {
+    if (this.head === undefined) throw new Error("no block number");
+    return this.head;
+  };
   async balanceOf(token: TokenRef, account: Address, blockNumber?: bigint): Promise<bigint> {
     this.reads++;
     if (this.failing) throw new Error("rpc unavailable");
@@ -315,6 +321,44 @@ describe("ERC-1155 binding: rotation follows the minimum, not the transfer", () 
     expect(await h.issuer.onTransfer(ID, alice.address, bob.address)).toBe(false);
     expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 100n)).toBe(true);
     expect((await recordOf(h, alice.address))!.lastIssuedTo).toBeNull();
+  });
+
+  it("does not hold a transfer log against a pass that was claimed after it", async () => {
+    const h = harness();
+    const alice = newSigner();
+    const bob = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    h.chain.head = 90n;
+    await claim(h, alice, ID);
+    // Out at block 100: seen at once, and the pass is retired.
+    h.chain.setBalance(ID, alice.address, 0n);
+    h.chain.setBalanceAt(100n, ID, alice.address, 0n);
+    expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 100n)).toBe(true);
+    // Back at block 101, and a new claim at block 105.
+    h.chain.setBalance(ID, alice.address, 1n);
+    h.chain.head = 105n;
+    expect((await claim(h, alice, ID)).res.status).toBe(200);
+    expect((await recordOf(h, alice.address))!.issuedAtBlock).toBe("105");
+    const links = await linksOf(h, alice.address);
+    // The log of block 100 is delivered again, late. The new pass stands.
+    expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 100n)).toBe(false);
+    expect(await linksOf(h, alice.address)).toEqual(links);
+    expect((await recordOf(h, alice.address))!.lastIssuedTo).toBe(alice.address);
+    // A dip after the claim still counts.
+    h.chain.setBalanceAt(110n, ID, alice.address, 0n);
+    expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 110n)).toBe(true);
+    expect((await recordOf(h, alice.address))!.lastIssuedTo).toBeNull();
+  });
+
+  it("with a reader that cannot tell the block, every log's block is read as before", async () => {
+    const h = harness();
+    const alice = newSigner();
+    const bob = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    await claim(h, alice, ID);
+    expect((await recordOf(h, alice.address))!.issuedAtBlock).toBeUndefined();
+    h.chain.setBalanceAt(100n, ID, alice.address, 0n);
+    expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 100n)).toBe(true);
   });
 
   it("changes nothing for an account whose read failed, and says so", async () => {
