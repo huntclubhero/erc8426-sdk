@@ -422,7 +422,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // of record or entitled to acquire right now. An account entitled to
     // rotate but excluded from acquire (an owner during an exclusive rental)
     // cannot use it to disturb the renter's pass.
-    const holder = await x.holderOf(tokenId);
+    const holder = await x.holderOf(tokenId, result.account);
     if (!holder || !isAddressEqual(holder, result.account)) {
       let entitled;
       try {
@@ -435,7 +435,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // The response never carries the manifest: a proof for any other action
     // MUST NOT resolve it. The holder re-adds the new pass with an acquire
     // proof, and the holder of record is unchanged.
-    await x.rotateOnRequest(tokenId);
+    await x.rotateOnRequest(tokenId, result.account);
     return json(200, { ok: true, rotated: true });
   }
 

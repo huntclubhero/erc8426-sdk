@@ -32,6 +32,12 @@ export interface EntitlementRequest {
   reader: ChainReader;
   /// Wall clock, epoch milliseconds, for expiry checks.
   now: number;
+  /// Take the read at this block and not at the reader's own tag. Set only
+  ///  by the ERC-1155 holdings check for a transfer it was told about, to
+  ///  see a balance that left and came back before the check ran. Never set
+  ///  for an authorization: that read is always the fresh one. A policy
+  ///  that cannot read at a block ignores it.
+  blockNumber?: bigint;
 }
 
 export interface EntitlementPolicy {
@@ -87,9 +93,9 @@ export function minimumBalance(options: MinimumBalanceOptions = {}): Entitlement
   if (minimum < 1n) throw new Error(`invalid minimum: ${minimum} (must be at least 1)`);
   return {
     name: "minimumBalance",
-    async evaluate({ token, account, reader }) {
+    async evaluate({ token, account, reader, blockNumber }) {
       if (!reader.balanceOf) throw new Error("minimumBalance needs a ChainReader with balanceOf (publicClientChainReader provides it)");
-      const balance = await reader.balanceOf(token, account);
+      const balance = await reader.balanceOf(token, account, blockNumber);
       return balance >= minimum ? { decision: "allow", via: "balance" } : { decision: "abstain" };
     },
   };

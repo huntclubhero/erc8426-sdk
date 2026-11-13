@@ -21,7 +21,9 @@ export interface ChainReader {
   ///  an answer (the account holds none); a read that could not be taken
   ///  throws. Needed only by the `minimumBalance` policy (working draft of
   ///  the ERC-1155 binding).
-  balanceOf?(token: TokenRef, account: Address): Promise<bigint>;
+  ///  `blockNumber`, when given, takes the read at that block in place of
+  ///  the reader's tag (the holdings check for an observed transfer).
+  balanceOf?(token: TokenRef, account: Address, blockNumber?: bigint): Promise<bigint>;
   /// ERC-4907 rental state. `user` is null when there is no user. Needed only
   ///  by the `rental4907` policy.
   userOf?(token: TokenRef): Promise<{ user: Address | null; expires: bigint }>;
@@ -145,7 +147,7 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       }
     },
 
-    async balanceOf(token, account) {
+    async balanceOf(token, account, blockNumber) {
       // No revert is read as an answer here: ERC-1155 returns zero for an id
       // nobody holds, so any failure is a read that could not be taken.
       const balance = await client.readContract({
@@ -153,7 +155,7 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
         abi: erc1155Abi,
         functionName: "balanceOf",
         args: [account, BigInt(token.tokenId)],
-        blockTag,
+        ...(blockNumber === undefined ? { blockTag } : { blockNumber }),
       });
       if (typeof balance !== "bigint") throw new Error(`unexpected read result: ${String(balance)}`);
       return balance;

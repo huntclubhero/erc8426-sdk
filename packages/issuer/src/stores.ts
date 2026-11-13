@@ -25,9 +25,32 @@ export interface NonceStore {
   consume(nonce: string): Promise<NonceRecord | null>;
 }
 
-/// Per-token pass state.
+/// The key a pass record is stored under. ERC-721: the token id, one record
+///  per token. ERC-1155 binding (working draft): the id and the holding
+///  account, one record per pair, since two accounts that hold the same id
+///  hold two passes.
+export function passKeyFor(tokenId: string, account?: string | null): string {
+  return account ? `${tokenId}:${account.toLowerCase()}` : tokenId;
+}
+
+/// The key of a record: what `PassStore.put` MUST store it under and
+///  `PassStore.get` is called with.
+export function passRecordKey(record: Pick<PassRecord, "tokenId" | "account">): string {
+  return passKeyFor(record.tokenId, record.account);
+}
+
+/// Pass state: per token (ERC-721), or per id and account (ERC-1155 draft).
 export interface PassRecord {
   tokenId: string;
+  /// ERC-1155 binding only: the account this record belongs to. Absent on
+  ///  an ERC-721 record. Part of the record's key (`passRecordKey`).
+  account?: Address;
+  /// ERC-1155 binding only, and only for an issuer with no capability
+  ///  links: the account fell below the minimum holding and its installed
+  ///  pass was told so. The serial is kept, so the same card comes back when
+  ///  the holding returns. The acquisition URLs were retired when it went
+  ///  dark.
+  dark?: boolean;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.
@@ -67,11 +90,23 @@ export interface PassRecord {
 }
 
 export interface PassStore {
-  get(tokenId: string): Promise<PassRecord | null>;
+  /// `key` is a token id for ERC-721 and `passKeyFor(id, account)` for the
+  ///  ERC-1155 binding.
+  get(key: string): Promise<PassRecord | null>;
+  /// Store under `passRecordKey(record)`. A store that keys on
+  ///  `record.tokenId` alone serves ERC-721 only: under ERC-1155 every holder
+  ///  of an id would overwrite the last.
   put(record: PassRecord): Promise<void>;
   /// OPTIONAL index of every token with a record, used to serve a
   ///  BatchPassUpdate range wider than `maxBatchRange`.
   tokenIds?(): Promise<string[]>;
+  /// Every account a record was ever written for under `tokenId`. REQUIRED
+  ///  for the ERC-1155 binding (the issuer refuses to start without it) and
+  ///  unused for ERC-721. It is what lets the issuer push a PassUpdate to
+  ///  every pass of an id and read the balances of the accounts it issued
+  ///  to, with no index of the chain's holders. The list only grows; the
+  ///  issuer skips accounts whose record is no longer issued.
+  accounts?(tokenId: string): Promise<Address[]>;
 }
 
 /// What a link resolves to. Stored under the SHA-256 digest of the token
@@ -82,6 +117,8 @@ export interface PassStore {
 export interface LinkBinding {
   kind: "action" | "download";
   tokenId: string;
+  /// ERC-1155 binding only: the account whose record holds the link.
+  account?: Address;
   /// The action name (kind "action") or format key (kind "download").
   name: string;
   generation: number;
@@ -155,15 +192,18 @@ export function memoryStores(options: MemoryStoreOptions = {}): IssuerStores {
       },
     },
     passes: {
-      async get(tokenId) {
-        const r = passes.get(tokenId);
+      async get(key) {
+        const r = passes.get(key);
         return r ? structuredClone(r) : null;
       },
       async put(record) {
-        passes.set(record.tokenId, structuredClone(record));
+        passes.set(passRecordKey(record), structuredClone(record));
       },
       async tokenIds() {
-        return [...passes.keys()];
+        return [...new Set([...passes.values()].map((r) => r.tokenId))];
+      },
+      async accounts(tokenId) {
+        return [...passes.values()].filter((r) => r.tokenId === tokenId && r.account).map((r) => r.account!);
       },
     },
     links: {
@@ -251,6 +291,15 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
   const nonceKey = (n: string) => `${ns}nonce:${n}`;
   const passKey = (t: string) => `${ns}pass:${t}`;
   const linkKey = (l: string) => `${ns}link:${l}`;
+  // ERC-1155 binding: the accounts with a record under an id, as one JSON
+  // array per id. The surface has no set type, so adding is a read then a
+  // write: two first claims for one id racing each other can drop one
+  // account from the list. Every later write of that account's record puts
+  // it back, and until then the only thing lost is the proactive retirement
+  // and the PassUpdate push for it; the fresh entitlement read still
+  // refuses its links.
+  const issuedKey = (t: string) => `${ns}issued:${t}`;
+  const readIssued = async (tokenId: string) => parse<string[]>(await kv.get(issuedKey(tokenId))) ?? [];
   // A client that parses JSON on read (@upstash/redis does by default, as
   // does Vercel KV) hands back the object rather than the string we wrote.
   // Accept both, so a shim written either way works.
@@ -300,13 +349,21 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
       },
     },
     passes: {
-      async get(tokenId) {
-        const record = parse<PassRecord>(await kv.get(passKey(tokenId)));
-        if (record || !readLegacy) return record;
-        return migrateLegacy(tokenId);
+      async get(key) {
+        const record = parse<PassRecord>(await kv.get(passKey(key)));
+        // 0.2.x rows are ERC-721 rows: a key that names an account has none.
+        if (record || !readLegacy || key.includes(":")) return record;
+        return migrateLegacy(key);
       },
       async put(record) {
-        await kv.set(passKey(record.tokenId), JSON.stringify(record));
+        await kv.set(passKey(passRecordKey(record)), JSON.stringify(record));
+        if (!record.account) return;
+        const account = record.account.toLowerCase();
+        const issued = await readIssued(record.tokenId);
+        if (!issued.includes(account)) await kv.set(issuedKey(record.tokenId), JSON.stringify([...issued, account]));
+      },
+      async accounts(tokenId) {
+        return (await readIssued(tokenId)).map((a) => getAddress(a));
       },
     },
     links: {

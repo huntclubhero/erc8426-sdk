@@ -3,6 +3,7 @@ export {
   isFileProvider,
   isProductionEnv,
   type CreateIssuerOptions,
+  type HoldingsSummary,
   type Issuer,
   type IssuedChallenge,
   type IssuerErrorContext,
@@ -28,6 +29,7 @@ export {
   type IssuerConfig,
   type IssuerMode,
   type LinkPageContext,
+  type LostEntitlementMode,
   type RateLimitConfig,
   type RepeatConfig,
   type ResolvedIssuerConfig,
@@ -70,6 +72,8 @@ export {
   kvStores,
   memoryKv,
   memoryStores,
+  passKeyFor,
+  passRecordKey,
   type IssuerStores,
   type KeyValueStore,
   type KvStoresOptions,
@@ -127,7 +131,7 @@ export {
   newSerial,
   withLinkPageHeaders,
 } from "./capability.js";
-export { watchPassUpdates, watchTransfers, type WatchEventClient, type WatchOptions } from "./watcher.js";
+export { watchPassUpdates, watchTransfers, watchTransfers1155, type WatchEventClient, type WatchOptions } from "./watcher.js";
 export {
   expressMiddleware,
   sendFetchResponse,

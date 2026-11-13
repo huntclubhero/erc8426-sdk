@@ -1,5 +1,5 @@
 import { getAddress, isAddress, type Address } from "viem";
-import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef } from "@erc8426/core";
+import { ACQUIRE_ACTION, ROTATE_ACTION, isValidActionName, type TokenRef, type TokenStandard } from "@erc8426/core";
 
 import {
   defaultClientKey,
@@ -187,6 +187,8 @@ export function isKnownMainnet(chainId: number): boolean {
 
 export type IssuerEnvironment = "production" | "development";
 
+export type LostEntitlementMode = "retire" | "dark";
+
 export interface IssuerConfig {
   /// Whether this issuer is the real thing. "production" refuses every
   ///  setup that only works for one process or one session (today: the
@@ -224,6 +226,27 @@ export interface IssuerConfig {
   chainId: number;
   contract: string;
   mode: IssuerMode;
+  /// The token standard of `contract`. Default "erc721". "erc1155" selects
+  ///  the ERC-1155 binding, a WORKING DRAFT that can change: a pass per id
+  ///  and holding account, entitlement by a fresh `balanceOf` against a
+  ///  minimum (`minimumBalance()` is the default policy), the `erc1155`
+  ///  CAIP-19 namespace in every challenge. Gated mode only for now.
+  standard?: TokenStandard;
+  /// ERC-1155 binding only: what happens to an account's pass when the
+  ///  account is found below the minimum holding.
+  ///  - "retire": its links and acquisition URLs are retired, the installed
+  ///    pass is pushed as superseded, and the account leaves the issued set;
+  ///    if it holds again, its next claim is a first claim with a new pass.
+  ///    REQUIRED when any action is a capability action: there the link
+  ///    stands in for the proof, the holder stopped guarding the card when
+  ///    the balance left, and a return would revive every copy of it.
+  ///  - "dark": only for an issuer whose every action takes a signed proof.
+  ///    The acquisition URLs are still retired, but the installed pass
+  ///    keeps its serial, is pushed with `dark` set so it says it is dark,
+  ///    and comes back when the holding returns. A copy in someone else's
+  ///    hands still cannot sign.
+  ///  Default: "retire" with capability actions, otherwise "dark".
+  lostEntitlement?: LostEntitlementMode;
   /// Lifetime of an issued challenge. Default 300.
   challengeTtlSeconds?: number;
   /// Nonce retention. Default twice the challenge lifetime, and never less
@@ -276,6 +299,9 @@ export interface ResolvedIssuerConfig {
   chainId: number;
   contract: Address;
   mode: IssuerMode;
+  standard: TokenStandard;
+  /// Resolved for every issuer; read only under "erc1155".
+  lostEntitlement: LostEntitlementMode;
   challengeTtlSeconds: number;
   nonceTtlSeconds: number;
   retryAfterSeconds: number;
@@ -391,6 +417,19 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     throw new IssuerConfigError(`mode must be "public" or "gated", got "${String(config.mode)}"`);
   }
 
+  const standard = config.standard ?? "erc721";
+  if (standard !== "erc721" && standard !== "erc1155") {
+    throw new IssuerConfigError(`standard must be "erc721" or "erc1155", got "${String(config.standard)}"`);
+  }
+  if (standard === "erc1155" && config.mode !== "gated") {
+    // A public ERC-1155 manifest is one per id, the same for every reader,
+    // with no personal links. This draft of the issuer does not build it.
+    throw new IssuerConfigError('standard "erc1155" requires mode "gated": the public configuration is not built for the ERC-1155 binding draft');
+  }
+  if (config.lostEntitlement !== undefined && config.lostEntitlement !== "retire" && config.lostEntitlement !== "dark") {
+    throw new IssuerConfigError(`lostEntitlement must be "retire" or "dark", got "${String(config.lostEntitlement)}"`);
+  }
+
   const challengeTtlSeconds = positiveInt("challengeTtlSeconds", config.challengeTtlSeconds, 300);
   const nonceTtlSeconds = positiveInt("nonceTtlSeconds", config.nonceTtlSeconds, challengeTtlSeconds * 2);
   if (nonceTtlSeconds < challengeTtlSeconds) {
@@ -441,6 +480,13 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     capabilityActions.push(name);
   }
 
+  if (standard === "erc1155" && config.lostEntitlement === "dark" && capabilityActions.length > 0) {
+    throw new IssuerConfigError(
+      `lostEntitlement "dark" cannot be used with capability actions (${capabilityActions.join(", ")}): a capability link stands in for the proof, so a pass that carries one is retired when its account loses entitlement and never comes back`,
+    );
+  }
+  const lostEntitlement: LostEntitlementMode = config.lostEntitlement ?? (capabilityActions.length > 0 ? "retire" : "dark");
+
   // No CORS unless asked for: a wildcard has to be written down.
   let cors: CorsConfig | false = config.cors === undefined ? false : config.cors;
   if (cors !== false) {
@@ -476,6 +522,8 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     chainId: config.chainId,
     contract: getAddress(config.contract),
     mode: config.mode,
+    standard,
+    lostEntitlement,
     challengeTtlSeconds,
     nonceTtlSeconds,
     retryAfterSeconds,

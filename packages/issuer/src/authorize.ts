@@ -62,7 +62,7 @@ export async function authorize(input: AuthorizeInput, deps: AuthorizeDeps): Pro
   // The token this verifier serves, from its own config.
   let served: TokenRef;
   try {
-    served = tokenRef(config.chainId, config.contract, input.tokenId);
+    served = tokenRef(config.chainId, config.contract, input.tokenId, config.standard);
   } catch {
     return { ok: false, error: "binding_mismatch" };
   }

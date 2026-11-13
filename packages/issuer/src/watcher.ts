@@ -1,5 +1,5 @@
 import type { Address } from "viem";
-import { erc721Abi, walletPassAbi } from "@erc8426/core";
+import { erc1155Abi, erc721Abi, walletPassAbi } from "@erc8426/core";
 
 import type { Issuer } from "./issuer.js";
 
@@ -20,6 +20,7 @@ export interface WatchEventClient {
 
 interface EventLog {
   eventName?: string;
+  blockNumber?: bigint | null;
   removed?: boolean;
   args: Record<string, unknown>;
 }
@@ -58,6 +59,39 @@ export function watchTransfers(options: WatchOptions): () => void {
           await options.issuer.onTransfer(tokenId, from, to);
         } catch (e) {
           onError(e);
+        }
+      }
+    },
+  });
+}
+
+/// ERC-1155 binding (working draft). Subscribe to TransferSingle and
+///  TransferBatch logs of the issuer's contract and call
+///  `issuer.onTransfer(id, from, to, blockNumber)` once per id a log moves.
+///  For this binding a transfer is a hint: the issuer answers it with a fresh
+///  read of the two accounts, and `issuer.checkHoldings` on a timer finds
+///  whatever a missed log would have reported. What the logs add is the
+///  block, which lets the issuer see a balance that left and came back
+///  between two reads. Returns the unsubscribe function.
+export function watchTransfers1155(options: WatchOptions): () => void {
+  const onError = options.onError ?? report;
+  return options.client.watchContractEvent({
+    address: options.issuer.config.contract,
+    abi: erc1155Abi,
+    pollingInterval: options.pollingInterval,
+    onError,
+    onLogs: async (logs: EventLog[]) => {
+      for (const log of logs) {
+        if (log.removed) continue;
+        const { from, to } = log.args as { from: Address; to: Address };
+        const ids =
+          log.eventName === "TransferSingle" ? [log.args.id as bigint] : log.eventName === "TransferBatch" ? [...new Set(log.args.ids as bigint[])] : [];
+        for (const id of ids) {
+          try {
+            await options.issuer.onTransfer(id, from, to, log.blockNumber ?? undefined);
+          } catch (e) {
+            onError(e);
+          }
         }
       }
     },
