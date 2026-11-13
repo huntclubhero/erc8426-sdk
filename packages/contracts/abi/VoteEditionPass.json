@@ -40,6 +40,19 @@
   },
   {
     "type": "function",
+    "name": "MAX_DURATION",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "balanceOf",
     "inputs": [
       {
@@ -113,9 +126,9 @@
             "internalType": "enum VoteEditionPass.Choice"
           },
           {
-            "name": "signed",
-            "type": "bool",
-            "internalType": "bool"
+            "name": "source",
+            "type": "uint8",
+            "internalType": "enum VoteEditionPass.Source"
           },
           {
             "name": "weight",
@@ -1022,10 +1035,10 @@
         "internalType": "uint256"
       },
       {
-        "name": "signed",
-        "type": "bool",
+        "name": "source",
+        "type": "uint8",
         "indexed": false,
-        "internalType": "bool"
+        "internalType": "enum VoteEditionPass.Source"
       },
       {
         "name": "replaced",
@@ -1305,6 +1318,17 @@
     "type": "error",
     "name": "VoteEditionInvalidDuration",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "VoteEditionNoSupply",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

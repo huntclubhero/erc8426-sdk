@@ -18,6 +18,7 @@ import { googleFormatProvider, googleWalletClient } from "@erc8426/google";
 
 import type { EditionEnv } from "./config";
 import { redisApplePassStore, redisGoogleObjectStore, upstashKv } from "./kv";
+import { allowSpend } from "./limits";
 import { shortHex } from "./pet";
 import { solidPng } from "./png";
 import { previewProvider } from "./previewProvider";
@@ -41,7 +42,7 @@ import { getRuntime, type Runtime } from "./server";
 
 export const editionAbi = parseAbi([
   "struct Proposal { uint256 id; uint48 snapshot; uint48 closes; uint256 yes; uint256 no; string title; }",
-  "struct Ballot { uint8 choice; bool signed; uint208 weight; }",
+  "struct Ballot { uint8 choice; uint8 source; uint208 weight; }",
   "function balanceOf(address account, uint256 id) view returns (uint256)",
   "function totalSupply(uint256 id) view returns (uint256)",
   "function claimed(uint256 id, address account) view returns (uint256)",
@@ -70,9 +71,10 @@ export const VOTE_ACTIONS = ["vote-yes", "vote-no"] as const;
 export type VoteAction = (typeof VOTE_ACTIONS)[number];
 const VOTE_LABEL: Record<VoteAction, string> = { "vote-yes": "Vote yes", "vote-no": "Vote no" };
 
-/// How long a demo proposal stays open, and how soon another may be opened.
-export const PROPOSAL_SECONDS = 15 * 60;
-export const PROPOSAL_MIN_GAP_SECONDS = 3 * 60;
+/// How long a demo proposal stays open. One is open at a time: the next can
+/// be opened when this one has closed, so nobody can cut a vote short by
+/// opening another, and holders hear of a new proposal at most this often.
+export const PROPOSAL_SECONDS = 5 * 60;
 const EDITION_COLOR = "#3b2f63";
 
 export interface ProposalView {
@@ -91,6 +93,9 @@ export interface BallotView {
   choice: "none" | "yes" | "no";
   /// False for a vote cast through a pass link.
   signed: boolean;
+  /// How the vote arrived: a pass link, a signature relayed by the issuer,
+  ///  or a transaction the holder sent.
+  source: "none" | "link" | "signed" | "direct";
 }
 
 const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -119,6 +124,13 @@ export interface EditionRuntime {
   currentProposal(): Promise<ProposalView | null>;
   /// An account's power and ballot on a proposal.
   ballot(proposalId: string, account: Address): Promise<BallotView>;
+  /// Tell every pass of the edition that its content changed, now, for a
+  ///  PassUpdate emitted at `blockNumber`. The catch-up then leaves that log
+  ///  alone, so holders are told once.
+  announce(blockNumber: bigint): Promise<void>;
+  /// One at a time across instances: true when this caller may go on to
+  ///  open a proposal. The hold lapses by itself.
+  proposalGate(): Promise<boolean>;
   /// Catch up with the chain: read every issued account's balance, and apply
   ///  transfer and PassUpdate logs since the last call.
   sync(): Promise<{ checked: number; retired: number; transfers: number; updates: number } | null>;
@@ -155,14 +167,26 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
   };
   const currentProposal = async (): Promise<ProposalView | null> => {
     const count = await publicClient.readContract({ ...contract, functionName: "proposalCount" });
-    return count === 0n ? null : proposalById(count);
+    if (count === 0n) return null;
+    // A proposal counts balances at the second it opened, and nothing can be
+    // read of it until that second has ended on chain: no power, not
+    // votable. Something that looks in that instant (the push that
+    // announces the proposal, most of all) waits it out, or every pass
+    // would be told "no vote on this one".
+    let p = await proposalById(count);
+    for (let i = 0; i < 8 && !p.votable && p.closes > Math.floor(Date.now() / 1000); i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      p = await proposalById(count);
+    }
+    return p;
   };
   const ballot = async (proposalId: string, account: Address): Promise<BallotView> => {
     const [power, b] = await Promise.all([
       publicClient.readContract({ ...contract, functionName: "votingPower", args: [BigInt(proposalId), account] }),
       publicClient.readContract({ ...contract, functionName: "ballotOf", args: [BigInt(proposalId), account] }),
     ]);
-    return { power: power.toString(), choice: b.choice === 1 ? "yes" : b.choice === 2 ? "no" : "none", signed: b.signed };
+    const source = (["none", "link", "signed", "direct"] as const)[b.source] ?? "none";
+    return { power: power.toString(), choice: b.choice === 1 ? "yes" : b.choice === 2 ? "no" : "none", signed: b.source >= 2, source };
   };
   const balanceOf = (account: Address) =>
     publicClient.readContract({ address: edition.contract, abi: editionAbi, functionName: "balanceOf", args: [account, edition.id] });
@@ -176,7 +200,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
       : !mine
         ? "Unknown"
         : mine.choice !== "none"
-          ? `${mine.choice === "yes" ? "Yes" : "No"} (${mine.signed ? "signed, final" : "by pass link"})`
+          ? `${mine.choice === "yes" ? "Yes" : "No"} (${mine.signed ? "signed" : "by pass link"})`
           : power === 0n
             ? "No vote on this one"
             : proposal.votable
@@ -284,7 +308,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     description: `${VOTE_LABEL[action]} on the open proposal`,
     capability: true,
     bound:
-      "At most one vote per account per proposal, enforced on chain. Its weight is the account's balance at the proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast, and the holder can replace it once with a signed vote while the proposal is open. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
+      "At most one vote per account per proposal, enforced on chain. Its weight is the account's balance at the proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast, and the holder can replace it with a signed vote while the proposal is open. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
     async execute({ account, path, request, params, notifyUpdate }) {
       // The request says which proposal. It is never "the newest one": a
       // new proposal can open between a pass being read and a link tapped.
@@ -292,6 +316,10 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
       if (!proposalId) throw new ActionError(400, "proposal_required", "The request does not say which proposal the vote is for. Open the pass again and use its current link.");
       const proposal = { proposalId };
       const support = action === "vote-yes";
+      // Each relayed vote is a transaction the operator pays for.
+      if (!(await allowSpend(rt, "vote", request, 60, 3000))) {
+        throw new ActionError(429, "rate_limited", "This demo relays a limited number of votes per visitor per day.");
+      }
       let hash: Hex;
       try {
         hash = await rt.withOperator(async (nonce) => {
@@ -314,7 +342,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           throw new ActionError(
             409,
             "already_voted",
-            path === "signed" ? "This account's signed vote is final." : "This account has already voted. A pass link cannot change a vote; the holder can, once, with a signature.",
+            path === "signed" ? "This account has already cast a signed vote on this proposal." : "This account has already voted. A pass link cannot change a vote; the holder can, with a signature.",
           );
         }
         console.warn(`[edition vote] ${(e as Error).message.split("\n")[0]}`);
@@ -389,6 +417,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
   const SYNC_SPAN = 20_000n;
   const SYNC_EVERY = 60;
   let memoryCursor = edition.deployBlock;
+  let memoryAnnounced = 0n;
   const sync = async () => {
     if (redis && (await redis.set(`${prefix}sync-lease`, "1", { nx: true, ex: SYNC_EVERY })) !== "OK") return null;
     const summary = await issuer.checkHoldings(id).catch((e: Error) => {
@@ -425,8 +454,11 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
         transfers++;
         await issuer.onTransfer(edition.id, args.from, args.to, log.blockNumber).catch((e: Error) => console.warn(`[edition sync] transfer hint: ${e.message}`));
       }
-      // One fan-out however many PassUpdate logs the span holds.
+      // One fan-out however many PassUpdate logs the span holds, and none
+      // for a log that `announce` already served.
+      const served = redis ? BigInt((await redis.get<string>(`${prefix}announced-block`)) ?? "0") : memoryAnnounced;
       const announced = changed.some((log) => {
+        if (log.blockNumber !== null && log.blockNumber <= served) return false;
         const args = log.args as { tokenId?: bigint; fromTokenId?: bigint; toTokenId?: bigint };
         if (log.eventName === "PassUpdate") return args.tokenId === edition.id;
         return log.eventName === "BatchPassUpdate" && args.fromTokenId !== undefined && args.toTokenId !== undefined && args.fromTokenId <= edition.id && edition.id <= args.toTokenId;
@@ -442,7 +474,22 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     return { checked: summary.checked, retired: summary.retired.length, transfers, updates };
   };
 
-  return { rt, edition, issuer, apple, currentProposal, ballot, sync };
+  const announce = async (blockNumber: bigint) => {
+    if (redis) await redis.set(`${prefix}announced-block`, blockNumber.toString());
+    else memoryAnnounced = blockNumber;
+    // Wait out the snapshot second first (see currentProposal).
+    await currentProposal();
+    await issuer.onPassUpdate(edition.id);
+  };
+  let memoryGateUntil = 0;
+  const proposalGate = async () => {
+    if (redis) return (await redis.set(`${prefix}propose-gate`, "1", { nx: true, ex: 20 })) === "OK";
+    if (Date.now() < memoryGateUntil) return false;
+    memoryGateUntil = Date.now() + 20_000;
+    return true;
+  };
+
+  return { rt, edition, issuer, apple, currentProposal, ballot, announce, proposalGate, sync };
 }
 
 /// On serverless hosts (no watchers), catch up after the response is sent.

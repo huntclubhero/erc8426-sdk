@@ -114,6 +114,7 @@ contract VoteEditionPassTest is Test {
     // ---- who may propose and relay -------------------------------------------
 
     function test_onlyOwnerOrOperatorProposes() public {
+        _claim(bob, 1);
         vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionNotOperator.selector, alice));
         vm.prank(alice);
         edition.propose(ID, "x", 1 hours);
@@ -128,6 +129,7 @@ contract VoteEditionPassTest is Test {
     }
 
     function test_proposeAnnouncesToEveryHolder() public {
+        _claim(alice, 1);
         vm.expectEmit(true, false, false, false);
         emit IERC1155WalletPass.PassUpdate(ID);
         vm.prank(operator);
@@ -183,6 +185,8 @@ contract VoteEditionPassTest is Test {
     }
 
     function test_claimingInTheSnapshotSecondCountsAndAfterItDoesNot() public {
+        _claim(carol, 1);
+        skip(5);
         vm.prank(operator);
         uint256 pid = edition.propose(ID, "x", 1 hours);
         // Same second as the snapshot: counts.
@@ -257,17 +261,71 @@ contract VoteEditionPassTest is Test {
         assertEq(yes, 0);
         assertEq(no, 2);
         VoteEditionPass.Ballot memory b = edition.ballotOf(pid, alice);
-        assertTrue(b.signed);
-        // Final: neither a link, nor a relay, nor the holder changes it now.
+        assertEq(uint8(b.source), uint8(VoteEditionPass.Source.Relayed));
+        // Neither a link nor another relayed vote changes it now.
         vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
         vm.prank(operator);
         edition.castVoteFor(alice, pid, true, false);
         vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
         vm.prank(operator);
         edition.castVoteFor(alice, pid, true, true);
-        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
+    }
+
+    function test_theHolderOverrulesTheOperatorOnChainAndThatIsFinal() public {
+        _claim(alice, 3);
+        uint256 pid = _propose();
+        // An operator claims a signature that was never given.
+        vm.prank(operator);
+        edition.castVoteFor(alice, pid, false, true);
+        (uint256 yes, uint256 no) = _tally(pid);
+        assertEq(no, 3);
+        // The holder votes for herself and that replaces it.
         vm.prank(alice);
         edition.castVote(pid, true);
+        (yes, no) = _tally(pid);
+        assertEq(yes, 3);
+        assertEq(no, 0);
+        assertEq(uint8(edition.ballotOf(pid, alice).source), uint8(VoteEditionPass.Source.Direct));
+        // Final: not the operator, not a link, not the holder again.
+        vm.startPrank(operator);
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
+        edition.castVoteFor(alice, pid, false, true);
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
+        edition.castVoteFor(alice, pid, false, false);
+        vm.stopPrank();
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionAlreadyVoted.selector, pid, alice));
+        vm.prank(alice);
+        edition.castVote(pid, false);
+    }
+
+    function test_proposalBounds() public {
+        vm.startPrank(operator);
+        // Nobody holds the id yet.
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionNoSupply.selector, ID));
+        edition.propose(ID, "x", 1 hours);
+        vm.stopPrank();
+        _claim(alice, 1);
+        vm.startPrank(operator);
+        vm.expectRevert(VoteEditionPass.VoteEditionInvalidDuration.selector);
+        edition.propose(ID, "x", 0);
+        vm.expectRevert(VoteEditionPass.VoteEditionInvalidDuration.selector);
+        edition.propose(ID, "x", 30 days + 1);
+        vm.expectRevert(VoteEditionPass.VoteEditionInvalidDuration.selector);
+        edition.propose(ID, "x", type(uint48).max);
+        vm.stopPrank();
+        assertFalse(edition.votable(0));
+        assertFalse(edition.votable(99));
+    }
+
+    function test_aTransferOfZeroUnitsWritesNoCheckpoint() public {
+        _claim(alice, 2);
+        uint256 pid = _propose();
+        // A stranger sends zero units to alice and from itself after the
+        // snapshot: her power on the proposal is what it was.
+        vm.prank(bob);
+        edition.safeTransferFrom(bob, alice, ID, 0, "");
+        assertEq(edition.votingPower(pid, alice), 2);
+        assertEq(edition.votingPower(pid, bob), 0);
     }
 
     function test_aLinkCannotReplaceASignedVote() public {
@@ -281,6 +339,7 @@ contract VoteEditionPassTest is Test {
     }
 
     function test_theOperatorCannotVoteForAnAccountWithNoPower() public {
+        _claim(bob, 1);
         uint256 pid = _propose();
         vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionNoVotingPower.selector, pid, alice));
         vm.prank(operator);
@@ -290,7 +349,8 @@ contract VoteEditionPassTest is Test {
     function test_unknownProposal() public {
         vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionUnknownProposal.selector, 1));
         edition.proposal(1);
-        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionUnknownProposal.selector, 0));
-        edition.votable(0);
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionUnknownProposal.selector, 7));
+        vm.prank(alice);
+        edition.castVote(7, true);
     }
 }

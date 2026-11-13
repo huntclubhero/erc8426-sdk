@@ -1,6 +1,6 @@
 import { getAddress, isAddress } from "viem";
 
-import { editionAbi, getEditionRuntime, PROPOSAL_MIN_GAP_SECONDS } from "@/lib/edition";
+import { editionAbi, getEditionRuntime } from "@/lib/edition";
 import { json } from "@/lib/server";
 
 export const runtime = "nodejs";
@@ -47,7 +47,6 @@ export async function GET(request: Request): Promise<Response> {
       open,
       passUri: ed.issuer.passUri(id.toString()),
       proposal,
-      proposalMinGapSeconds: PROPOSAL_MIN_GAP_SECONDS,
       now: Math.floor(Date.now() / 1000),
       holder,
     });

@@ -25,17 +25,21 @@ import {ERC1155WalletPass} from "../ERC1155WalletPass.sol";
 ///  across accounts gains nothing, since power follows units and not heads.
 ///
 ///  A vote can arrive three ways, and they are not equal:
-///  - `castVote`, sent by the holder: the strongest proof there is.
-///  - `castVoteFor(..., signed = true)`, relayed by an operator after the
-///    holder signed a challenge for it (the signed path of ERC-8426).
 ///  - `castVoteFor(..., signed = false)`, relayed by an operator because a
-///    link on a wallet pass was followed (the capability path). Whoever holds
-///    the pass holds the link, so this is the weakest.
-///  The rule that keeps the weak one safe to offer: a link can cast an
-///  account's vote once and can never change a vote, and the holder can
-///  replace a link vote with a signed one, once, while the proposal is open.
-///  A forwarded or stolen link can therefore do at most one thing, and the
-///  holder can undo it. A vote moves no tokens and changes no entitlement.
+///    link on a wallet pass was followed (the capability path of ERC-8426).
+///    Whoever holds the pass holds the link, so this is the weakest.
+///  - `castVoteFor(..., signed = true)`, relayed by an operator after the
+///    holder signed a challenge for it (the signed path). The contract
+///    cannot see that signature: it has the operator's word for it.
+///  - `castVote`, sent by the holder: the only proof the contract checks
+///    itself.
+///  One rule covers all three: a vote can replace the account's earlier
+///  vote only if it arrived a stronger way. So a link can cast a vote once
+///  and never change one, a signed vote replaces a link vote, and a vote
+///  the holder sends replaces either and is final. A forwarded or stolen
+///  link can do at most one thing and the holder can undo it; an operator
+///  that lies about a signature can be overruled by the holder on chain. A
+///  vote moves no tokens and changes no entitlement.
 contract VoteEditionPass is ERC1155WalletPass, Ownable {
     using Checkpoints for Checkpoints.Trace208;
 
@@ -57,13 +61,23 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
         string title;
     }
 
+    /// How a vote arrived, weakest first. A vote replaces an earlier one
+    ///  only if it arrived a stronger way.
+    enum Source {
+        None,
+        Link,
+        Relayed,
+        Direct
+    }
+
     struct Ballot {
         Choice choice;
-        /// False for a vote cast through a pass link. Such a vote can be
-        ///  replaced once by a signed one.
-        bool signed;
+        Source source;
         uint208 weight;
     }
+
+    /// @notice The longest a proposal can stay open.
+    uint48 public constant MAX_DURATION = 30 days;
 
     /// @notice The most units of one id an account can claim in total.
     uint256 public immutable claimLimit;
@@ -84,9 +98,9 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     event EditionOpen(uint256 indexed id, bool open);
     event VoteOperatorSet(address indexed operator, bool allowed);
     event ProposalCreated(uint256 indexed proposalId, uint256 indexed id, uint48 snapshot, uint48 closes, string title);
-    /// @param signed False when the vote came through a pass link.
-    /// @param replaced True when this vote replaced the account's link vote.
-    event VoteCast(uint256 indexed proposalId, address indexed account, bool support, uint256 weight, bool signed, bool replaced);
+    /// @param replaced True when this vote replaced the account's earlier,
+    ///  weaker vote.
+    event VoteCast(uint256 indexed proposalId, address indexed account, bool support, uint256 weight, Source source, bool replaced);
 
     error VoteEditionClosed(uint256 id);
     error VoteEditionClaimLimit(uint256 id, address account, uint256 claimed, uint256 requested);
@@ -97,9 +111,11 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     error VoteEditionNotVotable(uint256 proposalId);
     /// @notice The account held no unit at the snapshot.
     error VoteEditionNoVotingPower(uint256 proposalId, address account);
-    /// @notice The account's vote is final: it was signed, or the new vote is
-    ///  another link vote.
+    /// @notice The account has voted, and the new vote did not arrive a
+    ///  stronger way than the one it would replace.
     error VoteEditionAlreadyVoted(uint256 proposalId, address account);
+    /// @notice No unit of the id exists, so nobody could vote.
+    error VoteEditionNoSupply(uint256 id);
     error VoteEditionFutureLookup(uint48 timepoint, uint48 clock);
 
     constructor(string memory metadataURI, string memory passBaseURI_, address owner_, uint256 claimLimit_)
@@ -171,6 +187,9 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
         uint48 nowClock = clock();
         for (uint256 i = 0; i < ids.length; ++i) {
             uint256 id = ids[i];
+            // Nothing moved, nothing to record (and anyone can send zero
+            // units to anyone).
+            if (values[i] == 0) continue;
             if (from != address(0)) {
                 _balanceCheckpoints[id][from].push(nowClock, SafeCast.toUint208(balanceOf(from, id)));
             }
@@ -187,7 +206,8 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     ///  Emits `PassUpdate(id)`, since every holder's pass now shows it.
     function propose(uint256 id, string calldata title, uint48 duration) external returns (uint256 proposalId) {
         if (msg.sender != owner() && !voteOperator[msg.sender]) revert VoteEditionNotOperator(msg.sender);
-        if (duration == 0) revert VoteEditionInvalidDuration();
+        if (duration == 0 || duration > MAX_DURATION) revert VoteEditionInvalidDuration();
+        if (!exists(id)) revert VoteEditionNoSupply(id);
         uint48 snapshot = clock();
         _proposals.push(Proposal({id: id, snapshot: snapshot, closes: snapshot + duration, yes: 0, no: 0, title: title}));
         proposalId = _proposals.length;
@@ -210,9 +230,10 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     }
 
     /// @notice Whether votes are accepted now: after the snapshot second and
-    ///  not after the close.
+    ///  not after the close. False for a proposal that does not exist.
     function votable(uint256 proposalId) public view returns (bool) {
-        Proposal memory p = proposal(proposalId);
+        if (proposalId == 0 || proposalId > _proposals.length) return false;
+        Proposal storage p = _proposals[proposalId - 1];
         uint48 nowClock = clock();
         return nowClock > p.snapshot && nowClock <= p.closes;
     }
@@ -225,22 +246,26 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
         return getPastBalance(account, p.id, p.snapshot);
     }
 
-    /// @notice Vote with the caller's own units. Replaces a link vote; final.
+    /// @notice Vote with the caller's own units. Replaces any relayed vote
+    ///  of the caller; final.
     function castVote(uint256 proposalId, bool support) external {
-        _cast(proposalId, msg.sender, support, true);
+        _cast(proposalId, msg.sender, support, Source.Direct);
     }
 
     /// @notice Relay `account`'s vote. `signed` says whether the account
-    ///  signed for it (true) or a pass link was followed (false). The
-    ///  operator is trusted for that statement and for nothing else: it
-    ///  cannot vote with more than the snapshot balance, vote twice, or
-    ///  change a signed vote.
+    ///  signed for it (true) or a pass link was followed (false).
+    /// @dev What the operator is trusted with, and its limit: it can cast a
+    ///  vote for an account that has not voted, and can say a vote was
+    ///  signed when it was not. It cannot vote with more than the snapshot
+    ///  balance, cannot change a vote the holder sent, and whatever it casts
+    ///  the holder can replace with `castVote` while the proposal is open.
     function castVoteFor(address account, uint256 proposalId, bool support, bool signed) external {
         if (!voteOperator[msg.sender]) revert VoteEditionNotOperator(msg.sender);
-        _cast(proposalId, account, support, signed);
+        _cast(proposalId, account, support, signed ? Source.Relayed : Source.Link);
     }
 
-    function _cast(uint256 proposalId, address account, bool support, bool signed) internal {
+    function _cast(uint256 proposalId, address account, bool support, Source source) internal {
+        if (proposalId == 0 || proposalId > _proposals.length) revert VoteEditionUnknownProposal(proposalId);
         if (!votable(proposalId)) revert VoteEditionNotVotable(proposalId);
         Proposal storage p = _proposals[proposalId - 1];
         uint256 weight = getPastBalance(account, p.id, p.snapshot);
@@ -249,18 +274,17 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
         Ballot storage b = _ballots[proposalId][account];
         bool replaced = false;
         if (b.choice != Choice.None) {
-            // A signed vote is final. A link vote can be replaced, by a
-            // signed vote only.
-            if (b.signed || !signed) revert VoteEditionAlreadyVoted(proposalId, account);
+            // Only a vote that arrived a stronger way replaces one.
+            if (source <= b.source) revert VoteEditionAlreadyVoted(proposalId, account);
             if (b.choice == Choice.Yes) p.yes -= b.weight;
             else p.no -= b.weight;
             replaced = true;
         }
         b.choice = support ? Choice.Yes : Choice.No;
-        b.signed = signed;
+        b.source = source;
         b.weight = SafeCast.toUint208(weight);
         if (support) p.yes += weight;
         else p.no += weight;
-        emit VoteCast(proposalId, account, support, weight, signed, replaced);
+        emit VoteCast(proposalId, account, support, weight, source, replaced);
     }
 }

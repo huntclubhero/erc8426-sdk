@@ -37,6 +37,7 @@ interface BallotView {
   power: string;
   choice: "none" | "yes" | "no";
   signed: boolean;
+  source: "none" | "link" | "signed" | "direct";
 }
 
 interface EditionState {
@@ -47,7 +48,6 @@ interface EditionState {
   open: boolean;
   passUri: string;
   proposal: ProposalView | null;
-  proposalMinGapSeconds: number;
   now: number;
   holder: { account: string; balance: string; claimed: string; hasGas: boolean; ballot: BallotView | null } | null;
 }
@@ -196,8 +196,12 @@ export function EditionDetail() {
         // The proposal is named with the vote: the signature covers the
         // action, and the request says which proposal it is for.
         const r = await passes.signedAction({ token, action, signer, params: { proposalId: state.proposal.proposalId } });
-        const tx = (r.body as { result?: { transactionHash?: string } }).result?.transactionHash;
-        log(`Vote ${VOTE_LABEL[action]} (signed path)`, true, `HTTP ${r.status}. The issuer verified your signature and read your balance fresh; the contract counted your units at the snapshot${tx ? `, transaction ${shortHex(tx)}` : ""}. A signed vote is final.`);
+        const result = (r.body as { result?: { transactionHash?: string; proposalId?: string } }).result;
+        log(
+          `Vote ${VOTE_LABEL[action]} on proposal ${result?.proposalId ?? "?"} (signed path)`,
+          true,
+          `HTTP ${r.status}. The issuer verified your signature and read your balance fresh; the contract counted your units at the snapshot${result?.transactionHash ? `, transaction ${shortHex(result.transactionHash)}` : ""}. It replaces a link vote, and a link cannot change it.`,
+        );
       } catch (e) {
         log(`Vote ${VOTE_LABEL[action]} (signed path)`, false, describe(e));
       }
@@ -207,11 +211,12 @@ export function EditionDetail() {
   const followLink = (key: string, url: string, label = "Pass link") =>
     run(`link-${key}`, async () => {
       const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: "{}" });
-      const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
+      const body = (await res.json().catch(() => null)) as { error?: string; message?: string; result?: { proposalId?: string } } | null;
+      const on = body?.result?.proposalId ? ` on proposal ${body.result.proposalId}` : "";
       if (res.ok && res.headers.get("x-wallet-pass-repeat") === "true") {
-        log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}, a repeat. The issuer answered with the outcome of the same tap a moment ago and did not run it again.`);
+        log(`${label}: ${key}${on} (capability path)`, true, `HTTP ${res.status}, a repeat. The issuer answered with the outcome of the same tap a moment ago and did not run it again.`);
       } else if (res.ok) {
-        log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}. No signature: the link stood in for it. The contract recorded it as a link vote, which you can replace once with a signed vote while the proposal is open.`);
+        log(`${label}: ${key}${on} (capability path)`, true, `HTTP ${res.status}. No signature: the link stood in for it. The contract recorded it as a link vote, which you can replace with a signed vote while the proposal is open.`);
       } else {
         const why = res.status === 403 ? " The link is still known, but the account it was issued to no longer holds a unit." : res.status === 404 ? " The link has been retired." : "";
         log(`${label}: ${key} (capability path)`, false, `HTTP ${res.status} ${body?.error ?? ""}${body?.message ? `: ${body.message}` : ""}.${why}`);
@@ -442,21 +447,22 @@ export function EditionDetail() {
                     Your votes on this proposal: <strong>{ballot.power}</strong> (what you held when it opened).{" "}
                     {ballot.choice !== "none" ? (
                       <>
-                        You voted <strong>{ballot.choice === "yes" ? "Yes" : "No"}</strong>, {ballot.signed ? "signed. That is final." : "by pass link. You can replace it once with a signed vote."}
+                        You voted <strong>{ballot.choice === "yes" ? "Yes" : "No"}</strong>,{" "}
+                        {ballot.source === "direct" ? "in your own transaction. That is final." : ballot.signed ? "signed. A link cannot change it." : "by pass link. You can replace it with a signed vote."}
                       </>
                     ) : null}
                   </p>
                 ) : null}
                 {address && ballot && ballot.power === "0" && balance > 0n ? (
                   <p className="notice small">
-                    You hold units now, but you held none when this proposal opened, so they carry no vote on it. That is deliberate: otherwise one unit could vote, move to a second wallet and vote again. Open a new proposal and your units count.
+                    You hold units now, but you held none when this proposal opened, so they carry no vote on it. That is deliberate: otherwise one unit could vote, move to a second wallet and vote again. Your units count on the next proposal, which can be opened when this one closes.
                   </p>
                 ) : null}
               </>
             ) : (
               <p className="muted small">No proposal has been opened yet.</p>
             )}
-            {signer && proposal?.votable && ballot && ballot.power !== "0" && !(ballot.choice !== "none" && ballot.signed) ? (
+            {signer && proposal?.votable && ballot && ballot.power !== "0" && !ballot.signed ? (
               <div className="button-row">
                 {(["vote-yes", "vote-no"] as const).map((a) => (
                   <button key={a} type="button" className="btn" onClick={() => void signedVote(a)} disabled={busy !== null} aria-busy={busy === `signed-${a}`}>
@@ -482,8 +488,15 @@ export function EditionDetail() {
               <p className="muted small">Unlock the pass to get its vote links.</p>
             )}
             <div className="button-row">
-              <button type="button" className="btn btn-quiet" onClick={() => void openProposal()} disabled={busy !== null} aria-busy={busy === "propose"}>
-                Open a new proposal (demo)
+              <button
+                type="button"
+                className="btn btn-quiet"
+                onClick={() => void openProposal()}
+                disabled={busy !== null || Boolean(proposal && proposal.closes >= state.now)}
+                aria-busy={busy === "propose"}
+                title={proposal && proposal.closes >= state.now ? "One proposal is open at a time" : undefined}
+              >
+                {proposal && proposal.closes >= state.now ? `Next proposal in ${minutesLeft(proposal.closes, state.now).replace(" more", "")}` : "Open a new proposal (demo)"}
               </button>
             </div>
             {previousLinks && Object.keys(previousLinks).length > 0 ? (

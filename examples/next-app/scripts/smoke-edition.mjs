@@ -43,6 +43,7 @@ const abi = parseAbi([
   "function claim(uint256 id, uint256 amount)",
   "function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data)",
   "function supportsInterface(bytes4 id) view returns (bool)",
+  "function castVote(uint256 proposalId, bool support)",
 ]);
 
 let failures = 0;
@@ -127,7 +128,7 @@ const state = async (who) => (await getJson(`${BASE}/api/edition${who ? `?accoun
 /// Open a demo proposal, waiting out the gap the demo keeps between them,
 /// then wait until the contract accepts votes on it.
 const openProposal = async () => {
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     const r = await post(`${BASE}/api/edition/proposal`);
     if (r.res.ok) {
       const pid = r.body.proposal.proposalId;
@@ -138,7 +139,7 @@ const openProposal = async () => {
       return pid;
     }
     if (r.res.status !== 429 || !r.body?.retryAfter) throw new Error(`could not open a proposal: HTTP ${r.res.status} ${JSON.stringify(r.body)}`);
-    console.log(`      (waiting ${r.body.retryAfter}s: the demo keeps a gap between proposals)`);
+    console.log(`      (waiting ${r.body.retryAfter}s: one proposal is open at a time)`);
     await new Promise((res) => setTimeout(res, (r.body.retryAfter + 2) * 1000));
   }
   throw new Error("could not open a proposal");
@@ -207,9 +208,19 @@ step(signedNo === null, "A replaces the link vote with a signed vote", signedNo 
 p = (await state(alice)).proposal;
 step(p.yes === "0" && p.no === "3", "the tally moved with it", `yes ${p.yes}, no ${p.no}`);
 const again = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice, params: { proposalId: p1 } }));
-step(again?.status === 409 && again?.serverCode === "already_voted", "a signed vote is final: 409 already_voted", `${again?.status} ${again?.serverCode ?? again?.code}`);
+step(again?.status === 409 && again?.serverCode === "already_voted", "a second signed vote changes nothing: 409 already_voted", `${again?.status} ${again?.serverCode ?? again?.code}`);
 const b = (await state(alice)).holder.ballot;
-step(b.choice === "no" && b.signed === true, "the chain records A's vote as No, signed");
+step(b.choice === "no" && b.source === "signed", "the chain records A's vote as No, signed");
+// The contract itself is the last word: the holder's own transaction
+// replaces even a vote the issuer relayed as signed.
+await write(alice, "castVote", [BigInt(p1), true]);
+const direct = await until(async () => (await state(alice)).holder.ballot.source === "direct", 30_000, 1000);
+p = (await state(alice)).proposal;
+step(direct && p.yes === "3" && p.no === "0", "A overrules the relayed vote with a transaction of its own", `yes ${p.yes}, no ${p.no}`);
+const crossSite = await getJson(`${BASE}/api/edition/proposal`, { method: "POST", headers: { origin: "https://evil.example" } });
+step(crossSite.res.status === 400 && crossSite.body?.error === "forbidden_origin", "another site cannot press the proposal button through a visitor");
+const early = await post(`${BASE}/api/edition/proposal`);
+step(early.res.status === 429 && early.body?.error === "proposal_open", "a second proposal cannot be opened while one is open", `HTTP ${early.res.status} ${early.body?.error ?? ""}`);
 
 // 8. A sends the rest: the fresh read refuses at once, then the links are retired.
 await sendUnits(alice, bob, 2n);

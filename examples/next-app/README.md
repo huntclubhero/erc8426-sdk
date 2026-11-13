@@ -46,12 +46,17 @@ The action on the edition pass is a vote, because it is the case that shows what
 
 So the issuer's fresh read only admits the request, and the contract (`VoteEditionPass`) decides what the vote weighs: the account's balance at the proposal's snapshot, read from checkpoints it writes on every transfer. A unit that moves after the snapshot carries no vote, and the votes of all accounts never add up to more than the supply at the snapshot.
 
-A vote can be cast two ways, and the contract is told which:
+A vote can arrive three ways, and the contract is told which:
 
-- **With a signature** (the signed path). Final.
-- **With the link on the pass** (the capability path), which is what a tap in Apple Wallet or Google Wallet does. Whoever holds the pass holds the link, so it is the weaker proof. A link can cast an account's vote once and can never change a vote, and the holder can replace a link vote with a signed one, once, while the proposal is open. That is the bound ERC-8426 asks of a capability action, enforced on chain.
+- **With the link on the pass** (the capability path), which is what a tap in Apple Wallet or Google Wallet does. Whoever holds the pass holds the link, so it is the weakest proof.
+- **With a signature**, relayed by the issuer (the signed path).
+- **In a transaction the holder sends**, the only proof the contract checks itself.
 
-"Open a new proposal" is a demo button (in a real deployment proposals come from governance). It exists because a visitor who claims after the last snapshot has no vote on that proposal, which is the lesson and also a dead end without it.
+One rule covers all three: a vote replaces the account's earlier vote only if it arrived a stronger way. So a link can cast a vote once and never change one, a signed vote replaces a link vote, and the holder's own transaction replaces either and is final. That is the bound ERC-8426 asks of a capability action, enforced on chain, and it means the holder can overrule the issuer.
+
+Every vote names its proposal: the link on the pass carries it (`?p=3`), the page a phone shows before anything happens says which proposal the tap is for, and a signed vote sends it beside the proof. A vote never lands on "whichever proposal is newest".
+
+"Open a new proposal" is a demo button (in a real deployment proposals come from governance). It exists because a visitor who claims after the last snapshot has no vote on that proposal, which is the lesson and also a dead end without it. One proposal is open at a time, for five minutes, so nobody can cut a vote short by opening another and holders hear of a new proposal at most that often.
 
 It is a second issuer in the same app (`lib/edition.ts`), with `standard: "erc1155"`, under `/edition-pass`, against `VoteEditionPass` from `@erc8426/contracts`. It is off unless `EDITION_CONTRACT_ADDRESS` is set; `pnpm chain` deploys one locally. `node scripts/smoke-edition.mjs` runs the whole flow headlessly against the running app, including the attempt to vote twice with one unit.
 

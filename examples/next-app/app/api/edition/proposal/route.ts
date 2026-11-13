@@ -1,6 +1,6 @@
 import { after } from "next/server";
 
-import { editionAbi, getEditionRuntime, PROPOSAL_MIN_GAP_SECONDS, PROPOSAL_SECONDS } from "@/lib/edition";
+import { editionAbi, getEditionRuntime, PROPOSAL_SECONDS } from "@/lib/edition";
 import { allowSpend } from "@/lib/limits";
 import { json } from "@/lib/server";
 
@@ -12,10 +12,13 @@ export const maxDuration = 60;
 /// who claimed after the last snapshot has something to vote on. In a real
 /// deployment proposals come from governance, not from a public button.
 ///
-/// The snapshot is the moment the proposal opens. Opening one announces it
-/// to every pass of the edition (PassUpdate), which is a push to every
-/// holder's phone, so it is held to one every few minutes and capped per
-/// visitor and per day.
+/// What keeps a public button from being a weapon:
+/// - One proposal is open at a time. The next opens only when this one has
+///   closed, so nobody can cut a vote short, and holders are told of a new
+///   proposal at most once per proposal length.
+/// - Another site cannot press it through a visitor's browser (the request
+///   must come from this origin).
+/// - Requests are let through one at a time, so a burst opens one proposal.
 const TITLES = [
   "Paint the clubhouse purple",
   "Move the meetup to Thursdays",
@@ -31,22 +34,46 @@ export async function POST(request: Request): Promise<Response> {
   if (!ed) return json({ error: "not_found", message: "No edition is configured" }, { status: 404 });
   const { rt, edition } = ed;
 
-  const latest = await ed.currentProposal();
-  const now = Math.floor(Date.now() / 1000);
-  if (latest && latest.closes >= now && now - latest.snapshot < PROPOSAL_MIN_GAP_SECONDS) {
-    const wait = PROPOSAL_MIN_GAP_SECONDS - (now - latest.snapshot);
-    return json(
-      { error: "too_soon", message: `Proposal ${latest.proposalId} opened moments ago. A new one can be opened in ${wait} seconds.`, retryAfter: wait },
-      { status: 429, headers: { "retry-after": String(wait) } },
-    );
-  }
-  if (!(await allowSpend(rt, "propose", request, 6, 150))) {
-    return json({ error: "rate_limited", message: "This demo opens a few proposals per visitor per day. Try again tomorrow." }, { status: 429 });
+  // A browser names the page a cross-site request came from. A request
+  // with no Origin (a script, a test) is not a browser being used.
+  const origin = request.headers.get("origin");
+  if ((origin && origin !== new URL(rt.config.baseUrl).origin) || request.headers.get("sec-fetch-site") === "cross-site") {
+    return json({ error: "forbidden_origin", message: "Proposals are opened from the demo site itself." }, { status: 400 });
   }
 
-  const title = TITLES[Number(BigInt(latest?.proposalId ?? "0") % BigInt(TITLES.length))]!;
-  let hash: `0x${string}`;
+  const openOne = async (): Promise<Response | null> => {
+    const latest = await ed.currentProposal();
+    const now = Math.floor(Date.now() / 1000);
+    if (!latest || latest.closes < now) return null;
+    const wait = Math.max(1, latest.closes - now + 1);
+    return json(
+      { error: "proposal_open", message: `Proposal ${latest.proposalId} is still open. The next one can be opened in ${wait} seconds.`, retryAfter: wait, proposal: latest },
+      { status: 429, headers: { "retry-after": String(wait) } },
+    );
+  };
+
   try {
+    const busy = await openOne();
+    if (busy) return busy;
+    if (!(await ed.proposalGate())) {
+      return json({ error: "proposal_open", message: "A proposal is being opened right now. Try again in a few seconds.", retryAfter: 5 }, { status: 429, headers: { "retry-after": "5" } });
+    }
+    // Asked again now that this request holds the gate.
+    const raced = await openOne();
+    if (raced) return raced;
+  } catch (e) {
+    console.warn(`[edition propose] ${(e as Error).message.split("\n")[0]}`);
+    return json({ error: "read_failed", message: "The chain could not be read. Try again in a moment." }, { status: 503 });
+  }
+  if (!(await allowSpend(rt, "propose", request, 20, 400))) {
+    return json({ error: "rate_limited", message: "This demo opens a limited number of proposals per visitor per day. Try again tomorrow." }, { status: 429 });
+  }
+
+  let hash: `0x${string}`;
+  let blockNumber: bigint;
+  try {
+    const count = await rt.publicClient.readContract({ address: edition.contract, abi: editionAbi, functionName: "proposalCount" });
+    const title = TITLES[Number(count % BigInt(TITLES.length))]!;
     hash = await rt.withOperator(async (nonce) => {
       const { request: tx } = await rt.publicClient.simulateContract({
         account: rt.operator.account,
@@ -59,14 +86,21 @@ export async function POST(request: Request): Promise<Response> {
     });
     const receipt = await rt.publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error("propose reverted");
+    blockNumber = receipt.blockNumber;
   } catch (e) {
-    console.warn(`[edition propose] ${(e as Error).message.split("\n")[0]}`);
+    const message = (e as Error).message.split("\n")[0] ?? "";
+    console.warn(`[edition propose] ${message}`);
+    if (/VoteEditionNoSupply/.test((e as Error).message)) {
+      return json({ error: "no_holders", message: "Nobody holds a unit yet. Claim one first, then open a proposal." }, { status: 409 });
+    }
     return json({ error: "propose_failed", message: "The proposal transaction could not be sent. Try again in a moment." }, { status: 502 });
   }
   // The contract emitted PassUpdate(id). Where no watcher runs, fan it out
-  // now: every issued account is read fresh and its pass is pushed.
+  // after the response: every issued account is read fresh and its pass is
+  // pushed, once. (Where a watcher runs, it does this from the log.)
   if (!rt.config.watchers) {
-    after(() => ed.issuer.onPassUpdate(edition.id).then(() => undefined, (e: Error) => console.warn(`[edition propose] fan-out: ${e.message}`)));
+    after(() => ed.announce(blockNumber).then(() => undefined, (e: Error) => console.warn(`[edition propose] fan-out: ${e.message}`)));
   }
-  return json({ proposal: await ed.currentProposal(), transactionHash: hash });
+  // currentProposal waits out the snapshot second, so this answers votable.
+  return json({ proposal: await ed.currentProposal().catch(() => null), transactionHash: hash });
 }
