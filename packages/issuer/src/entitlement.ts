@@ -61,6 +61,40 @@ export function ownerOnly(): EntitlementPolicy {
   };
 }
 
+export interface MinimumBalanceOptions {
+  /// The holding that entitles an account. Default 1. An issuer that uses
+  ///  another value documents it per id.
+  minimum?: bigint | number;
+}
+
+/// ERC-1155 entitlement (working draft of the ERC-1155 binding): an account
+///  is entitled when a fresh `balanceOf(account, id)` is at least the minimum
+///  holding. There is no owner to compare against; the claimed account's own
+///  balance is the whole test.
+///
+///  What this read proves and does not: that the account holds at least the
+///  minimum now. Where an id has a supply above one its units have no
+///  identity, so the read never proves that a unit is unused. An entitlement
+///  that can be used up needs its own id with a supply of one, an action
+///  that changes the balance in the same transaction, or an id that cannot
+///  move for the period; a record of use kept against the account does not
+///  close it.
+export function minimumBalance(options: MinimumBalanceOptions = {}): EntitlementPolicy {
+  const raw = options.minimum ?? 1n;
+  if (typeof raw === "number" && !Number.isSafeInteger(raw)) throw new Error(`invalid minimum: ${raw}`);
+  const minimum = BigInt(raw);
+  // A minimum of zero would entitle every account that has ever been named.
+  if (minimum < 1n) throw new Error(`invalid minimum: ${minimum} (must be at least 1)`);
+  return {
+    name: "minimumBalance",
+    async evaluate({ token, account, reader }) {
+      if (!reader.balanceOf) throw new Error("minimumBalance needs a ChainReader with balanceOf (publicClientChainReader provides it)");
+      const balance = await reader.balanceOf(token, account);
+      return balance >= minimum ? { decision: "allow", via: "balance" } : { decision: "abstain" };
+    },
+  };
+}
+
 export interface Rental4907Options {
   /// An active rental is exclusive of the owner (and of everyone else) for
   ///  the actions it covers. Default true, as the spec RECOMMENDS: "A rental

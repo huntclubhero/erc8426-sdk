@@ -1,5 +1,5 @@
 import { BaseError, ContractFunctionRevertedError, getAddress, isAddressEqual, zeroAddress, type Address, type Hex } from "viem";
-import { erc4907Abi, erc721Abi, type TokenRef } from "@erc8426/core";
+import { erc1155Abi, erc4907Abi, erc721Abi, type TokenRef } from "@erc8426/core";
 
 /// Fresh chain reads for check (2).
 ///
@@ -17,6 +17,11 @@ export interface ChainReader {
   /// The current owner, or null when the token has none (never minted or
   ///  burned: `ownerOf` reverted or returned the zero address).
   ownerOf(token: TokenRef): Promise<Address | null>;
+  /// ERC-1155 `balanceOf(account, id)` for the id the token names. Zero is
+  ///  an answer (the account holds none); a read that could not be taken
+  ///  throws. Needed only by the `minimumBalance` policy (working draft of
+  ///  the ERC-1155 binding).
+  balanceOf?(token: TokenRef, account: Address): Promise<bigint>;
   /// ERC-4907 rental state. `user` is null when there is no user. Needed only
   ///  by the `rental4907` policy.
   userOf?(token: TokenRef): Promise<{ user: Address | null; expires: bigint }>;
@@ -138,6 +143,20 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
         if (isNonexistentTokenRevert(error)) return null;
         throw error;
       }
+    },
+
+    async balanceOf(token, account) {
+      // No revert is read as an answer here: ERC-1155 returns zero for an id
+      // nobody holds, so any failure is a read that could not be taken.
+      const balance = await client.readContract({
+        address: token.contract,
+        abi: erc1155Abi,
+        functionName: "balanceOf",
+        args: [account, BigInt(token.tokenId)],
+        blockTag,
+      });
+      if (typeof balance !== "bigint") throw new Error(`unexpected read result: ${String(balance)}`);
+      return balance;
     },
 
     async userOf(token) {
