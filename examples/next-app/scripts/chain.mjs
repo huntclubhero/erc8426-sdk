@@ -128,7 +128,25 @@ const opHash = await wallet.writeContract({
 });
 await publicClient.waitForTransactionReceipt({ hash: opHash });
 
+// The ERC-1155 edition (working draft of the ERC-1155 binding): an open
+// claim of up to 3 units per account, served by a second issuer under
+// /edition-pass.
+const editionArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/EditionPass.json"), "utf8"));
+const editionHash = await wallet.deployContract({
+  abi: editionArtifact.abi,
+  bytecode: editionArtifact.bytecode,
+  args: [`${baseUrl}/edition-meta/{id}.json`, `${baseUrl}/edition-pass/`, operator.address, 3n],
+});
+const editionReceipt = await publicClient.waitForTransactionReceipt({ hash: editionHash });
+const edition = editionReceipt.contractAddress;
+if (!edition) throw new Error("the edition deployment produced no contract address");
+const openHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setOpen", args: [1n, true] });
+await publicClient.waitForTransactionReceipt({ hash: openHash });
+
 writeEnv({
+  EDITION_CONTRACT_ADDRESS: edition,
+  EDITION_ID: "1",
+  EDITION_DEPLOY_BLOCK: String(editionReceipt.blockNumber),
   RPC_URL: rpcUrl,
   CHAIN_ID: String(chainId),
   CONTRACT_ADDRESS: contract,
@@ -140,6 +158,7 @@ writeEnv({
 
 console.log("");
 console.log(`PetPass    ${contract}`);
+console.log(`Edition    ${edition} (ERC-1155 draft, id 1 open)`);
 console.log(`Operator   ${operator.address}`);
 console.log(`Chain      ${chainId} at ${rpcUrl}`);
 console.log(`Wrote      ${envPath}`);

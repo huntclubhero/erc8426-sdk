@@ -33,6 +33,19 @@ export interface ServerConfig {
   networkLabel: string;
   apple: AppleEnv | null;
   google: GoogleEnv | null;
+  /// The ERC-1155 edition (working draft of the ERC-1155 binding). Null
+  ///  unless EDITION_CONTRACT_ADDRESS is set: the pet flow does not need it.
+  edition: EditionEnv | null;
+}
+
+export interface EditionEnv {
+  /// An EditionPass deployment whose passBaseURI is
+  ///  NEXT_PUBLIC_BASE_URL + "/edition-pass/".
+  contract: Address;
+  /// The one id this demo serves.
+  id: bigint;
+  deployBlock: bigint;
+  googleClassSuffix: string;
 }
 
 export interface AppleEnv {
@@ -64,6 +77,7 @@ export interface PublicConfig {
   platforms: string[];
   /// Shown in the header so nobody mistakes the demo for a product.
   networkLabel: string;
+  edition: { contract: Address; id: string } | null;
 }
 
 export type ConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
@@ -132,6 +146,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
   if (!isAddress(env.CONTRACT_ADDRESS!)) return { ok: false, error: "CONTRACT_ADDRESS is not an address" };
   if (!/^0x[0-9a-fA-F]{64}$/.test(env.OPERATOR_PRIVATE_KEY!)) return { ok: false, error: "OPERATOR_PRIVATE_KEY is not a 32-byte hex key" };
 
+  if (env.EDITION_CONTRACT_ADDRESS && !isAddress(env.EDITION_CONTRACT_ADDRESS)) return { ok: false, error: "EDITION_CONTRACT_ADDRESS is not an address" };
+  if (env.EDITION_ID && !/^\d+$/.test(env.EDITION_ID)) return { ok: false, error: "EDITION_ID must be a decimal id" };
+
   const baseUrl = (env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000").replace(/\/+$/, "");
   let domain: string;
   try {
@@ -162,6 +179,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       networkLabel: env.NETWORK_LABEL || (chainId === ANVIL_CHAIN_ID ? "Local chain" : `Testnet ${chainId}`),
       apple: appleEnv(env),
       google: googleEnv(env),
+      edition: env.EDITION_CONTRACT_ADDRESS
+        ? {
+            contract: getAddress(env.EDITION_CONTRACT_ADDRESS),
+            id: BigInt(env.EDITION_ID || "1"),
+            deployBlock: BigInt(env.EDITION_DEPLOY_BLOCK || "0"),
+            googleClassSuffix: env.GOOGLE_EDITION_CLASS_SUFFIX || "erc8426_edition_example",
+          }
+        : null,
     },
   };
 }
@@ -178,5 +203,6 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     mintEnabled: config.mintEnabled,
     networkLabel: config.networkLabel,
     platforms: [...(config.apple ? ["apple"] : []), ...(config.google ? ["google"] : [])],
+    edition: config.edition ? { contract: config.edition.contract, id: config.edition.id.toString() } : null,
   };
 }

@@ -24,7 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         </a>
         {loaded.ok ? (
           <Providers config={publicConfig(loaded.config)}>
-            <Header network={loaded.config.networkLabel} />
+            <Header network={loaded.config.networkLabel} edition={loaded.config.edition !== null} />
             <main id="main" className="container">
               {children}
             </main>
@@ -45,7 +45,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   );
 }
 
-function Header({ network }: { network: string }) {
+function Header({ network, edition }: { network: string; edition: boolean }) {
   return (
     <header className="header">
       <div className="container header-inner">
@@ -64,6 +64,11 @@ function Header({ network }: { network: string }) {
             <li>
               <Link href="/passes">My passes</Link>
             </li>
+            {edition ? (
+              <li>
+                <Link href="/edition">Edition (1155 draft)</Link>
+              </li>
+            ) : null}
           </ul>
         </nav>
         <ConnectButton />

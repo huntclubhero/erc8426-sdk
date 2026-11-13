@@ -27,6 +27,21 @@ Open http://localhost:3000, click **Use dev wallet** (or connect a browser walle
 | My passes | The pets you own now, from Transfer logs plus a fresh `ownerOf`. |
 | Pass detail | Public on-chain state; **Unlock my pass** (gated manifest with a signed `acquire` proof); a live front and back preview of the pass; Add to Apple Wallet and Save to Google Wallet buttons when configured; care on the **signed path** (`client.signedAction`) and on the **capability path** (the links from the back of the pass); **Reset my pass links** (`client.rotatePassLinks`); a transfer form, after which your proof gets exactly 403 and your old links stop working; a live `PassUpdate` feed (`usePassUpdates`); and an activity log showing every status code. |
 
+## The ERC-1155 edition (working draft)
+
+The **Edition** page tries out a draft binding of ERC-8426 to ERC-1155. It is not part of the standard; it is here so the draft can be used before it is proposed. An ERC-1155 id has many holders and balances, so there is no "the owner":
+
+- A pass belongs to an id **and an account**. Two holders of the same edition hold two passes, each with its own links.
+- An account is entitled while a fresh `balanceOf(account, id)` is at least 1.
+- Sending away one unit of three changes nothing. Sending the last one loses the pass: the fresh read refuses the old links at once (403), and the issuer retires them when it catches up (404).
+- Holding again later is a first claim with new links, never the retired ones.
+- A holder can reset its own links and nobody else's.
+- The contract reuses the ERC-8426 interface id (`0xef5f1e71`): `passURI(uint256)` is the same function.
+
+On the page: claim up to 3 units of edition 1 (free, open, testnet only), unlock your pass, stamp it with a signature or with the pass link, send units to another address and try the old link.
+
+It is a second issuer in the same app (`lib/edition.ts`), with `standard: "erc1155"`, under `/edition-pass`, against `EditionPass` from `@erc8426/contracts`. It is off unless `EDITION_CONTRACT_ADDRESS` is set; `pnpm chain` deploys one locally. `node scripts/smoke-edition.mjs` runs the whole flow headlessly against the running app.
+
 ## Architecture
 
 ```text
