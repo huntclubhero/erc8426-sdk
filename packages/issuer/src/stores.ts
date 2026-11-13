@@ -106,12 +106,14 @@ export interface PassStore {
   /// OPTIONAL index of every token with a record, used to serve a
   ///  BatchPassUpdate range wider than `maxBatchRange`.
   tokenIds?(): Promise<string[]>;
-  /// Every account a record was ever written for under `tokenId`. REQUIRED
-  ///  for the ERC-1155 binding (the issuer refuses to start without it) and
-  ///  unused for ERC-721. It is what lets the issuer push a PassUpdate to
-  ///  every pass of an id and read the balances of the accounts it issued
-  ///  to, with no index of the chain's holders. The list only grows; the
-  ///  issuer skips accounts whose record is no longer issued.
+  /// The accounts currently issued a pass of `tokenId`: those with a record
+  ///  whose `lastIssuedTo` is set (a dark pass counts, a retired one does
+  ///  not). REQUIRED for the ERC-1155 binding (the issuer refuses to start
+  ///  without it) and unused for ERC-721. It is what lets the issuer push a
+  ///  PassUpdate to every pass of an id and read the balances of the
+  ///  accounts it issued to, with no index of the chain's holders. A store
+  ///  MAY return more (accounts whose pass was retired); the issuer skips
+  ///  them. It must not return fewer.
   accounts?(tokenId: string): Promise<Address[]>;
 }
 
@@ -209,7 +211,7 @@ export function memoryStores(options: MemoryStoreOptions = {}): IssuerStores {
         return [...new Set([...passes.values()].map((r) => r.tokenId))];
       },
       async accounts(tokenId) {
-        return [...passes.values()].filter((r) => r.tokenId === tokenId && r.account).map((r) => r.account!);
+        return [...passes.values()].filter((r) => r.tokenId === tokenId && r.account && r.lastIssuedTo !== null).map((r) => r.account!);
       },
     },
     links: {
@@ -253,6 +255,15 @@ export interface KeyValueStore {
   ///  across instances; without it the limiter reads and writes the counter
   ///  back and may undercount racing attempts.
   incr?(key: string, ttlSeconds: number): Promise<number>;
+  /// OPTIONAL, all three or none: an unordered set of strings under a key
+  ///  (Redis SADD, SREM, SMEMBERS). `kvStores` keeps the accounts issued a
+  ///  pass of an ERC-1155 id in one. Adding and removing must each be
+  ///  atomic. Without them the list is a JSON array that is read and written
+  ///  back, which two claims racing each other can get wrong; give an
+  ///  ERC-1155 issuer behind more than one instance the set operations.
+  setAdd?(key: string, member: string): Promise<void>;
+  setRemove?(key: string, member: string): Promise<void>;
+  setMembers?(key: string): Promise<string[]>;
 }
 
 export interface KvStoresOptions {
@@ -297,15 +308,34 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
   const nonceKey = (n: string) => `${ns}nonce:${n}`;
   const passKey = (t: string) => `${ns}pass:${t}`;
   const linkKey = (l: string) => `${ns}link:${l}`;
-  // ERC-1155 binding: the accounts with a record under an id, as one JSON
-  // array per id. The surface has no set type, so adding is a read then a
-  // write: two first claims for one id racing each other can drop one
-  // account from the list. Every later write of that account's record puts
-  // it back, and until then the only thing lost is the proactive retirement
-  // and the PassUpdate push for it; the fresh entitlement read still
-  // refuses its links.
+  // ERC-1155 binding: the accounts currently issued a pass of an id (a
+  // record whose `lastIssuedTo` is set; a dark pass counts). An account is
+  // added when it is issued to and removed when its pass is retired, so the
+  // list is the live passes and not every account that ever claimed.
+  //
+  // With the store's set operations each change is one atomic call. Without
+  // them the list is one JSON array per id, read and written back, and two
+  // changes racing each other can lose one: the write is re-read and retried
+  // a few times, which narrows that and does not close it. An account
+  // missing from the list is still refused by the fresh entitlement read,
+  // and is still found when a transfer names it; what it misses is the
+  // PassUpdate push and the periodic holdings check.
   const issuedKey = (t: string) => `${ns}issued:${t}`;
+  const holdersKey = (t: string) => `${ns}holders:${t}`;
+  const hasSets = typeof kv.setAdd === "function" && typeof kv.setRemove === "function" && typeof kv.setMembers === "function";
   const readIssued = async (tokenId: string) => parse<string[]>(await kv.get(issuedKey(tokenId))) ?? [];
+  const setIssued = async (tokenId: string, account: string, member: boolean): Promise<void> => {
+    if (hasSets) {
+      if (member) await kv.setAdd!(holdersKey(tokenId), account);
+      else await kv.setRemove!(holdersKey(tokenId), account);
+      return;
+    }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const issued = await readIssued(tokenId);
+      if (issued.includes(account) === member) return;
+      await kv.set(issuedKey(tokenId), JSON.stringify(member ? [...issued, account] : issued.filter((a) => a !== account)));
+    }
+  };
   // A client that parses JSON on read (@upstash/redis does by default, as
   // does Vercel KV) hands back the object rather than the string we wrote.
   // Accept both, so a shim written either way works.
@@ -364,12 +394,11 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
       async put(record) {
         await kv.set(passKey(passRecordKey(record)), JSON.stringify(record));
         if (!record.account) return;
-        const account = record.account.toLowerCase();
-        const issued = await readIssued(record.tokenId);
-        if (!issued.includes(account)) await kv.set(issuedKey(record.tokenId), JSON.stringify([...issued, account]));
+        await setIssued(record.tokenId, record.account.toLowerCase(), record.lastIssuedTo !== null);
       },
       async accounts(tokenId) {
-        return (await readIssued(tokenId)).map((a) => getAddress(a));
+        const members = hasSets ? await kv.setMembers!(holdersKey(tokenId)) : await readIssued(tokenId);
+        return members.map((a) => getAddress(a));
       },
     },
     links: {
@@ -391,6 +420,7 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
 export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & { size(): number } {
   const now = options.now ?? Date.now;
   const map = new Map<string, { value: string; expiresAt: number | null }>();
+  const sets = new Map<string, Set<string>>();
   // Expired keys are dropped on access and by a periodic sweep on write, as
   // Redis expires keys nobody reads again.
   let lastSweep = now();
@@ -426,6 +456,17 @@ export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & 
     },
     async del(key) {
       map.delete(key);
+    },
+    async setAdd(key, member) {
+      let set = sets.get(key);
+      if (!set) sets.set(key, (set = new Set()));
+      set.add(member);
+    },
+    async setRemove(key, member) {
+      sets.get(key)?.delete(member);
+    },
+    async setMembers(key) {
+      return [...(sets.get(key) ?? [])];
     },
     async incr(key, ttlSeconds) {
       sweep();

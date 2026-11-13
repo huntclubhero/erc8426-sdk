@@ -131,6 +131,29 @@ function googleEnv(env: NodeJS.ProcessEnv): GoogleEnv | null {
   }
 }
 
+/// The optional edition. A bad value here switches the edition off with a
+/// warning and never takes the pet flow down with it. An edition at the pet
+/// contract's own address is refused: the two issuers would share every
+/// record, nonce and cursor.
+function editionEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
+  const address = env.EDITION_CONTRACT_ADDRESS;
+  if (!address) return null;
+  const off = (why: string) => {
+    console.warn(`[config] edition disabled: ${why}`);
+    return null;
+  };
+  if (!isAddress(address)) return off("EDITION_CONTRACT_ADDRESS is not an address");
+  if (env.CONTRACT_ADDRESS && address.toLowerCase() === env.CONTRACT_ADDRESS.toLowerCase()) return off("EDITION_CONTRACT_ADDRESS is the pet contract");
+  if (env.EDITION_ID && !/^\d+$/.test(env.EDITION_ID)) return off("EDITION_ID must be a decimal id");
+  if (env.EDITION_DEPLOY_BLOCK && !/^\d+$/.test(env.EDITION_DEPLOY_BLOCK)) return off("EDITION_DEPLOY_BLOCK must be a block number");
+  return {
+    contract: getAddress(address),
+    id: BigInt(env.EDITION_ID || "1"),
+    deployBlock: BigInt(env.EDITION_DEPLOY_BLOCK || "0"),
+    googleClassSuffix: env.GOOGLE_EDITION_CLASS_SUFFIX || "erc8426_edition_example",
+  };
+}
+
 function positiveInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
@@ -145,9 +168,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return { ok: false, error: "CHAIN_ID must be a positive integer" };
   if (!isAddress(env.CONTRACT_ADDRESS!)) return { ok: false, error: "CONTRACT_ADDRESS is not an address" };
   if (!/^0x[0-9a-fA-F]{64}$/.test(env.OPERATOR_PRIVATE_KEY!)) return { ok: false, error: "OPERATOR_PRIVATE_KEY is not a 32-byte hex key" };
-
-  if (env.EDITION_CONTRACT_ADDRESS && !isAddress(env.EDITION_CONTRACT_ADDRESS)) return { ok: false, error: "EDITION_CONTRACT_ADDRESS is not an address" };
-  if (env.EDITION_ID && !/^\d+$/.test(env.EDITION_ID)) return { ok: false, error: "EDITION_ID must be a decimal id" };
 
   const baseUrl = (env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000").replace(/\/+$/, "");
   let domain: string;
@@ -166,7 +186,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       operatorKey: env.OPERATOR_PRIVATE_KEY as Hex,
       baseUrl,
       domain,
-      deployBlock: BigInt(env.DEPLOY_BLOCK || "0"),
+      deployBlock: BigInt(/^\d+$/.test(env.DEPLOY_BLOCK ?? "") ? env.DEPLOY_BLOCK! : "0"),
       // Belt and braces: the flag AND an anvil chain id, so a testnet deploy
       // with a copied .env never exposes a faucet.
       devWallet: env.DEV_WALLET === "1" && chainId === ANVIL_CHAIN_ID,
@@ -179,14 +199,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       networkLabel: env.NETWORK_LABEL || (chainId === ANVIL_CHAIN_ID ? "Local chain" : `Testnet ${chainId}`),
       apple: appleEnv(env),
       google: googleEnv(env),
-      edition: env.EDITION_CONTRACT_ADDRESS
-        ? {
-            contract: getAddress(env.EDITION_CONTRACT_ADDRESS),
-            id: BigInt(env.EDITION_ID || "1"),
-            deployBlock: BigInt(env.EDITION_DEPLOY_BLOCK || "0"),
-            googleClassSuffix: env.GOOGLE_EDITION_CLASS_SUFFIX || "erc8426_edition_example",
-          }
-        : null,
+      edition: editionEnv(env),
     },
   };
 }

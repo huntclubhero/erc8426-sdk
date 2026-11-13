@@ -283,6 +283,31 @@ contract ERC1155WalletPassTest is Test {
         ticket.usedId(used);
     }
 
+    function test_SwapOnRedeemAUsedIdHasNoPassEndpoint() public {
+        SwapOnRedeemTicket ticket = new SwapOnRedeemTicket("https://meta.example/{id}.json", BASE, address(this));
+        ticket.mint(alice, 77, 1);
+        assertEq(ticket.passURI(77), string.concat(BASE, "77"));
+        vm.prank(alice);
+        ticket.redeem(77);
+        // The used id has supply now, and still no pass.
+        uint256 used = ticket.usedId(77);
+        assertEq(ticket.totalSupply(used), 1);
+        vm.expectRevert(abi.encodeWithSelector(SwapOnRedeemTicket.SwapOnRedeemTicketNotLiveId.selector, used));
+        ticket.passURI(used);
+    }
+
+    function test_OptInIsNotTriggeredByATransferOfZeroUnits() public {
+        LoudTransfer1155Harness loud = new LoudTransfer1155Harness(BASE);
+        loud.mint(alice, 1, 3);
+        vm.recordLogs();
+        // Anyone, holding nothing, can send zero units of any id.
+        vm.prank(bob);
+        loud.safeTransferFrom(bob, alice, 1, 0, "");
+        vm.prank(bob);
+        loud.safeTransferFrom(bob, alice, 999, 0, "");
+        assertEq(_passUpdateCount(vm.getRecordedLogs()), 0);
+    }
+
     function test_SwapOnRedeemOnlyTheOwnerMints() public {
         SwapOnRedeemTicket ticket = new SwapOnRedeemTicket("https://meta.example/{id}.json", BASE, address(this));
         vm.prank(alice);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { getAddress, isAddress, parseAbi } from "viem";
 import type { PassContent, PassManifest } from "@erc8426/core";
 import { WalletPassError } from "@erc8426/core";
@@ -18,6 +18,7 @@ import { NeedWallet, useWallet } from "./wallet";
 /// and the contract do.
 
 const editionAbi = parseAbi([
+  "function balanceOf(address account, uint256 id) view returns (uint256)",
   "function claim(uint256 id, uint256 amount)",
   "function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes data)",
 ]);
@@ -92,18 +93,38 @@ export function EditionDetail() {
     setActivity((a) => [{ id: Date.now() + Math.random(), title, ok, detail }, ...a].slice(0, 20));
   }, []);
 
-  const load = useCallback(async () => {
-    const res = await fetch(`/api/edition${address ? `?account=${address}` : ""}`);
-    if (res.status === 404) return setState(null);
-    if (!res.ok) return;
-    setState((await res.json()) as EditionState);
+  // The connected account right now. Anything that finishes for an account
+  // that is no longer the connected one is dropped, so one account's pass,
+  // links or balance never land on screen under another.
+  const current = useRef(address);
+  current.current = address;
+  const [failed, setFailed] = useState(false);
+
+  const load = useCallback(async (): Promise<EditionState | null> => {
+    const who = address;
+    const res = await fetch(`/api/edition${who ? `?account=${who}` : ""}`).catch(() => null);
+    if (current.current !== who) return null;
+    if (res?.status === 404) {
+      setState(null);
+      return null;
+    }
+    if (!res?.ok) {
+      setFailed(true);
+      return null;
+    }
+    const next = (await res.json()) as EditionState;
+    if (current.current !== who) return null;
+    setFailed(false);
+    setState(next);
+    return next;
   }, [address]);
 
   useEffect(() => {
     void load();
-    // Another account means another pass: drop what the last one unlocked.
+    // Another account means another pass: drop everything the last one did.
     setUnlocked(null);
     setPreviousLinks(null);
+    setActivity([]);
   }, [load]);
 
   const run = async (label: string, fn: () => Promise<void>) => {
@@ -139,24 +160,32 @@ export function EditionDetail() {
 
   const unlock = () =>
     run("unlock", async () => {
+      const who = address;
       try {
         const r = await passes.getManifest(token, { signer: signer ?? undefined });
+        if (current.current !== who) return;
         log("Manifest resolved", true, `HTTP 200 after a signed acquire proof. The challenge named this token as erc1155 and named your account. Formats: ${Object.keys(r.manifest.formats).join(", ")}.`);
         const previewUrl = r.manifest.formats.preview;
         if (!previewUrl) throw new Error("the manifest has no preview format");
         const res = await fetch(previewUrl, { headers: { accept: "application/json" } });
         if (!res.ok) throw new Error(`preview download answered HTTP ${res.status}`);
-        setUnlocked({ manifest: r.manifest, content: (await res.json()) as PassContent });
+        const content = (await res.json()) as PassContent;
+        if (current.current !== who) return;
+        setUnlocked({ manifest: r.manifest, content });
       } catch (e) {
+        if (current.current !== who) return;
         setUnlocked(null);
         log("Manifest refused", false, describe(e));
       }
     });
 
   const refreshPreview = async () => {
+    const who = address;
     if (!unlocked?.manifest.formats.preview) return;
-    const res = await fetch(unlocked.manifest.formats.preview, { headers: { accept: "application/json" } });
-    if (res.ok) setUnlocked({ manifest: unlocked.manifest, content: (await res.json()) as PassContent });
+    const res = await fetch(unlocked.manifest.formats.preview, { headers: { accept: "application/json" } }).catch(() => null);
+    if (!res?.ok) return;
+    const content = (await res.json()) as PassContent;
+    if (current.current === who) setUnlocked({ manifest: unlocked.manifest, content });
   };
 
   const signedVote = (action: VoteAction) =>
@@ -176,7 +205,9 @@ export function EditionDetail() {
     run(`link-${key}`, async () => {
       const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: "{}" });
       const body = (await res.json().catch(() => null)) as { error?: string; message?: string } | null;
-      if (res.ok) {
+      if (res.ok && res.headers.get("x-wallet-pass-repeat") === "true") {
+        log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}, a repeat. The issuer answered with the outcome of the same tap a moment ago and did not run it again.`);
+      } else if (res.ok) {
         log(`${label}: ${key} (capability path)`, true, `HTTP ${res.status}. No signature: the link stood in for it. The contract recorded it as a link vote, which you can replace once with a signed vote while the proposal is open.`);
       } else {
         const why = res.status === 403 ? " The link is still known, but the account it was issued to no longer holds a unit." : res.status === 404 ? " The link has been retired." : "";
@@ -228,24 +259,43 @@ export function EditionDetail() {
           functionName: "safeTransferFrom",
           args: [address, getAddress(sendTo), BigInt(edition.id), amount, "0x"],
         });
-        await publicClient.waitForTransactionReceipt({ hash });
-        const left = BigInt(state?.holder?.balance ?? "0") - amount;
+        const receipt = await publicClient.waitForTransactionReceipt({ hash });
+        // What is left is read from the chain at the block of the transfer,
+        // never worked out from what this page last showed.
+        const left = await publicClient.readContract({
+          address: edition.contract,
+          abi: editionAbi,
+          functionName: "balanceOf",
+          args: [address, BigInt(edition.id)],
+          blockNumber: receipt.blockNumber,
+        });
         if (left < 1n) {
           setPreviousLinks(before);
           setUnlocked(null);
-          log("Sent", true, `${amount} to ${shortHex(sendTo)}. You hold none now, so you lost the pass. Try the old link below: the fresh balance read refuses it (403), and once the issuer catches up it is retired (404).`);
+          log("Sent", true, `${amount} to ${shortHex(sendTo)}. You hold none now, so you lost the pass. Try an old link below: the issuer reads your balance, refuses (403) and retires the link on the spot (404 from then on), even if a unit comes back.`);
         } else {
-          log("Sent", true, `${amount} to ${shortHex(sendTo)}. You still hold ${left}, so nothing about your pass changed. Try your link: it still works.`);
+          log("Sent", true, `${amount} to ${shortHex(sendTo)}. You still hold ${left}. Your pass keeps its serial and its links, and is told its new count.`);
         }
         await catchUp();
-        await load();
+        await Promise.all([load(), left < 1n ? Promise.resolve() : refreshPreview()]);
       } catch (e) {
         log("Send failed", false, describe(e));
       }
     });
   };
 
-  if (state === undefined) return <p aria-live="polite">Reading the chain...</p>;
+  if (state === undefined) {
+    return failed ? (
+      <p className="notice" role="alert">
+        The chain could not be read.{" "}
+        <button type="button" className="btn btn-quiet" onClick={() => void load()}>
+          Try again
+        </button>
+      </p>
+    ) : (
+      <p aria-live="polite">Reading the chain...</p>
+    );
+  }
   if (state === null) return <p className="notice">This instance has no edition configured.</p>;
 
   const holder = state.holder;
@@ -458,7 +508,7 @@ export function EditionDetail() {
                 Send units
               </h2>
               <p className="muted small">
-                Send some and keep at least one: your pass and its links stay exactly as they are. Send them all: you lose the pass, and your links stop working. The receiver gets their own pass with their own links, never yours.
+                Send some and keep at least one: your pass keeps its links and shows the new count. Send them all: you lose the pass, and your links stop working. Units you send after a proposal opened still vote from your account on that proposal, not from the receiver's. The receiver gets their own pass with their own links, never yours.
               </p>
               <form onSubmit={send} className="inline-form">
                 <label htmlFor="send-to">Recipient address</label>

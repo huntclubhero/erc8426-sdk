@@ -294,7 +294,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         params: input.params,
         request: input.request,
         notifyUpdate: async () => {
-          await x.onPassUpdate(input.tokenId);
+          await x.notifyAction(input.tokenId, input.account);
         },
       });
       return json(200, {
@@ -523,7 +523,13 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       // A sold token behind a still-live link stops acting here, before any
       // rotation catches up. What this does NOT close is forwarding under an
       // unchanged owner: the residual the capability configuration discloses.
-      if (!entitled.entitled) return error("not_owner");
+      if (!entitled.entitled) {
+        // The issuer just took the read that shows the loss, so it acts on
+        // it now (ERC-1155): otherwise this link would answer again when
+        // the balance came back.
+        await x.lost(record);
+        return error("not_owner");
+      }
       return execute(def, {
         tokenId: binding.tokenId,
         action: binding.name,
@@ -551,7 +557,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     } catch {
       return error("read_failed");
     }
-    if (!entitled.entitled) return error("not_owner");
+    if (!entitled.entitled) {
+      await x.lost(record);
+      return error("not_owner");
+    }
     const content = await x.renderContent(record, holder, false);
     const file = await provider.passFile({ token: x.token(record.tokenId), owner: holder, content });
     const headers: Record<string, string> = { "Content-Type": file.contentType, "Cache-Control": "no-store" };

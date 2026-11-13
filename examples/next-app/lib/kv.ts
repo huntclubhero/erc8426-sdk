@@ -36,6 +36,11 @@ export function upstashKv(redis: Redis): KeyValueStore {
     },
     getDel: (k) => redis.getdel<string>(k),
     del: async (k) => void (await redis.del(k)),
+    // Atomic set operations, which keep the ERC-1155 issuer's list of
+    // issued accounts exact when several instances write it at once.
+    setAdd: async (k, member) => void (await redis.sadd(k, member)),
+    setRemove: async (k, member) => void (await redis.srem(k, member)),
+    setMembers: async (k) => (await redis.smembers(k)).map(String),
     // INCR, with the expiry set when the counter is created, so the rate
     // limiter's count is exact across instances (without incr the limiter
     // reads and writes the counter back and racing requests undercount).

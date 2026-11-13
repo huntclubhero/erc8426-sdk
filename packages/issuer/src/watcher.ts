@@ -84,8 +84,18 @@ export function watchTransfers1155(options: WatchOptions): () => void {
       for (const log of logs) {
         if (log.removed) continue;
         const { from, to } = log.args as { from: Address; to: Address };
+        // A transfer of zero units changes no balance, and anyone can send
+        // one naming any account, so it is not a hint about anything.
+        const moved = (value: unknown) => typeof value !== "bigint" || value > 0n;
+        const values = log.args.values as bigint[] | undefined;
         const ids =
-          log.eventName === "TransferSingle" ? [log.args.id as bigint] : log.eventName === "TransferBatch" ? [...new Set(log.args.ids as bigint[])] : [];
+          log.eventName === "TransferSingle"
+            ? moved(log.args.value)
+              ? [log.args.id as bigint]
+              : []
+            : log.eventName === "TransferBatch"
+              ? [...new Set((log.args.ids as bigint[]).filter((_, i) => moved(values?.[i])))]
+              : [];
         for (const id of ids) {
           try {
             await options.issuer.onTransfer(id, from, to, log.blockNumber ?? undefined);

@@ -75,6 +75,9 @@ export interface HoldingsSummary {
   dark: Address[];
   /// Accounts with a dark pass found holding again: the pass came back.
   revived: Address[];
+  /// "dark" mode with a transfer's block: accounts that hold now but did
+  ///  not at that block. The card stays; its acquisition URLs were replaced.
+  urlsRetired: Address[];
 }
 
 export interface IssuerErrorContext {
@@ -201,10 +204,15 @@ export interface Issuer {
   ///  event. An account that newly reaches the minimum needs nothing here:
   ///  its own first claim serves it.
   ///
-  ///  With `blockNumber` (the block of a transfer log) and "retire", an
-  ///  account that holds now but was below the minimum at that block is
-  ///  retired too. A log redelivered long after the fact can therefore
-  ///  retire a pass claimed since; the holder adds the pass again.
+  ///  With `blockNumber` (the block of a transfer log, and only together
+  ///  with that transfer's `accounts`), an account that holds now but was
+  ///  below the minimum at that block is treated as having lost the pass:
+  ///  retired under "retire", its acquisition URLs replaced under "dark". A
+  ///  pass issued after that block is left alone when the chain reader can
+  ///  tell the block (`ChainReader.blockNumber`), so a log delivered late
+  ///  does not retire a pass claimed since. The read needs the node to
+  ///  still have that block's state; when it does not, nothing changes and
+  ///  read_failed is thrown, so this second read is best effort.
   ///
   ///  A read that could not be taken throws IssuerError read_failed after
   ///  the other accounts are processed, and changes nothing for its account.
@@ -247,6 +255,14 @@ export interface IssuerInternals {
   renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent>;
   resolveLink(linkToken: string, kind: LinkBinding["kind"]): Promise<{ binding: LinkBinding; record: PassRecord } | null>;
   onPassUpdate: Issuer["onPassUpdate"];
+  /// What an action's `notifyUpdate` runs. ERC-721: the token's pass update.
+  ///  ERC-1155: the acting account's pass only, never every holder's.
+  notifyAction(tokenId: string, account: Address): Promise<void>;
+  /// A fresh read on a link or download request found the record's account
+  ///  not entitled. ERC-1155: retire the pass or take it dark now, as a
+  ///  holdings check would. ERC-721: nothing (the new owner's claim or the
+  ///  observed transfer rotates). Never throws.
+  lost(record: PassRecord): Promise<void>;
 }
 
 type RotationReason = "transfer" | "claim" | "owner_request";
@@ -610,14 +626,21 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       await rotateRecord(record, "transfer", null);
       return "retired";
     }
+    const next = await replaceDownloads({ ...record, dark: true, updatedAt: Math.max(nowSeconds(), record.updatedAt) });
+    if (next.lastIssuedTo) await notify(next, next.lastIssuedTo, false, "dark");
+    return "dark";
+  }
+
+  // Replace a record's acquisition URLs and nothing else: same serial, same
+  // card. The old URLs stop resolving.
+  async function replaceDownloads(record: PassRecord): Promise<PassRecord> {
     if (await rebind(record)) await stores.passes.put(record);
     const retired = await Promise.all(Object.values(record.downloads).map((seed) => keyring.digestOfSeed(seed)));
-    const next: PassRecord = { ...record, dark: true, downloads: {}, updatedAt: Math.max(nowSeconds(), record.updatedAt) };
+    const next: PassRecord = { ...record, downloads: {} };
     await fill(next);
     await stores.passes.put(next);
     await stores.links.delete(retired);
-    if (next.lastIssuedTo) await notify(next, next.lastIssuedTo, false, "dark");
-    return "dark";
+    return next;
   }
 
   // A dark pass whose account holds again: the same card, live.
@@ -630,7 +653,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
 
   async function checkHoldings(
     tokenId: string | number | bigint,
-    opts: { accounts?: string[]; blockNumber?: bigint } = {},
+    opts: { accounts?: string[]; blockNumber?: bigint; refresh?: boolean } = {},
   ): Promise<HoldingsSummary> {
     if (!is1155) throw new IssuerError("invalid_request", 'checkHoldings serves standard "erc1155" only');
     let id: string;
@@ -639,10 +662,18 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     } catch {
       throw new IssuerError("invalid_request", `invalid token id: ${String(tokenId)}`);
     }
-    const issued = await stores.passes.accounts!(id);
-    const named = opts.accounts?.filter((a) => typeof a === "string" && isAddress(a, { strict: false })) as Address[] | undefined;
-    const wanted = named ? issued.filter((a) => named.some((b) => isAddressEqual(a, b))) : issued;
-    const summary: HoldingsSummary = { checked: 0, retired: [], dark: [], revived: [] };
+    const named = opts.accounts?.filter((a) => typeof a === "string" && isAddress(a, { strict: false })).map((a) => getAddress(a));
+    // A block says something about the accounts of one transfer. Read for
+    // every issued account it would retire each one that had not yet
+    // acquired its units at that block.
+    if (opts.blockNumber !== undefined && !named) {
+      throw new IssuerError("invalid_request", "checkHoldings takes blockNumber only together with the accounts of that transfer");
+    }
+    // Named accounts are looked up by their own record, never through the
+    // issued list: a transfer that names an account finds its pass even if
+    // the list has lost it.
+    const wanted = named ? [...new Map(named.map((a) => [a.toLowerCase(), a])).values()] : await stores.passes.accounts!(id);
+    const summary: HoldingsSummary = { checked: 0, retired: [], dark: [], revived: [], urlsRetired: [] };
     const failed: Address[] = [];
     for (const account of wanted) {
       const record = await stores.passes.get(keyOf(id, account));
@@ -650,20 +681,19 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       if (!record || record.lastIssuedTo === null) continue;
       summary.checked++;
       let holds: boolean;
+      let heldAtBlock = true;
       try {
         holds = (await internals.entitled(id, account, ACQUIRE_ACTION)).entitled;
         // The fresh read cannot see a balance that left and came back
-        // between two reads. For a pass that is retired on loss that gap
-        // counts, so the block of the transfer that was reported is read
-        // as well. A dark pass comes back anyway, so there it is skipped.
-        // It is skipped as well for a pass issued after that block: the
-        // account was read as holding after whatever the log reports, and
-        // only then got its URLs. Without this, a log delivered late (a
-        // catch-up job, a redelivered webhook) retires the pass an account
-        // claimed after its unit came back.
+        // between two reads, so the block of the transfer that was reported
+        // is read as well. It is skipped for a pass issued after that
+        // block: the account was read as holding after whatever the log
+        // reports, and only then got its URLs. Without that, a log
+        // delivered late (a catch-up job, a redelivered webhook) retires
+        // the pass an account claimed after its unit came back.
         const issuedAfter = opts.blockNumber !== undefined && record.issuedAtBlock !== undefined && BigInt(record.issuedAtBlock) > opts.blockNumber;
-        if (holds && opts.blockNumber !== undefined && config.lostEntitlement === "retire" && !issuedAfter) {
-          holds = (
+        if (holds && opts.blockNumber !== undefined && !issuedAfter && !record.dark) {
+          heldAtBlock = (
             await checkEntitlement(entitlement, { token: token(id), account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: opts.blockNumber })
           ).entitled;
         }
@@ -672,18 +702,67 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         failed.push(account);
         continue;
       }
-      if (!holds) {
+      const retire = config.lostEntitlement === "retire";
+      if (record.dark && retire) {
+        // A pass that went dark under an issuer with no capability links,
+        // now served by one that has them: it does not come back with links
+        // on the same card. Holding or not, the account's next claim is a
+        // first claim.
+        await rotateRecord(record, "transfer", null);
+        summary.retired.push(account);
+      } else if (!holds) {
         if (record.dark) continue;
         summary[(await lose(record)) === "retired" ? "retired" : "dark"].push(account);
       } else if (record.dark) {
         await revive(record);
         summary.revived.push(account);
+      } else if (!heldAtBlock) {
+        // Holds now, did not at the block of the transfer.
+        if (retire) {
+          await rotateRecord(record, "transfer", null);
+          summary.retired.push(account);
+        } else {
+          // The card comes back anyway, but the acquisition URLs are
+          // possession proofs and the possession lapsed.
+          await replaceDownloads(record);
+          summary.urlsRetired.push(account);
+        }
+      } else if (opts.refresh) {
+        // A transfer changed this account's balance and it still holds: the
+        // pass may show the balance, so it is told.
+        record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
+        await stores.passes.put(record);
+        await notify(record, account, false, "update");
       }
     }
     if (failed.length > 0) {
       throw new IssuerError("read_failed", `the fresh entitlement read could not be taken for ${failed.join(", ")} on id ${id}; nothing changed for them`);
     }
     return summary;
+  }
+
+  // ERC-1155: bring one account's pass up to date. A fresh read first, so
+  // content is never pushed to an account that no longer holds. Throws when
+  // the read could not be taken.
+  async function refreshAccount(id: string, account: Address): Promise<"none" | "updated" | "lost"> {
+    const mine = await stores.passes.get(keyOf(id, account));
+    if (!mine || mine.lastIssuedTo === null) return "none";
+    mine.updatedAt = Math.max(nowSeconds(), mine.updatedAt);
+    await stores.passes.put(mine);
+    const holds = (await internals.entitled(id, account, ACQUIRE_ACTION)).entitled;
+    const retire = config.lostEntitlement === "retire";
+    if (mine.dark && retire) {
+      await rotateRecord(mine, "transfer", null);
+      return "lost";
+    }
+    if (!holds) {
+      if (mine.dark) return "updated";
+      await lose(mine);
+      return "lost";
+    }
+    if (mine.dark) await revive(mine);
+    else await notify(mine, account, false, "update");
+    return "updated";
   }
 
   const internals: IssuerInternals = {
@@ -748,8 +827,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         // with nobody issued (new, or retired since) makes this a first
         // claim: the links it holds were minted at creation or at the
         // retirement and nobody has seen them. A dark pass comes back.
-        const mine = await loadOrCreate(tokenId, account);
+        let mine = await loadOrCreate(tokenId, account);
         if (mine.lastIssuedTo !== null && !mine.dark) return mine;
+        // A dark pass under an issuer that now has capability links does
+        // not come back on the same card: retire it, then a first claim.
+        if (mine.dark && config.lostEntitlement === "retire") mine = await rotateRecord(mine, "transfer", null);
         const wasDark = mine.dark === true && mine.lastIssuedTo !== null;
         mine.lastIssuedTo = account;
         // Date the issuance, so a transfer log from before it is not held
@@ -828,6 +910,23 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return (await keyring.token(seed)) === linkToken ? { binding, record } : null;
     },
 
+    async notifyAction(tokenId, account) {
+      if (!is1155) {
+        await internals.onPassUpdate(tokenId);
+        return;
+      }
+      // One holder's action concerns that holder's pass. Every other pass
+      // of the id is left alone: no read, no push.
+      await refreshAccount(normalizeTokenId(tokenId), account);
+    },
+    async lost(record) {
+      if (!is1155 || record.lastIssuedTo === null || record.dark) return;
+      try {
+        await lose(record);
+      } catch (error) {
+        onError(error, { operation: "holdings:lost", tokenId: record.tokenId });
+      }
+    },
     async onPassUpdate(fromTokenId, toTokenId) {
       let from: bigint;
       let to: bigint;
@@ -863,25 +962,18 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           // first, so content is never pushed to an account that no longer
           // holds.
           for (const account of await stores.passes.accounts!(id)) {
-            const mine = await stores.passes.get(keyOf(id, account));
-            if (!mine || mine.lastIssuedTo === null) continue;
-            mine.updatedAt = Math.max(nowSeconds(), mine.updatedAt);
-            await stores.passes.put(mine);
-            summary.updated++;
-            let holds: boolean;
+            let outcome: "none" | "updated" | "lost";
             try {
-              holds = (await internals.entitled(id, account, ACQUIRE_ACTION)).entitled;
+              outcome = await refreshAccount(id, account);
             } catch (error) {
               onError(error, { operation: "update:read", tokenId: id });
               failed.push(`${id}:${account}`);
+              summary.updated++;
               continue;
             }
-            if (!holds) {
-              if (mine.dark) continue;
-              await lose(mine);
-              summary.rotated.push(`${id}:${account}`);
-            } else if (mine.dark) await revive(mine);
-            else await notify(mine, account, false, "update");
+            if (outcome === "none") continue;
+            summary.updated++;
+            if (outcome === "lost") summary.rotated.push(`${id}:${account}`);
           }
           continue;
         }
@@ -961,8 +1053,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     async onTransfer(tokenId, from, to, blockNumber) {
       const id = normalizeTokenId(tokenId);
       if (is1155) {
-        const s = await checkHoldings(id, { accounts: [from, to], ...(blockNumber === undefined ? {} : { blockNumber }) });
-        return s.retired.length + s.dark.length + s.revived.length > 0;
+        const s = await checkHoldings(id, { accounts: [from, to], refresh: true, ...(blockNumber === undefined ? {} : { blockNumber }) });
+        return s.retired.length + s.dark.length + s.revived.length + s.urlsRetired.length > 0;
       }
       const record = await stores.passes.get(id);
       // Nothing was ever issued for this token: no URL to retire.
@@ -981,6 +1073,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     onPassUpdate: internals.onPassUpdate,
     checkHoldings,
     async capabilityLinksFor(tokenId, account) {
+      if (is1155 && !account) throw new IssuerError("invalid_request", "capabilityLinksFor needs the account under the ERC-1155 binding");
       let record = await stores.passes.get(keyOf(normalizeTokenId(tokenId), account));
       if (record) record = await settle(record);
       return record ? await linkUrls(record) : {};

@@ -329,51 +329,70 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     watchPassUpdates({ client: publicClient, issuer, pollingInterval: 1_000 });
   }
 
-  // Serverless catch-up. The read over the issued accounts is the truth and
-  // needs no log at all; the logs add the block of each transfer, which lets
-  // the issuer see a balance that left and came back between two reads. A
-  // node only keeps old state for a while, so a log read too late fails that
-  // second read and changes nothing: best effort, and reported as such.
+  // Serverless catch-up, in the order of what matters.
+  //
+  // 1. The read over the issued accounts. It is the truth, needs no log, and
+  //    runs first so that nothing in the log step can keep it from running.
+  // 2. The logs since the cursor, one bounded span per call, walking forward
+  //    and never skipping (a PassUpdate must not be lost to a quiet hour).
+  //    A transfer log adds one thing the read cannot see: the block, which
+  //    shows a balance that left and came back between two reads. Only logs
+  //    that moved units between accounts with a pass are looked at. A node
+  //    keeps old state for a while only, so a log read too late fails that
+  //    second read and changes nothing: best effort, and reported as such.
   const SYNC_SPAN = 20_000n;
   const SYNC_EVERY = 60;
   let memoryCursor = edition.deployBlock;
   const sync = async () => {
     if (redis && (await redis.set(`${prefix}sync-lease`, "1", { nx: true, ex: SYNC_EVERY })) !== "OK") return null;
+    const summary = await issuer.checkHoldings(id).catch((e: Error) => {
+      console.warn(`[edition sync] holdings: ${e.message}`);
+      return { checked: 0, retired: [] as Address[] };
+    });
+
     const cursorKey = `${prefix}sync-cursor`;
     const stored = redis ? await redis.get<string>(cursorKey) : null;
     const head = await publicClient.getBlockNumber();
-    let from = stored ? BigInt(stored) : memoryCursor;
-    // Logs older than the span cannot be read at their block anyway; the
-    // balance read below covers whatever they would have reported.
-    if (head - from > SYNC_SPAN) from = head - SYNC_SPAN;
+    const from = stored ? BigInt(stored) : memoryCursor;
     let transfers = 0;
     let updates = 0;
     if (from <= head) {
+      const to = head - from > SYNC_SPAN ? from + SYNC_SPAN : head;
       const [moved, changed] = await Promise.all([
-        publicClient.getContractEvents({ address: edition.contract, abi: editionAbi, fromBlock: from, toBlock: head }),
-        publicClient.getContractEvents({ address: edition.contract, abi: walletPassAbi, fromBlock: from, toBlock: head }),
+        publicClient.getContractEvents({ address: edition.contract, abi: editionAbi, fromBlock: from, toBlock: to }),
+        publicClient.getContractEvents({ address: edition.contract, abi: walletPassAbi, fromBlock: from, toBlock: to }),
       ]);
+      // One read of the issued accounts, then the logs are filtered in
+      // memory: a flood of transfers between strangers costs nothing more.
+      const issued = new Set((await issuer.stores.passes.accounts!(id)).map((a) => a.toLowerCase()));
+      const seen = new Set<string>();
       for (const log of moved) {
-        const args = log.args as { from?: Address; to?: Address; id?: bigint; ids?: readonly bigint[] };
-        if (!args.from || !args.to) continue;
-        const ids = log.eventName === "TransferSingle" ? [args.id!] : [...new Set(args.ids ?? [])];
-        for (const moved1 of ids) {
-          if (moved1 !== edition.id) continue;
-          transfers++;
-          await issuer.onTransfer(moved1, args.from, args.to, log.blockNumber ?? undefined).catch((e: Error) => console.warn(`[edition sync] transfer hint: ${e.message}`));
-        }
+        const args = log.args as { from?: Address; to?: Address; id?: bigint; value?: bigint; ids?: readonly bigint[]; values?: readonly bigint[] };
+        if (!args.from || !args.to || log.blockNumber === null) continue;
+        const units = log.eventName === "TransferSingle" ? (args.id === edition.id ? (args.value ?? 0n) : 0n) : (args.ids ?? []).reduce((n, x, i) => (x === edition.id ? n + (args.values?.[i] ?? 0n) : n), 0n);
+        // Zero units move nothing, and anyone can send them naming anyone.
+        if (units === 0n) continue;
+        if (!issued.has(args.from.toLowerCase()) && !issued.has(args.to.toLowerCase())) continue;
+        const key = `${log.blockNumber}:${args.from.toLowerCase()}:${args.to.toLowerCase()}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        transfers++;
+        await issuer.onTransfer(edition.id, args.from, args.to, log.blockNumber).catch((e: Error) => console.warn(`[edition sync] transfer hint: ${e.message}`));
       }
-      for (const log of changed) {
+      // One fan-out however many PassUpdate logs the span holds.
+      const announced = changed.some((log) => {
         const args = log.args as { tokenId?: bigint; fromTokenId?: bigint; toTokenId?: bigint };
-        updates++;
-        if (log.eventName === "PassUpdate" && args.tokenId !== undefined) await issuer.onPassUpdate(args.tokenId);
-        else if (log.eventName === "BatchPassUpdate" && args.fromTokenId !== undefined) await issuer.onPassUpdate(args.fromTokenId, args.toTokenId);
+        if (log.eventName === "PassUpdate") return args.tokenId === edition.id;
+        return log.eventName === "BatchPassUpdate" && args.fromTokenId !== undefined && args.toTokenId !== undefined && args.fromTokenId <= edition.id && edition.id <= args.toTokenId;
+      });
+      if (announced) {
+        updates = 1;
+        await issuer.onPassUpdate(edition.id).catch((e: Error) => console.warn(`[edition sync] pass update: ${e.message}`));
       }
-      const next = (head + 1n).toString();
-      if (redis) await redis.set(cursorKey, next);
-      else memoryCursor = head + 1n;
+      const next = to + 1n;
+      if (redis) await redis.set(cursorKey, next.toString());
+      else memoryCursor = next;
     }
-    const summary = await issuer.checkHoldings(id);
     return { checked: summary.checked, retired: summary.retired.length, transfers, updates };
   };
 

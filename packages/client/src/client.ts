@@ -258,7 +258,8 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
   // names the requested contract and id under the other standard is refused
   // before signing, so the client has to know which one to expect. Only a
   // contract that passes the ERC-165 procedure and claims ERC-1155 is read
-  // as one; anything else, a failed read included, is ERC-721 as before. A
+  // as one; anything else, a revert included, is ERC-721 as before (a node
+  // that could not be reached is an error, not an answer). A
   // wrong guess cannot widen what gets signed: it only refuses a challenge.
   // Answers are kept per contract; a read that failed is asked again.
   const standards = new Map<string, Promise<TokenStandard>>();
@@ -270,8 +271,14 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
         readContract(publicClient, { address, abi: erc165Abi, functionName: "supportsInterface", args: [interfaceId] });
       known = Promise.all([call("0x01ffc9a7"), call("0xffffffff"), call("0xd9b67a26")]).then(
         ([erc165, invalid, erc1155]): TokenStandard => (erc165 === true && invalid === false && erc1155 === true ? "erc1155" : "erc721"),
-        (): TokenStandard => {
+        (e: unknown): TokenStandard => {
           standards.delete(address);
+          // A node that could not be reached is not an answer. Reading it
+          // as ERC-721 would refuse an honest ERC-1155 issuer's challenge
+          // as a mismatch, which looks like a hostile issuer and is not
+          // something a retry would be offered for.
+          const err = errorFromChainRead(e, "supportsInterface");
+          if (err.code === "network") throw err;
           return "erc721";
         },
       );

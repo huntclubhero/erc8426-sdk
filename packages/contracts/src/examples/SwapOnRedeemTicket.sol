@@ -59,6 +59,16 @@ contract SwapOnRedeemTicket is ERC1155WalletPass, Ownable {
         emit Redeemed(msg.sender, id);
     }
 
+    /// @notice The pass endpoint of a live id. A used id has none: a used
+    ///  unit is not a holding anyone should be issued a pass for.
+    /// @dev A Pass Issuer serving this contract MUST also refuse ids with
+    ///  the used flag, since its balance read would otherwise entitle the
+    ///  holder of a used unit.
+    function passURI(uint256 id) public view override returns (string memory) {
+        if (id & USED_FLAG != 0) revert SwapOnRedeemTicketNotLiveId(id);
+        return super.passURI(id);
+    }
+
     function setPassBaseURI(string calldata newPassBaseURI) external onlyOwner {
         _setPassBaseURI(newPassBaseURI);
     }

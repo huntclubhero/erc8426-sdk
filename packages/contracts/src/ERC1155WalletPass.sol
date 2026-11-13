@@ -101,7 +101,10 @@ abstract contract ERC1155WalletPass is ERC1155Supply, IERC1155WalletPass {
     ///  of the id, and emitting it per transfer would have an issuer push to
     ///  every pass of the id each time one unit moved. Override to return
     ///  true only if every holder's pass renders something a transfer
-    ///  changes, such as the remaining supply.
+    ///  changes, such as the remaining supply. Know the cost before you do:
+    ///  any holder can then make the issuer push to every pass of an id by
+    ///  moving one unit back and forth, and a batch that lists an id twice
+    ///  emits twice. Transfers of zero units are skipped.
     function _passUpdateOnTransfer() internal view virtual returns (bool) {
         return false;
     }
@@ -116,7 +119,10 @@ abstract contract ERC1155WalletPass is ERC1155Supply, IERC1155WalletPass {
         super._update(from, to, ids, values);
         if (from != to && _passUpdateOnTransfer()) {
             for (uint256 i = 0; i < ids.length; ++i) {
-                _passUpdate(ids[i]);
+                // A transfer of zero units changes nothing, and anyone can
+                // send one for any id: it must not be a free way to make a
+                // Pass Issuer push to every holder.
+                if (values[i] != 0) _passUpdate(ids[i]);
             }
         }
     }

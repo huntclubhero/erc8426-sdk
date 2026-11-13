@@ -220,7 +220,9 @@ describe("ERC-1155 binding: rotation follows the minimum, not the transfer", () 
     h.chain.setBalance(ID, bob.address, 1n);
     expect(await h.issuer.onTransfer(ID, alice.address, bob.address)).toBe(false);
     expect(await linksOf(h, alice.address)).toEqual(links);
-    expect(h.notified).toHaveLength(0);
+    // The pass is told its balance changed: same card, same links, live.
+    expect(h.notified.length).toBeGreaterThan(0);
+    expect(h.notified.every((n) => n.ctx.owner === alice.address && n.ctx.content.voided !== true)).toBe(true);
     expect((await h.post(links.feed!, {})).status).toBe(200);
   });
 
@@ -244,9 +246,12 @@ describe("ERC-1155 binding: rotation follows the minimum, not the transfer", () 
     expect(beforeRotation.status).toBe(403);
     expect(((await beforeRotation.json()) as { error: string }).error).toBe("not_owner");
 
-    expect(await h.issuer.onTransfer(ID, alice.address, carol.address)).toBe(true);
-    expect((await h.post(aliceLinks.feed!, {})).status).toBe(404);
+    // That read showed the loss, so the issuer retired the pass there and
+    // then: the link does not wait for a watcher, and it cannot answer
+    // again if the balance comes back.
     expect((await recordOf(h, alice.address))!.lastIssuedTo).toBeNull();
+    expect((await h.post(aliceLinks.feed!, {})).status).toBe(404);
+    expect(await h.issuer.onTransfer(ID, alice.address, carol.address)).toBe(false);
     // The old serial is pushed as superseded, to the seller's pass alone.
     expect(h.notified.length).toBeGreaterThan(0);
     for (const n of h.notified) {
@@ -292,9 +297,9 @@ describe("ERC-1155 binding: rotation follows the minimum, not the transfer", () 
     await claim(h, bob, ID);
     h.chain.setBalance(ID, alice.address, 0n);
     const summary = await h.issuer.checkHoldings(ID);
-    expect(summary).toEqual({ checked: 2, retired: [alice.address], dark: [], revived: [] });
+    expect(summary).toEqual({ checked: 2, retired: [alice.address], dark: [], revived: [], urlsRetired: [] });
     // A second pass over the same state does nothing more.
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
   });
 
   it("needs no trigger for the receiver: its first claim serves it", async () => {
@@ -386,7 +391,7 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(200);
 
     h.chain.setBalance(ID, alice.address, 0n);
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [alice.address], revived: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [alice.address], revived: [], urlsRetired: [] });
     let record = (await recordOf(h, alice.address))!;
     expect(record.dark).toBe(true);
     expect(record.serial).toBe(serial);
@@ -401,11 +406,11 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(404);
     // A second look at a dark pass pushes nothing more.
     const pushes = h.notified.length;
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
     expect(h.notified).toHaveLength(pushes);
 
     h.chain.setBalance(ID, alice.address, 1n);
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [alice.address] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [alice.address], urlsRetired: [] });
     record = (await recordOf(h, alice.address))!;
     expect(record.dark).toBeUndefined();
     expect(record.serial).toBe(serial);
@@ -594,5 +599,186 @@ describe("ERC-1155 binding: the key-value stores", () => {
     expect(await stores.passes.get(ID)).toBeNull();
     h.chain.setBalance(ID, bob.address, 0n);
     expect((await h.issuer.checkHoldings(ID)).retired).toEqual([bob.address]);
+  });
+});
+
+/// Cases an adversarial review reproduced against the first version of this
+///  binding. Each one was a real defect.
+describe("ERC-1155 binding: review findings", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /// A store where every call takes a network round trip, as a remote Redis.
+  const slow = (inner: ReturnType<typeof memoryKv>, sets: boolean) => {
+    const wrap =
+      <A extends unknown[], R>(fn: (...a: A) => Promise<R>) =>
+      async (...a: A): Promise<R> => {
+        await sleep(2);
+        return fn(...a);
+      };
+    return {
+      get: wrap(inner.get),
+      set: wrap(inner.set),
+      getDel: wrap(inner.getDel),
+      del: wrap(inner.del),
+      ...(sets ? { setAdd: wrap(inner.setAdd!), setRemove: wrap(inner.setRemove!), setMembers: wrap(inner.setMembers!) } : {}),
+    };
+  };
+  const rush = async (h: H, n: number) => {
+    const signers = Array.from({ length: n }, () => newSigner());
+    for (const s of signers) h.chain.setBalance(ID, s.address, 1n);
+    const proofs = [];
+    for (const s of signers) proofs.push(await signChallenge(h, s, ID));
+    const res = await Promise.all(proofs.map((p) => h.get(`/wallet-pass/${ID}`, proof(p))));
+    expect(res.map((r) => r.status)).toEqual(signers.map(() => 200));
+    return signers;
+  };
+
+  it("with set operations, accounts that all claim at once are all in the issued list", async () => {
+    const h = harness({ rateLimit: false, stores: kvStores(slow(memoryKv(), true), { chainId: 1, contract: CONTRACT }) });
+    const signers = await rush(h, 8);
+    const issued = await h.issuer.stores.passes.accounts!(ID);
+    expect([...issued].sort()).toEqual(signers.map((s) => s.address).sort());
+  });
+
+  it("an account missing from the issued list is still retired when a transfer names it", async () => {
+    // No set operations: the JSON list can lose an account under a rush.
+    const h = harness({ rateLimit: false, stores: kvStores(slow(memoryKv(), false), { chainId: 1, contract: CONTRACT }) });
+    const signers = await rush(h, 8);
+    for (const s of signers) {
+      const link = (await linksOf(h, s.address)).feed!;
+      h.chain.setBalance(ID, s.address, 0n);
+      // Whether or not the list kept this account, the hint finds its pass.
+      expect(await h.issuer.onTransfer(ID, s.address, newSigner().address)).toBe(true);
+      expect((await recordOf(h, s.address))!.lastIssuedTo).toBeNull();
+      h.chain.setBalance(ID, s.address, 1n);
+      expect((await h.post(link, {})).status).toBe(404);
+    }
+  });
+
+  it("the issued list holds live passes only: a retired account leaves it and a returning one rejoins", async () => {
+    for (const sets of [true, false]) {
+      const h = harness({ stores: kvStores(slow(memoryKv(), sets), { chainId: 1, contract: CONTRACT }) });
+      const alice = newSigner();
+      h.chain.setBalance(ID, alice.address, 1n);
+      await claim(h, alice, ID);
+      expect(await h.issuer.stores.passes.accounts!(ID)).toEqual([alice.address]);
+      h.chain.setBalance(ID, alice.address, 0n);
+      await h.issuer.checkHoldings(ID);
+      expect(await h.issuer.stores.passes.accounts!(ID)).toEqual([]);
+      h.chain.setBalance(ID, alice.address, 1n);
+      await claim(h, alice, ID);
+      expect(await h.issuer.stores.passes.accounts!(ID)).toEqual([alice.address]);
+    }
+  });
+
+  it("a link refused by the fresh read is retired there and then, and does not answer when the balance returns", async () => {
+    const h = harness();
+    const alice = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    const first = await claim(h, alice, ID);
+    const link = (await linksOf(h, alice.address)).feed!;
+    const download = new URL((first.body as { formats: Record<string, string> }).formats.apple!).pathname;
+    h.chain.setBalance(ID, alice.address, 0n);
+    expect((await h.post(link, {})).status).toBe(403);
+    h.chain.setBalance(ID, alice.address, 1n);
+    expect((await h.post(link, { attempt: 2 })).status).toBe(404);
+    expect((await h.get(download)).status).toBe(404);
+    // And the same from the download side.
+    const second = await claim(h, alice, ID);
+    const download2 = new URL((second.body as { formats: Record<string, string> }).formats.apple!).pathname;
+    const link2 = (await linksOf(h, alice.address)).feed!;
+    h.chain.setBalance(ID, alice.address, 0n);
+    expect((await h.get(download2)).status).toBe(403);
+    h.chain.setBalance(ID, alice.address, 1n);
+    expect((await h.post(link2, {})).status).toBe(404);
+  });
+
+  it("a failed read on a link request retires nothing", async () => {
+    const h = harness();
+    const alice = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    await claim(h, alice, ID);
+    const link = (await linksOf(h, alice.address)).feed!;
+    h.chain.failing = true;
+    expect((await h.post(link, {})).status).toBe(503);
+    h.chain.failing = false;
+    expect((await h.post(link, { attempt: 2 })).status).toBe(200);
+  });
+
+  it("one holder's action updates that holder's pass and reads nobody else", async () => {
+    const h = harness({
+      actions: {
+        feed: {
+          description: "Feed",
+          capability: true,
+          bound: "Idempotent; moves nothing",
+          execute: async (ctx) => {
+            await ctx.notifyUpdate();
+            return { ok: true };
+          },
+        },
+      },
+    });
+    const holders = Array.from({ length: 6 }, () => newSigner());
+    for (const s of holders) {
+      h.chain.setBalance(ID, s.address, 1n);
+      await claim(h, s, ID);
+    }
+    const [actor, other] = [holders[0]!, holders[3]!];
+    const link = (await linksOf(h, actor.address)).feed!;
+    const before = (await recordOf(h, other.address))!.updatedAt;
+    h.notified.length = 0;
+    const reads = h.chain.reads;
+    expect((await h.post(link, {})).status).toBe(200);
+    // The link's own fresh read, and the acting account's read before its push.
+    expect(h.chain.reads - reads).toBe(2);
+    expect(h.notified.length).toBeGreaterThan(0);
+    expect(h.notified.every((n) => n.ctx.owner === actor.address)).toBe(true);
+    expect((await recordOf(h, other.address))!.updatedAt).toBe(before);
+  });
+
+  it("a block is accepted only with the accounts of its transfer", async () => {
+    const h = harness();
+    await expect(h.issuer.checkHoldings(ID, { blockNumber: 100n })).rejects.toThrow(/only together with the accounts/);
+  });
+
+  it("dark mode: a balance that left and came back keeps the card and loses its acquisition URL", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    const first = await claim(h, alice, ID);
+    const serial = (await recordOf(h, alice.address))!.serial;
+    const download = new URL((first.body as { formats: Record<string, string> }).formats.apple!).pathname;
+    h.chain.setBalanceAt(100n, ID, alice.address, 0n);
+    expect(await h.issuer.onTransfer(ID, alice.address, newSigner().address, 100n)).toBe(true);
+    const record = (await recordOf(h, alice.address))!;
+    expect(record.serial).toBe(serial);
+    expect(record.dark).toBeUndefined();
+    expect(record.lastIssuedTo).toBe(alice.address);
+    expect((await h.get(download)).status).toBe(404);
+  });
+
+  it("a pass that went dark is retired once the issuer has capability links", async () => {
+    const stores = kvStores(memoryKv(), { chainId: 1, contract: CONTRACT });
+    const before = signedOnly({ stores });
+    const alice = newSigner();
+    before.chain.setBalance(ID, alice.address, 1n);
+    await claim(before, alice, ID);
+    const serial = (await recordOf(before, alice.address))!.serial;
+    before.chain.setBalance(ID, alice.address, 0n);
+    await before.issuer.checkHoldings(ID);
+    expect((await recordOf(before, alice.address))!.dark).toBe(true);
+
+    // The same stores, an issuer with capability links, and she holds again.
+    const after = harness({ stores });
+    after.chain.setBalance(ID, alice.address, 1n);
+    expect((await claim(after, alice, ID)).res.status).toBe(200);
+    const record = (await recordOf(after, alice.address))!;
+    expect(record.dark).toBeUndefined();
+    expect(record.serial).not.toBe(serial);
+  });
+
+  it("capability links are asked for by account", async () => {
+    const h = harness();
+    await expect(h.issuer.capabilityLinksFor(ID)).rejects.toThrow(/needs the account/);
   });
 });
