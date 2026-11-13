@@ -23,6 +23,7 @@ import {
   type PassIssuerIdentity,
   type PassManifest,
   type TokenRef,
+  type TokenStandard,
 } from "@erc8426/core";
 
 import { WalletPassClientError, errorFromChainRead, errorFromResponse } from "./errors.js";
@@ -41,6 +42,12 @@ const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]
 export interface TokenInput {
   contract: Address | string;
   tokenId: bigint | number | string;
+  /// The contract's token standard, which decides the namespace the
+  ///  challenge must name the token in (`erc721` or `erc1155`). Left out,
+  ///  the client asks the contract once (ERC-165, id 0xd9b67a26 for
+  ///  ERC-1155) and takes ERC-721 when it does not claim ERC-1155. The
+  ///  ERC-1155 binding is a working draft.
+  standard?: TokenStandard;
 }
 
 export interface WalletPassClientOptions extends GatewayOptions {
@@ -247,7 +254,34 @@ export function createWalletPassClient(options: WalletPassClientOptions) {
     return chainIdPromise;
   };
 
-  const toRef = async (token: TokenInput): Promise<TokenRef> => tokenRef(await chainId(), token.contract, token.tokenId);
+  // Which namespace a contract's tokens are named in. A challenge that
+  // names the requested contract and id under the other standard is refused
+  // before signing, so the client has to know which one to expect. Only a
+  // contract that passes the ERC-165 procedure and claims ERC-1155 is read
+  // as one; anything else, a failed read included, is ERC-721 as before. A
+  // wrong guess cannot widen what gets signed: it only refuses a challenge.
+  // Answers are kept per contract; a read that failed is asked again.
+  const standards = new Map<string, Promise<TokenStandard>>();
+  const standardOf = (contract: Address | string): Promise<TokenStandard> => {
+    const address = getAddress(contract);
+    let known = standards.get(address);
+    if (!known) {
+      const call = (interfaceId: Hex) =>
+        readContract(publicClient, { address, abi: erc165Abi, functionName: "supportsInterface", args: [interfaceId] });
+      known = Promise.all([call("0x01ffc9a7"), call("0xffffffff"), call("0xd9b67a26")]).then(
+        ([erc165, invalid, erc1155]): TokenStandard => (erc165 === true && invalid === false && erc1155 === true ? "erc1155" : "erc721"),
+        (): TokenStandard => {
+          standards.delete(address);
+          return "erc721";
+        },
+      );
+      standards.set(address, known);
+    }
+    return known;
+  };
+
+  const toRef = async (token: TokenInput): Promise<TokenRef> =>
+    tokenRef(await chainId(), token.contract, token.tokenId, token.standard ?? (await standardOf(token.contract)));
 
   const request = async (url: string, init: RequestInit): Promise<{ res: Response; body: unknown }> => {
     // Every URL here came from a contract or an issuer response, so none is
