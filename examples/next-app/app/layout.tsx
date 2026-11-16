@@ -24,7 +24,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         </a>
         {loaded.ok ? (
           <Providers config={publicConfig(loaded.config)}>
-            <Header network={loaded.config.networkLabel} edition={loaded.config.edition !== null} member={loaded.config.member !== null} />
+            <Header network={loaded.config.networkLabel} edition={loaded.config.edition !== null} member={loaded.config.member !== null} rental={loaded.config.rental !== null} />
             <main id="main" className="container">
               {children}
             </main>
@@ -45,7 +45,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   );
 }
 
-function Header({ network, edition, member }: { network: string; edition: boolean; member: boolean }) {
+function Header({ network, edition, member, rental }: { network: string; edition: boolean; member: boolean; rental: boolean }) {
   return (
     <header className="header">
       <div className="container header-inner">
@@ -72,6 +72,11 @@ function Header({ network, edition, member }: { network: string; edition: boolea
             {member ? (
               <li>
                 <Link href="/member">Member (dark pass)</Link>
+              </li>
+            ) : null}
+            {rental ? (
+              <li>
+                <Link href="/rental">Rental (ends by itself)</Link>
               </li>
             ) : null}
           </ul>
