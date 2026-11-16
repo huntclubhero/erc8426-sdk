@@ -29,10 +29,17 @@ Out of scope, and named so nobody assumes otherwise:
 - An account is entitled to the pass of an id when a fresh `balanceOf(account, id)` is at least the minimum holding for that id. The minimum defaults to 1. A Pass Issuer that uses another minimum MUST document it per id. (built)
 - The fresh entitlement read of ERC-8426 is that `balanceOf` read, taken at request time at `latest`, for the account the challenge names or the capability URL was issued to. (built)
 - The claimed account is always named in the challenge. The token resource is the CAIP-19 identifier under the `erc1155` namespace: `eip155:<chain>/erc1155:<contract>/<id>`. A proof that names the same contract and id under `erc721` MUST be refused as `binding_mismatch`. (built)
-- Per account or per unit: the Pass Issuer picks per id and documents it.
-  - Per account, the default: one pass per pair. A balance above the minimum does not make more passes. The pass MAY show the balance. (built)
-  - Per unit: several passes drawn on one account's balance. One rule: the live passes drawn on an account's balance, its delegates' included, MUST never number more than that balance at the fresh read. Units have no identity, so an issuer that retires one pass when one unit leaves MUST say which one. (not built)
-  - If a per unit mode is specified, a wallet should not have to read the issuer's documentation to learn it. An optional member of the manifest is the proposed place. The mode is the Pass Issuer's and not the token contract's: an issuer can serve a collection it did not deploy. (not built, open)
+- One pass per pair. A balance above the minimum does not make more passes. The pass MAY show the balance. (built)
+
+## Per unit passes: not in this version
+
+This version has one mode, one pass per account, so there is nothing for a wallet or an indexer to discover. Several passes drawn on one account's balance (a family with four tickets wanting four cards) is left for a later version, and it is recorded here so that version starts from what the thread settled. (not built)
+
+- The rule: the live passes drawn on an account's balance, its delegates' included, MUST never number more than that balance at the fresh read. Units have no identity, so an issuer that retires one pass when one unit leaves MUST say which one.
+- Discovery ships with the mode, never after it. Nobody should have to read an issuer's documentation to learn which mode an id uses.
+  - The manifest carries it, as a member a Client reads with everything else it needs to render the pass. This is the required place.
+  - A gated manifest cannot be read without a holder's proof, so an indexer cannot see that member. For those readers a contract MAY also answer a view, `passBindingMode(uint256 id)`, under an ERC-165 identifier of its own. It is a separate, optional interface so that `passURI(uint256)` stays the only function of the wallet pass interface and the identifier `0xef5f1e71` stays shared with ERC-721.
+  - Where both exist they MUST agree, and a contract that changes the mode of an id emits an event for it.
 
 ## Contract interface
 
@@ -88,7 +95,7 @@ ERC-8426 says "on transfer" in three places: the gated configuration, the capabi
 What happens to the pass depends on which path its actions take:
 
 - A pass that carries even one capability link: the Pass Issuer MUST retire the account's links and acquisition URLs when it finds the account below the minimum. The account leaves the issued set. If it holds again, its next acquisition is a first claim with new URLs and never the retired ones, the rule ERC-8426 states since ethereum/ERCs #2173. Reason: the link stands in for the proof, the holder stopped guarding the card when the balance left, and a return would revive every copy with nobody having done anything. (built)
-- A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. (built in the issuer and unit tested; not yet seen on a real phone)
+- A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. It is the default for such a pass; a Pass Issuer MAY retire instead. (built in the issuer and unit tested; not yet seen on a real phone)
   - The acquisition URLs MUST still be retired, including when a balance left and came back. In the gated configuration they are possession proofs for the download. (built)
   - A dark pass SHOULD say that it is dark, for the reason a superseded pass says why. (built)
 - Staking and escrow: use a documented entitlement that reads the staking or escrow contract's record fresh, so the holder never loses entitlement in the first place. (not built)
@@ -139,5 +146,4 @@ Not built: per unit passes, the public configuration, delegates, a staking polic
 
 1. The normative wording for "`passURI` throws for a token that is not valid" where a contract tracks no supply.
 2. Whether the fan-out of `PassUpdate` gets a SHOULD on pacing.
-3. For a Pass Issuer whose every action takes the signed path: is dark the default on lost entitlement, or retire with dark as an opt in? The reference issuer defaults to dark there today.
-4. The manifest member that would announce a per unit mode, if per unit is specified at all in a first version.
+3. Per unit passes are left out of this version, with their discovery sketched above (a manifest member, plus an optional contract view under its own identifier). Is anyone building something that needs per unit in the first version?
