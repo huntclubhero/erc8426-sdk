@@ -55,6 +55,8 @@ export const editionAbi = parseAbi([
   "function proposal(uint256 proposalId) view returns (Proposal)",
   "function ballotOf(uint256 proposalId, address account) view returns (Ballot)",
   "function votable(uint256 proposalId) view returns (bool)",
+  "function linkVotable(uint256 proposalId) view returns (bool)",
+  "function linkCloses(uint256 proposalId) view returns (uint48)",
   "function votingPower(uint256 proposalId, address account) view returns (uint256)",
   "function propose(uint256 id, string title, uint48 duration) returns (uint256)",
   "function castVoteFor(address account, uint256 proposalId, bool support, bool signed)",
@@ -63,6 +65,7 @@ export const editionAbi = parseAbi([
   "error VoteEditionNotVotable(uint256 proposalId)",
   "error VoteEditionNoVotingPower(uint256 proposalId, address account)",
   "error VoteEditionAlreadyVoted(uint256 proposalId, address account)",
+  "error VoteEditionLinkVotingClosed(uint256 proposalId, uint48 linkCloses)",
   "error VoteEditionNotOperator(address caller)",
   "error VoteEditionUnknownProposal(uint256 proposalId)",
 ]);
@@ -85,6 +88,11 @@ export interface ProposalView {
   yes: string;
   no: string;
   votable: boolean;
+  /// Whether a vote by a pass link is still accepted, and the last second
+  ///  it is. Links close before the vote does, so that a link vote can
+  ///  always still be overruled with a signature.
+  linkVotable: boolean;
+  linkCloses: number;
 }
 
 export interface BallotView {
@@ -159,11 +167,23 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
 
   const contract = { address: edition.contract, abi: editionAbi } as const;
   const proposalById = async (proposalId: bigint): Promise<ProposalView> => {
-    const [p, votable] = await Promise.all([
+    const [p, votable, linkVotable, linkCloses] = await Promise.all([
       publicClient.readContract({ ...contract, functionName: "proposal", args: [proposalId] }),
       publicClient.readContract({ ...contract, functionName: "votable", args: [proposalId] }),
+      publicClient.readContract({ ...contract, functionName: "linkVotable", args: [proposalId] }),
+      publicClient.readContract({ ...contract, functionName: "linkCloses", args: [proposalId] }),
     ]);
-    return { proposalId: proposalId.toString(), title: p.title, snapshot: Number(p.snapshot), closes: Number(p.closes), yes: p.yes.toString(), no: p.no.toString(), votable };
+    return {
+      proposalId: proposalId.toString(),
+      title: p.title,
+      snapshot: Number(p.snapshot),
+      closes: Number(p.closes),
+      yes: p.yes.toString(),
+      no: p.no.toString(),
+      votable,
+      linkVotable,
+      linkCloses: Number(linkCloses),
+    };
   };
   const currentProposal = async (): Promise<ProposalView | null> => {
     const count = await publicClient.readContract({ ...contract, functionName: "proposalCount" });
@@ -209,7 +229,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     // The links are offered only while they can do something: the proposal
     // is open, the account has power on it, and it has not voted. A link
     // cannot change a vote, so after a vote they leave the pass.
-    const canLinkVote = Boolean(proposal?.votable && mine && mine.choice === "none" && power > 0n);
+    const canLinkVote = Boolean(proposal?.linkVotable && mine && mine.choice === "none" && power > 0n);
     const content: PassContent = {
       serial,
       style: "generic",
@@ -246,7 +266,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           key: "about",
           label: "About this pass",
           value:
-            "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature: anyone holding this pass can use them, once per proposal. The holder can replace a link vote with a signed vote on the demo site while the proposal is open, and can reset these links at any time.",
+            "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature. Anyone who has seen one of them can cast this account's first vote on this proposal and on each later one, for as long as the account holds and until the holder resets the links. Links stop being accepted before a vote closes, and the holder can replace a link vote with a signed vote on the demo site in the time that is left.",
         },
       ],
       // Each link names the proposal it was printed for. A link names an
@@ -308,7 +328,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     description: `${VOTE_LABEL[action]} on the open proposal`,
     capability: true,
     bound:
-      "At most one vote per account per proposal, enforced on chain. Its weight is the account's balance at the proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast, and the holder can replace it with a signed vote while the proposal is open. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
+      "At most one vote per account per proposal, enforced on chain. The link is the same for every proposal, so over its life it can cast the account's first vote on each proposal opened while the account holds, until the holder resets it. Each vote's weight is the account's balance at that proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast. Links stop being accepted for the last fifth of a voting period, and the holder can replace a link vote with a signed vote until the proposal closes. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
     async execute({ account, path, request, params, notifyUpdate }) {
       // The request says which proposal. It is never "the newest one": a
       // new proposal can open between a pass being read and a link tapped.
@@ -337,6 +357,9 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
         if (name === "VoteEditionNotVotable") throw new ActionError(409, "voting_closed", `Proposal ${proposal.proposalId} is not open for votes.`);
         if (name === "VoteEditionNoVotingPower") {
           throw new ActionError(409, "no_voting_power", `This account held no unit when proposal ${proposal.proposalId} opened, so it has no vote on it. Units that arrive after the snapshot do not carry a vote.`);
+        }
+        if (name === "VoteEditionLinkVotingClosed") {
+          throw new ActionError(409, "link_voting_closed", `Pass links are no longer accepted for proposal ${proposal.proposalId}: the last part of a vote is kept for votes that can overrule a link. You can still vote with a signature on the demo site until it closes.`);
         }
         if (name === "VoteEditionAlreadyVoted") {
           throw new ActionError(
@@ -390,6 +413,12 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           );
         if (!found) return shell("This link is out of date", "<h1>This link is out of date</h1><p>It does not name a proposal. Open your pass again and use the link it shows now.</p>");
         if (!found.votable) return shell("Voting is closed", `<h1>Voting is closed</h1><p>Proposal ${escapeHtml(found.proposalId)}, ${escapeHtml(found.title)}, is no longer open for votes.</p>`);
+        if (!found.linkVotable) {
+          return shell(
+            "Links have closed",
+            `<h1>Links have closed for this vote</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><p><small>The last part of a vote is kept for votes that can overrule a link, so a link cannot land too late to be undone. You can still vote with a signature on the demo site until the proposal closes.</small></p>`,
+          );
+        }
         // A link votes once. Someone who comes back to this page (the back
         // button, an old tab) is told so, and is not offered a button that
         // can only be refused. Reading a ballot changes nothing.

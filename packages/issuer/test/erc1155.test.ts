@@ -423,7 +423,7 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(404);
   });
 
-  it("does not act on one stale read: a loss is acted on only when a second read agrees", async () => {
+  it("with a reader that cannot name a block, one stray stale answer is caught by asking again", async () => {
     for (const make of [signedOnly, harness]) {
       const h = make();
       const alice = newSigner();
@@ -445,6 +445,81 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
       expect(record.lastIssuedTo).toBe(alice.address);
       expect(h.notified).toHaveLength(pushes);
       expect((await h.get(download)).status).toBe(200);
+    }
+  });
+
+  // A node that lags answers every question from an earlier block: its
+  // newest block is that block, `latest` is that block, and it does not have
+  // the blocks after it. Two reads at `latest` on it agree with each other.
+  const lagAt = (h: H, block: bigint, balance: bigint): (() => void) => {
+    const realBalance = h.chain.balanceOf;
+    const realHead = h.chain.head;
+    h.chain.head = block;
+    h.chain.balanceOf = async (_token, _account, blockNumber) => {
+      h.chain.reads++;
+      if (blockNumber !== undefined && blockNumber > block) throw new Error("header not found");
+      return balance;
+    };
+    return () => {
+      h.chain.balanceOf = realBalance;
+      h.chain.head = realHead;
+    };
+  };
+
+  it("a node that lags behind the block a pass was issued at cannot take it away: the holdings check", async () => {
+    for (const make of [signedOnly, harness]) {
+      const h = make();
+      const alice = newSigner();
+      // Block 100: Alice receives her unit and claims the pass.
+      h.chain.head = 100n;
+      h.chain.setBalance(ID, alice.address, 1n);
+      const first = await claim(h, alice, ID);
+      const download = new URL(first.body.formats.apple).pathname;
+      const pushes = h.notified.length;
+      // A node still at block 99, where she held nothing, answers the check.
+      const caughtUp = lagAt(h, 99n, 0n);
+      const summary = await h.issuer.checkHoldings(ID).catch(() => null);
+      expect(summary === null || summary.dark.length + summary.retired.length === 0).toBe(true);
+      caughtUp();
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+      expect(h.notified).toHaveLength(pushes);
+      expect((await h.get(download)).status).toBe(200);
+    }
+  });
+
+  it("a node that lags cannot take a pass away through the PassUpdate fan-out or the refresh after an action", async () => {
+    for (const make of [signedOnly, harness]) {
+      const h = make();
+      const alice = newSigner();
+      h.chain.head = 100n;
+      h.chain.setBalance(ID, alice.address, 1n);
+      const first = await claim(h, alice, ID);
+      const download = new URL(first.body.formats.apple).pathname;
+      const caughtUp = lagAt(h, 99n, 0n);
+      await h.issuer.onPassUpdate(ID).catch(() => undefined);
+      caughtUp();
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+      expect((await h.get(download)).status).toBe(200);
+    }
+  });
+
+  it("a loss read at or after the block the pass was issued at is acted on", async () => {
+    for (const make of [signedOnly, harness]) {
+      const h = make();
+      const alice = newSigner();
+      h.chain.head = 100n;
+      h.chain.setBalance(ID, alice.address, 1n);
+      await claim(h, alice, ID);
+      expect((await recordOf(h, alice.address))!.issuedAtBlock).toBe("100");
+      // Block 101: the unit leaves. The node is current.
+      h.chain.head = 101n;
+      h.chain.setBalance(ID, alice.address, 0n);
+      const summary = await h.issuer.checkHoldings(ID);
+      expect(summary.dark.length + summary.retired.length).toBe(1);
     }
   });
 

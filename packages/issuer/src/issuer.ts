@@ -648,23 +648,69 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return next;
   }
 
+  // The newest block the chain reader has, and whether `account` is entitled
+  // at exactly that block. Null when the reader cannot name a block. A read
+  // the node cannot answer at the block it just named (a load balanced
+  // provider that answers the two calls from different nodes) throws.
+  async function entitledAtHead(id: string, account: Address): Promise<{ block: bigint; entitled: boolean } | null> {
+    const head = await chain?.blockNumber?.().catch(() => undefined);
+    if (head === undefined) return null;
+    const read = await checkEntitlement(entitlement, { token: token(id), account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head });
+    return { block: head, entitled: read.entitled };
+  }
+
+  // Date a pass that is being issued or brought back: the block at which the
+  // account was read as entitled. It is what a later loss is tested against
+  // (see loseIfVerified), and what keeps an older transfer log from being
+  // held against the pass (see checkHoldings). The block is recorded only
+  // when the read was taken AT that block and said entitled: a head number
+  // fetched beside a read at `latest` can fall on either side of the block
+  // that read saw. Best effort: with no block the pass is undated.
+  async function dateIssuance(record: PassRecord, account: Address): Promise<void> {
+    const at = await entitledAtHead(record.tokenId, account).catch(() => null);
+    if (at?.entitled) record.issuedAtBlock = at.block.toString();
+    else delete record.issuedAtBlock;
+  }
+
   // Acting on a loss costs the holder something a refusal does not: a retired
   // card has to be added again, and a dark one tells their lock screen. A
-  // node that lags can answer one read with an old balance, so the loss is
-  // acted on only when a second read agrees, and only if the record is still
-  // the live pass that was read (another request may have acted meanwhile).
-  // Returns what was done, or null when nothing was.
+  // node that lags answers from the past, and it answers the same thing
+  // however many times it is asked, so asking twice proves nothing. What a
+  // lagging node cannot do is name a block it has not reached. So the loss
+  // is read at a named block, and acted on only when that block is at or
+  // after the block the pass was issued at: the account held then, does not
+  // hold at a later block, so the loss happened. A read from before the
+  // issuance, or one the node cannot answer, changes nothing and is tried
+  // again on the next request; the refusal of the request itself is not
+  // affected, it stays at `latest`. What this does not cover is a
+  // reorganization that drops the block the loss was read at.
+  //
+  // A reader that cannot name a block cannot be tested this way: it is asked
+  // a second time, which is weaker (see below). A pass with no issuance
+  // block is acted on once the loss is read at a named block.
+  //
+  // The record is read again before acting, since another request may have
+  // acted meanwhile. Returns what was done, or null when nothing was.
   //
   // One at a time per pass within this process, so two requests that find
   // the same loss together act on it once. Across instances there is no
   // compare and set on a record: two of them can both act, which costs a
   // second push and nothing else.
   const losing = new Map<string, Promise<unknown>>();
-  async function loseIfConfirmed(record: PassRecord, account: Address): Promise<"retired" | "dark" | null> {
+  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | null> {
     const key = passRecordKey(record);
     const turn = (losing.get(key) ?? Promise.resolve()).then(
       async () => {
-        if ((await internals.entitled(record.tokenId, account, ACQUIRE_ACTION)).entitled) return null;
+        const at = await entitledAtHead(record.tokenId, account);
+        if (at) {
+          if (at.entitled) return null;
+          if (record.issuedAtBlock !== undefined && at.block < BigInt(record.issuedAtBlock)) return null;
+        } else if ((await internals.entitled(record.tokenId, account, ACQUIRE_ACTION)).entitled) {
+          // No block to test against: a second read is all there is. It
+          // catches one stray answer from a provider that spreads calls over
+          // several nodes, and nothing from a node that lags on every call.
+          return null;
+        }
         const current = await stores.passes.get(key);
         if (!current || current.lastIssuedTo === null || current.dark || current.serial !== record.serial) return null;
         return lose(current);
@@ -685,9 +731,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // The account was just read as holding, so this is a new issuance as far
     // as an older transfer log is concerned: a log from before it, delivered
     // late, must not be held against the pass that came back.
-    const head = await chain?.blockNumber?.().catch(() => undefined);
-    if (head === undefined) delete record.issuedAtBlock;
-    else record.issuedAtBlock = head.toString();
+    if (record.lastIssuedTo) await dateIssuance(record, record.lastIssuedTo);
+    else delete record.issuedAtBlock;
     await stores.passes.put(record);
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, false, "revive");
   }
@@ -755,7 +800,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (record.dark) continue;
         let did: "retired" | "dark" | null;
         try {
-          did = await loseIfConfirmed(record, account);
+          did = await loseIfVerified(record, account);
         } catch (error) {
           onError(error, { operation: "holdings:read", tokenId: id });
           failed.push(account);
@@ -806,8 +851,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     }
     if (!holds) {
       if (mine.dark) return "updated";
-      await lose(mine);
-      return "lost";
+      // The same test as a holdings check: one read does not take a pass
+      // away, here least of all, where one node answers for every holder.
+      return (await loseIfVerified(mine, account)) ? "lost" : "updated";
     }
     if (mine.dark) await revive(mine);
     else await notify(mine, account, false, "update");
@@ -883,12 +929,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (mine.dark && config.lostEntitlement === "retire") mine = await rotateRecord(mine, "transfer", null);
         const wasDark = mine.dark === true && mine.lastIssuedTo !== null;
         mine.lastIssuedTo = account;
-        // Date the issuance, so a transfer log from before it is not held
-        // against this pass (see checkHoldings). Best effort: without it the
-        // check falls back to reading the log's block for every pass.
-        const head = await chain?.blockNumber?.().catch(() => undefined);
-        if (head === undefined) delete mine.issuedAtBlock;
-        else mine.issuedAtBlock = head.toString();
+        // Date the issuance (see dateIssuance).
+        await dateIssuance(mine, account);
         if (wasDark) await revive(mine);
         else {
           delete mine.dark;
@@ -986,7 +1028,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     async lost(record) {
       if (!is1155 || record.lastIssuedTo === null || record.dark) return;
       try {
-        await loseIfConfirmed(record, record.lastIssuedTo);
+        await loseIfVerified(record, record.lastIssuedTo);
       } catch (error) {
         onError(error, { operation: "holdings:lost", tokenId: record.tokenId });
       }

@@ -31,6 +31,8 @@ interface ProposalView {
   yes: string;
   no: string;
   votable: boolean;
+  linkVotable: boolean;
+  linkCloses: number;
 }
 
 interface BallotView {
@@ -440,7 +442,7 @@ export function EditionDetail() {
                   </strong>
                 </p>
                 <p className="muted small">
-                  Yes {proposal.yes}, No {proposal.no}. {proposal.votable ? `Open for about ${minutesLeft(proposal.closes, state.now)}.` : proposal.closes < state.now ? "Closed." : "Opening..."}
+                  Yes {proposal.yes}, No {proposal.no}. {proposal.votable ? `Open for about ${minutesLeft(proposal.closes, state.now)}${proposal.linkVotable ? `, pass links for ${minutesLeft(proposal.linkCloses, state.now).replace(" more", "")}` : ", pass links have closed"}.` : proposal.closes < state.now ? "Closed." : "Opening..."}
                 </p>
                 {address && ballot ? (
                   <p className="small">

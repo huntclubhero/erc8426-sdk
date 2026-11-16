@@ -40,6 +40,11 @@ import {ERC1155WalletPass} from "../ERC1155WalletPass.sol";
 ///  link can do at most one thing and the holder can undo it; an operator
 ///  that lies about a signature can be overruled by the holder on chain. A
 ///  vote moves no tokens and changes no entitlement.
+///
+///  "The holder can undo it" needs time. A link vote that landed at the
+///  close could not be overruled, so links stop being accepted before the
+///  vote closes: the last fifth of the voting period takes signed votes and
+///  the holder's own, and no link vote (`linkCloses`).
 contract VoteEditionPass is ERC1155WalletPass, Ownable {
     using Checkpoints for Checkpoints.Trace208;
 
@@ -114,6 +119,9 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     /// @notice The account has voted, and the new vote did not arrive a
     ///  stronger way than the one it would replace.
     error VoteEditionAlreadyVoted(uint256 proposalId, address account);
+    /// @notice The proposal is still open, but link votes are no longer
+    ///  accepted: what is left of the period is for votes that can overrule.
+    error VoteEditionLinkVotingClosed(uint256 proposalId, uint48 linkCloses);
     /// @notice No unit of the id exists, so nobody could vote.
     error VoteEditionNoSupply(uint256 id);
     error VoteEditionFutureLookup(uint48 timepoint, uint48 clock);
@@ -229,6 +237,19 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
         return _ballots[proposalId][account];
     }
 
+    /// @notice The last second in which a vote that arrived by a pass link is
+    ///  accepted: four fifths of the way from the snapshot to the close. The
+    ///  rest of the period is left for a vote that can overrule a link.
+    function linkCloses(uint256 proposalId) public view returns (uint48) {
+        Proposal memory p = proposal(proposalId);
+        return p.closes - (p.closes - p.snapshot) / 5;
+    }
+
+    /// @notice Whether a vote by a pass link is accepted now.
+    function linkVotable(uint256 proposalId) public view returns (bool) {
+        return votable(proposalId) && clock() <= linkCloses(proposalId);
+    }
+
     /// @notice Whether votes are accepted now: after the snapshot second and
     ///  not after the close. False for a proposal that does not exist.
     function votable(uint256 proposalId) public view returns (bool) {
@@ -267,6 +288,10 @@ contract VoteEditionPass is ERC1155WalletPass, Ownable {
     function _cast(uint256 proposalId, address account, bool support, Source source) internal {
         if (proposalId == 0 || proposalId > _proposals.length) revert VoteEditionUnknownProposal(proposalId);
         if (!votable(proposalId)) revert VoteEditionNotVotable(proposalId);
+        if (source == Source.Link) {
+            uint48 last = linkCloses(proposalId);
+            if (clock() > last) revert VoteEditionLinkVotingClosed(proposalId, last);
+        }
         Proposal storage p = _proposals[proposalId - 1];
         uint256 weight = getPastBalance(account, p.id, p.snapshot);
         if (weight == 0) revert VoteEditionNoVotingPower(proposalId, account);
