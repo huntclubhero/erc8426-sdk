@@ -14,6 +14,17 @@ Running demo: <https://erc8426-demo.vercel.app/edition>. Contract `VoteEditionPa
 
 ERC-8426 binds a wallet pass to one ERC-721 token and its one owner. This document says only what changes when the token is an ERC-1155 id with many holders and balances. Everything it does not restate applies as written in ERC-8426: the manifest, the two configurations, the challenge, the capability conditions, the refusal codes, and the Pass Issuer and Client requirements.
 
+## Design goal
+
+ERC-8426 exists so that a person can use what they hold from the wallet that is already on their phone. They add a card to Apple Wallet or Google Wallet, they watch it change, and they tap it. There is no browser extension, no separate app, no seed phrase to look after, and nothing to learn about a chain before the first tap. Once the card is added, the everyday action is a tap on it. Two implementations work this way today: a pet that lives on its pass and is cared for from the pass, and a collection on mainnet whose holders tend what they hold from the card.
+
+This binding keeps that for tokens with many holders, and it is the test for what belongs in this document:
+
+- What the holder does stays a tap on a card. A rule that keeps that tap safe belongs here even when it is strict, because a tap that nobody can abuse is the only reason it can go without a signature.
+- The work lands on the Pass Issuer and the contract. Nearly every MUST below is something the holder never sees.
+- Anything that would give the holder one more step, one more signature, one more app or one more thing to understand needs a reason this document can state. Where there is none, it is left out or made optional.
+- The signed path stays for what a link must never do: move value, change who is entitled, or overrule a link. It is the exception and the card is the front door.
+
 ## Scope: holding only
 
 This binding covers passes that show a holding: memberships, editions, badges, "show your card".
