@@ -80,9 +80,16 @@ if (!keyA || !keyB) {
 }
 const alice = privateKeyToAccount(keyA);
 const bob = privateKeyToAccount(keyB);
+// Optional on a public chain (SMOKE_KEY_C, SMOKE_KEY_D, each able to claim
+// one unit): C shows what one link can do over its life, D that links close
+// before a vote does. Without them those steps are skipped.
+const keyC = process.env.SMOKE_KEY_C ?? (local ? generatePrivateKey() : null);
+const keyD = process.env.SMOKE_KEY_D ?? (local ? generatePrivateKey() : null);
+const carol = keyC ? privateKeyToAccount(keyC) : null;
+const dave = keyD ? privateKeyToAccount(keyD) : null;
 const walletOf = (account) => createWalletClient({ account, chain, transport: http(env.RPC_URL) });
 if (local) {
-  for (const a of [alice, bob]) await publicClient.request({ method: "anvil_setBalance", params: [a.address, toHex(parseEther("1"))] });
+  for (const a of [alice, bob, carol, dave]) await publicClient.request({ method: "anvil_setBalance", params: [a.address, toHex(parseEther("1"))] });
 }
 
 // 0. The instance serves an edition.
@@ -158,6 +165,12 @@ let startA = await balance(alice);
 if (startA < 3n) await write(alice, "claim", [id, 3n - startA]);
 if (startA > 3n) await write(alice, "safeTransferFrom", [alice.address, "0x000000000000000000000000000000000000dEaD", id, startA - 3n, "0x"]);
 step(await settled(alice, 3n), "A holds 3 units, B holds none");
+for (const who of [carol, dave]) {
+  if (who && (await balance(who)) < 1n) {
+    await write(who, "claim", [id, 1n]);
+    await settled(who, 1n);
+  }
+}
 const passUri = await passes.getPassURI(token);
 step(passUri === `${BASE}/edition-pass/${id}`, "passURI points at the edition issuer", passUri);
 
@@ -180,6 +193,10 @@ step(confirm.status === 200 && confirmHtml.includes(`Proposal ${p1}`) && (await 
 step((await state(alice)).holder.ballot.power === "3", "A has 3 votes on it (its balance at the snapshot)");
 const bNone = await refusal(() => passes.getManifest(token, { signer: bob }));
 step(bNone?.status === 403 && bNone?.code === "not_owner", "B holds none: 403 not_owner", `${bNone?.status} ${bNone?.code}`);
+
+// C unlocks its pass during proposal 1 and keeps the link, without voting.
+const c1 = carol ? await manifestOf(carol) : null;
+if (carol) step(typeof c1.no === "string" && c1.no.includes(`p=${p1}`), "C holds a vote link printed for proposal 1, and does not use it");
 
 // 5. The cheat: move a unit to a second account after the snapshot and vote
 // with it there too.
@@ -240,6 +257,19 @@ step(Boolean(p2) && p2 !== p1, "a second proposal opened", `proposal ${p2}`);
 const b2 = await manifestOf(bob);
 step(typeof b2.yes === "string" && (await state(bob)).holder.ballot.power === "3", "B has 3 votes on the new proposal, and vote links");
 
+// The life of a link: the one C was given during proposal 1 is the same
+// link for every proposal, with the proposal as a parameter.
+if (carol) {
+  const reused = c1.no.replace(`p=${p1}`, `p=${p2}`);
+  const r = await post(reused);
+  const b = (await state(carol)).holder.ballot;
+  console.log(`      C's link from proposal ${p1}, pointed at proposal ${p2}: HTTP ${r.res.status} ${r.body?.error ?? ""}, ballot ${b.choice} by ${b.source}`);
+  step(r.res.status === 200 && b.choice === "no" && b.source === "link", "RESULT: a link seen during one proposal casts the account's first vote on a later one (its bound is over the life of the link)", `HTTP ${r.res.status}`);
+}
+// D takes its link for proposal 2 now and keeps it for the end of the vote.
+const d2 = dave ? await manifestOf(dave) : null;
+if (dave) step(typeof d2.yes === "string", "D holds a vote link for proposal 2");
+
 // 10. A holder resets its own links, and only its own.
 const aRotate = await refusal(() => passes.rotatePassLinks(token, { signer: alice }));
 step(aRotate?.status === 403, "A, holding none, cannot reset anything", `${aRotate?.status} ${aRotate?.code}`);
@@ -261,7 +291,32 @@ step((await post(a1.yes)).res.status === 404, "A's retired link stays retired");
 const lateVote = await refusal(() => passes.signedAction({ token, action: "vote-yes", signer: alice, params: { proposalId: p2 } }));
 step(lateVote?.status === 409 && lateVote?.serverCode === "no_voting_power", "A's returned unit carries no vote on the open proposal", `${lateVote?.status} ${lateVote?.serverCode ?? lateVote?.code}`);
 p = (await state()).proposal;
-step(BigInt(p.yes) + BigInt(p.no) <= 3n, "votes on the proposal never exceed the units that existed at its snapshot", `yes ${p.yes}, no ${p.no}`);
+const atSnapshot = 3n + (carol ? 1n : 0n) + (dave ? 1n : 0n);
+step(BigInt(p.yes) + BigInt(p.no) <= atSnapshot, "votes on the proposal never exceed the units that existed at its snapshot", `yes ${p.yes}, no ${p.no}`);
+
+// 12. Links close before the vote does, so a link vote can always still be
+// overruled: in the last fifth of the period a link is refused and a
+// signature is not.
+if (dave) {
+  const open = (await state()).proposal;
+  const wait = Math.max(0, (open.linkCloses + 3) * 1000 - Date.now());
+  if (open.proposalId === p2 && open.closes * 1000 > Date.now() + wait + 15_000) {
+    console.log(`      (waiting ${Math.round(wait / 1000)}s for pass links to close on proposal ${p2})`);
+    await new Promise((r) => setTimeout(r, wait));
+    await until(async () => (await state()).proposal.linkVotable === false, 30_000, 1000);
+    const late = (await state()).proposal;
+    step(late.votable === true && late.linkVotable === false, "near the end the proposal is still open, and pass links have closed");
+    const tap = await post(d2.yes);
+    step(tap.res.status === 409 && tap.body?.error === "link_voting_closed", "a pass link is refused in the last part of the vote: 409 link_voting_closed", `HTTP ${tap.res.status} ${tap.body?.error ?? ""}`);
+    step((await state(dave)).holder.ballot.choice === "none", "and it cast nothing");
+    const d3 = await manifestOf(dave);
+    step(d3.yes === undefined, "D's pass no longer shows vote links");
+    const signed = await passes.signedAction({ token, action: "vote-yes", signer: dave, params: { proposalId: p2 } }).catch((e) => e);
+    step(signed?.status === 200 && (await state(dave)).holder.ballot.source === "signed", "a signed vote is still accepted until the close", `${signed?.status}`);
+  } else {
+    step(false, "the proposal was still open long enough to reach the link cutoff");
+  }
+}
 
 console.log(failures === 0 ? "\nAll edition checks passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

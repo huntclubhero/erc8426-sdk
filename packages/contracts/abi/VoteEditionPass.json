@@ -328,6 +328,44 @@
   },
   {
     "type": "function",
+    "name": "linkCloses",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "linkVotable",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "open",
     "inputs": [
       {
@@ -1318,6 +1356,22 @@
     "type": "error",
     "name": "VoteEditionInvalidDuration",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "VoteEditionLinkVotingClosed",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "linkCloses",
+        "type": "uint48",
+        "internalType": "uint48"
+      }
+    ]
   },
   {
     "type": "error",

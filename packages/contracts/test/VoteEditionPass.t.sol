@@ -291,6 +291,61 @@ contract VoteEditionPassTest is Test {
 
     // ---- link votes and signed votes ------------------------------------------
 
+    /// @dev A link vote that lands at the close leaves the holder no time to
+    ///  overrule it, so links stop being accepted before the vote does.
+    function test_aLinkVoteCannotLandSoLateThatTheHolderCannotOverruleIt() public {
+        _claim(alice, 2);
+        uint256 pid = _propose();
+        VoteEditionPass.Proposal memory p = edition.proposal(pid);
+
+        // The last moment of the vote: a link is refused, a signature is not.
+        vm.warp(p.closes);
+        uint48 last = edition.linkCloses(pid);
+        assertFalse(edition.linkVotable(pid));
+        assertTrue(edition.votable(pid));
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionLinkVotingClosed.selector, pid, last));
+        edition.castVoteFor(alice, pid, false, false);
+        vm.prank(alice);
+        edition.castVote(pid, true);
+        (uint256 yes, uint256 no) = _tally(pid);
+        assertEq(yes, 2);
+        assertEq(no, 0);
+    }
+
+    /// @dev The cutoff itself: the last fifth of the period. A link vote in
+    ///  the last second it is accepted still leaves that fifth to overrule.
+    function test_linksCloseAFifthOfThePeriodBeforeTheVote() public {
+        _claim(alice, 1);
+        _claim(bob, 1);
+        uint256 pid = _propose();
+        VoteEditionPass.Proposal memory p = edition.proposal(pid);
+        uint48 last = edition.linkCloses(pid);
+        assertEq(last, p.closes - (p.closes - p.snapshot) / 5);
+        assertGt(p.closes, last);
+
+        vm.warp(last);
+        assertTrue(edition.linkVotable(pid));
+        vm.prank(operator);
+        edition.castVoteFor(alice, pid, false, false);
+
+        vm.warp(uint256(last) + 1);
+        assertFalse(edition.linkVotable(pid));
+        vm.prank(operator);
+        vm.expectRevert(abi.encodeWithSelector(VoteEditionPass.VoteEditionLinkVotingClosed.selector, pid, last));
+        edition.castVoteFor(bob, pid, false, false);
+
+        // Alice overrules the link vote in what is left, by signature or herself.
+        vm.prank(operator);
+        edition.castVoteFor(alice, pid, true, true);
+        vm.warp(p.closes);
+        vm.prank(alice);
+        edition.castVote(pid, false);
+        (uint256 yes, uint256 no) = _tally(pid);
+        assertEq(yes, 0);
+        assertEq(no, 1);
+    }
+
     function test_aLinkVotesOnceAndCannotChangeAVote() public {
         _claim(alice, 2);
         uint256 pid = _propose();
