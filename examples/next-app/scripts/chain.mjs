@@ -147,7 +147,23 @@ await publicClient.waitForTransactionReceipt({ hash: openHash });
 const voteOpHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setVoteOperator", args: [operator.address, true] });
 await publicClient.waitForTransactionReceipt({ hash: voteOpHash });
 
+// The member pass (the "go dark and come back" case of the same draft): a
+// holding only EditionPass, served by a third issuer under /member-pass that
+// has no capability links.
+const memberArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/EditionPass.json"), "utf8"));
+const memberHash = await wallet.deployContract({
+  abi: memberArtifact.abi,
+  bytecode: memberArtifact.bytecode,
+  args: [`${baseUrl}/edition-meta/{id}.json`, `${baseUrl}/member-pass/`, operator.address, 3n],
+});
+const member = (await publicClient.waitForTransactionReceipt({ hash: memberHash })).contractAddress;
+if (!member) throw new Error("the member pass deployment produced no contract address");
+const memberOpenHash = await wallet.writeContract({ address: member, abi: memberArtifact.abi, functionName: "setOpen", args: [1n, true] });
+await publicClient.waitForTransactionReceipt({ hash: memberOpenHash });
+
 writeEnv({
+  MEMBER_CONTRACT_ADDRESS: member,
+  MEMBER_ID: "1",
   EDITION_CONTRACT_ADDRESS: edition,
   EDITION_ID: "1",
   EDITION_DEPLOY_BLOCK: String(editionReceipt.blockNumber),
@@ -163,6 +179,7 @@ writeEnv({
 console.log("");
 console.log(`PetPass    ${contract}`);
 console.log(`Edition    ${edition} (ERC-1155 draft, id 1 open)`);
+console.log(`Member     ${member} (ERC-1155 draft, dark pass, id 1 open)`);
 console.log(`Operator   ${operator.address}`);
 console.log(`Chain      ${chainId} at ${rpcUrl}`);
 console.log(`Wrote      ${envPath}`);

@@ -36,6 +36,10 @@ export interface ServerConfig {
   /// The ERC-1155 edition (working draft of the ERC-1155 binding). Null
   ///  unless EDITION_CONTRACT_ADDRESS is set: the pet flow does not need it.
   edition: EditionEnv | null;
+  /// The member pass: a second ERC-1155 id served by an issuer with no
+  ///  capability links, so its pass goes dark and comes back. Null unless
+  ///  MEMBER_CONTRACT_ADDRESS is set.
+  member: EditionEnv | null;
 }
 
 export interface EditionEnv {
@@ -78,6 +82,7 @@ export interface PublicConfig {
   /// Shown in the header so nobody mistakes the demo for a product.
   networkLabel: string;
   edition: { contract: Address; id: string } | null;
+  member: { contract: Address; id: string } | null;
 }
 
 export type ConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
@@ -154,6 +159,29 @@ function editionEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
   };
 }
 
+/// The optional member pass (an EditionPass deployment whose passBaseURI is
+/// NEXT_PUBLIC_BASE_URL + "/member-pass/"). Off with a warning on a bad
+/// value, and refused at the address of either other issuer.
+function memberEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
+  const address = env.MEMBER_CONTRACT_ADDRESS;
+  if (!address) return null;
+  const off = (why: string) => {
+    console.warn(`[config] member pass disabled: ${why}`);
+    return null;
+  };
+  if (!isAddress(address)) return off("MEMBER_CONTRACT_ADDRESS is not an address");
+  for (const other of [env.CONTRACT_ADDRESS, env.EDITION_CONTRACT_ADDRESS]) {
+    if (other && address.toLowerCase() === other.toLowerCase()) return off("MEMBER_CONTRACT_ADDRESS is another issuer's contract");
+  }
+  if (env.MEMBER_ID && !/^\d+$/.test(env.MEMBER_ID)) return off("MEMBER_ID must be a decimal id");
+  return {
+    contract: getAddress(address),
+    id: BigInt(env.MEMBER_ID || "1"),
+    deployBlock: 0n,
+    googleClassSuffix: env.GOOGLE_MEMBER_CLASS_SUFFIX || "erc8426_member_example",
+  };
+}
+
 function positiveInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
@@ -200,6 +228,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       apple: appleEnv(env),
       google: googleEnv(env),
       edition: editionEnv(env),
+      member: memberEnv(env),
     },
   };
 }
@@ -217,5 +246,6 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     networkLabel: config.networkLabel,
     platforms: [...(config.apple ? ["apple"] : []), ...(config.google ? ["google"] : [])],
     edition: config.edition ? { contract: config.edition.contract, id: config.edition.id.toString() } : null,
+    member: config.member ? { contract: config.member.contract, id: config.member.id.toString() } : null,
   };
 }
