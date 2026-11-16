@@ -8,7 +8,10 @@ Every line below is marked with what stands behind it:
 - (not built) is text only. It stays a proposal until it runs.
 - (open) is a question for reviewers.
 
-Running demo: <https://erc8426-demo.vercel.app/edition>. Contract `VoteEditionPass` at `0x7de2842c27ea0652e0688e0def03715dd8a4d89e` on Robinhood Chain testnet (chain id 46630), source verified.
+Running demos, both on Robinhood Chain testnet (chain id 46630), both with verified source:
+
+- A pass with one tap links, which is retired when its account stops holding: <https://erc8426-demo.vercel.app/edition>, contract `VoteEditionPass` at `0x7de2842c27ea0652e0688e0def03715dd8a4d89e`.
+- A pass with no links, which goes dark and comes back: <https://erc8426-demo.vercel.app/member>, contract `EditionPass` at `0x42aaeaaa9be01f6cf9b5e3b03a15d53a06e175fe`.
 
 ## What this is
 
@@ -106,7 +109,7 @@ ERC-8426 says "on transfer" in three places: the gated configuration, the capabi
 What happens to the pass depends on which path its actions take:
 
 - A pass that carries even one capability link: the Pass Issuer MUST retire the account's links and acquisition URLs when it finds the account below the minimum. The account leaves the issued set. If it holds again, its next acquisition is a first claim with new URLs and never the retired ones, the rule ERC-8426 states since ethereum/ERCs #2173. Reason: the link stands in for the proof, the holder stopped guarding the card when the balance left, and a return would revive every copy with nobody having done anything. (built)
-- A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. It is the default for such a pass; a Pass Issuer MAY retire instead. (built in the issuer and unit tested; not yet seen on a real phone)
+- A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. It is the default for such a pass; a Pass Issuer MAY retire instead. (built, and seen on a real phone in Apple Wallet: the card went dark with a notification and came back as the same card)
   - The acquisition URLs MUST still be retired, including when a balance left and came back. In the gated configuration they are possession proofs for the download. (built)
   - A dark pass SHOULD say that it is dark, for the reason a superseded pass says why. (built)
 - Staking and escrow: use a documented entitlement that reads the staking or escrow contract's record fresh, so the holder never loses entitlement in the first place. (not built)
@@ -148,10 +151,11 @@ There is no "the owner".
 - A reference ERC-1155 base contract with `passURI` and the events, and three example contracts (`EditionPass`, `VoteEditionPass`, `SwapOnRedeemTicket`), with forge tests.
 - The SDK taught the binding for the gated configuration, per account: core, issuer, client and the example app, with unit tests and an end to end run on a local chain against the real Apple and Google providers.
 - A scripted run of the whole gated flow against a public testnet, in `tests/testnet`, that anyone can repeat with five funded keys.
-- The hosted demo above, with a scripted check of 38 steps against it (`examples/next-app/scripts/smoke-edition.mjs`).
+- The two hosted demos above, each with a scripted check against it (`examples/next-app/scripts/smoke-edition.mjs`, 38 steps, and `smoke-member.mjs`, 16 steps).
+- A real phone: a vote cast from the card in Apple Wallet with no signature, recorded on chain as a link vote, after a lock screen notification of the proposal; and the member pass going dark and coming back on the same card.
 - Two adversarial reviews of the build. Their findings are fixed with tests and several became lines of this text.
 
-Not built: per unit passes, the public configuration, delegates, a staking policy, `balanceOfBatch` in one call, a conformance profile for this binding, and a reference server for the ERC assets. No real phone has shown the dark pass yet.
+Not built: per unit passes, the public configuration, delegates, a staking policy, `balanceOfBatch` in one call, a conformance profile for this binding, and a reference server for the ERC assets.
 
 ## Open questions
 
