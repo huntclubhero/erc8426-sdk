@@ -2,7 +2,7 @@
 
 ### Does this work with ERC-1155?
 
-Not in ERC-8426 itself, and as a working draft in this SDK. A draft binding is built here so it can be reviewed before it is proposed: see [`docs/drafts/erc-1155-wallet-pass-binding.md`](drafts/erc-1155-wallet-pass-binding.md), `standard: "erc1155"` on the issuer, and the two hosted demos ([one tap vote links](https://erc8426-demo.vercel.app/edition), [a pass that goes dark and comes back](https://erc8426-demo.vercel.app/member)). It is not published to npm yet and it can change.
+Not in ERC-8426 itself, and as a working draft in this SDK. A draft binding is built here so it can be reviewed before it is proposed: see [`docs/drafts/erc-1155-wallet-pass-binding.md`](drafts/erc-1155-wallet-pass-binding.md), `standard: "erc1155"` on the issuer, and the two hosted demos ([one tap vote links](https://erc8426-demo.vercel.app/edition), [a pass that goes dark and comes back](https://erc8426-demo.vercel.app/member)). It is published since 0.5.0 as a draft, and it can change.
 
 The spec puts ERC-1155 out of scope: fungible balances and many holders per id need a different binding between holder and pass. The future extension it describes would bind a specific account alongside the token id and test `balanceOf(account, id)` against a minimum holding (default 1) in the authorization check, keeping multi-holder semantics out of the pass itself. The draft here is that extension.
 
