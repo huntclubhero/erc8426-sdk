@@ -42,7 +42,13 @@ export type AuthorizeResult =
       token: TokenRef;
       challenge: ParsedChallenge;
     }
-  | { ok: false; error: AuthError };
+  | {
+      ok: false;
+      error: AuthError;
+      /// Set on `not_owner` only: the account whose proof was verified and
+      ///  which the fresh read then found not entitled.
+      account?: Address;
+    };
 
 /// The two-check floor (Authorization of pass-reachable actions).
 ///
@@ -62,7 +68,7 @@ export async function authorize(input: AuthorizeInput, deps: AuthorizeDeps): Pro
   // The token this verifier serves, from its own config.
   let served: TokenRef;
   try {
-    served = tokenRef(config.chainId, config.contract, input.tokenId);
+    served = tokenRef(config.chainId, config.contract, input.tokenId, config.standard);
   } catch {
     return { ok: false, error: "binding_mismatch" };
   }
@@ -134,7 +140,7 @@ export async function authorize(input: AuthorizeInput, deps: AuthorizeDeps): Pro
       return { ok: false, error: "read_failed" };
     }
   }
-  if (!entitled.entitled) return { ok: false, error: "not_owner" };
+  if (!entitled.entitled) return { ok: false, error: "not_owner", account: parsed.address };
 
   return { ok: true, account: parsed.address, via: entitled.via, token: served, challenge: parsed };
 }

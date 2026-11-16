@@ -77,7 +77,9 @@ const existing = await rpcAnswers();
 if (existing === null) {
   const bin = anvilBinary();
   console.log(`Starting ${bin} on port ${port}...`);
-  anvil = spawn(bin, ["--port", String(port), "--chain-id", "31337", "--silent"], { stdio: ["ignore", "inherit", "inherit"] });
+  // A block every second, so chain time moves without a transaction: the
+  // edition's vote snapshot is a second that has to end before votes count.
+  anvil = spawn(bin, ["--port", String(port), "--chain-id", "31337", "--block-time", "1", "--silent"], { stdio: ["ignore", "inherit", "inherit"] });
   anvil.on("error", (e) => {
     console.error(`Could not start anvil (${e.message}). Install Foundry (https://getfoundry.sh) or set ANVIL_BIN.`);
     process.exit(1);
@@ -128,7 +130,43 @@ const opHash = await wallet.writeContract({
 });
 await publicClient.waitForTransactionReceipt({ hash: opHash });
 
+// The ERC-1155 edition (working draft of the ERC-1155 binding): an open
+// claim of up to 3 units per account, one unit one vote, served by a second
+// issuer under /edition-pass. The operator relays votes and opens proposals.
+const editionArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/VoteEditionPass.json"), "utf8"));
+const editionHash = await wallet.deployContract({
+  abi: editionArtifact.abi,
+  bytecode: editionArtifact.bytecode,
+  args: [`${baseUrl}/edition-meta/{id}.json`, `${baseUrl}/edition-pass/`, operator.address, 3n],
+});
+const editionReceipt = await publicClient.waitForTransactionReceipt({ hash: editionHash });
+const edition = editionReceipt.contractAddress;
+if (!edition) throw new Error("the edition deployment produced no contract address");
+const openHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setOpen", args: [1n, true] });
+await publicClient.waitForTransactionReceipt({ hash: openHash });
+const voteOpHash = await wallet.writeContract({ address: edition, abi: editionArtifact.abi, functionName: "setVoteOperator", args: [operator.address, true] });
+await publicClient.waitForTransactionReceipt({ hash: voteOpHash });
+
+// The member pass (the "go dark and come back" case of the same draft): a
+// holding only EditionPass, served by a third issuer under /member-pass that
+// has no capability links.
+const memberArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/EditionPass.json"), "utf8"));
+const memberHash = await wallet.deployContract({
+  abi: memberArtifact.abi,
+  bytecode: memberArtifact.bytecode,
+  args: [`${baseUrl}/edition-meta/{id}.json`, `${baseUrl}/member-pass/`, operator.address, 3n],
+});
+const member = (await publicClient.waitForTransactionReceipt({ hash: memberHash })).contractAddress;
+if (!member) throw new Error("the member pass deployment produced no contract address");
+const memberOpenHash = await wallet.writeContract({ address: member, abi: memberArtifact.abi, functionName: "setOpen", args: [1n, true] });
+await publicClient.waitForTransactionReceipt({ hash: memberOpenHash });
+
 writeEnv({
+  MEMBER_CONTRACT_ADDRESS: member,
+  MEMBER_ID: "1",
+  EDITION_CONTRACT_ADDRESS: edition,
+  EDITION_ID: "1",
+  EDITION_DEPLOY_BLOCK: String(editionReceipt.blockNumber),
   RPC_URL: rpcUrl,
   CHAIN_ID: String(chainId),
   CONTRACT_ADDRESS: contract,
@@ -140,6 +178,8 @@ writeEnv({
 
 console.log("");
 console.log(`PetPass    ${contract}`);
+console.log(`Edition    ${edition} (ERC-1155 draft, id 1 open)`);
+console.log(`Member     ${member} (ERC-1155 draft, dark pass, id 1 open)`);
 console.log(`Operator   ${operator.address}`);
 console.log(`Chain      ${chainId} at ${rpcUrl}`);
 console.log(`Wrote      ${envPath}`);

@@ -25,9 +25,38 @@ export interface NonceStore {
   consume(nonce: string): Promise<NonceRecord | null>;
 }
 
-/// Per-token pass state.
+/// The key a pass record is stored under. ERC-721: the token id, one record
+///  per token. ERC-1155 binding (working draft): the id and the holding
+///  account, one record per pair, since two accounts that hold the same id
+///  hold two passes.
+export function passKeyFor(tokenId: string, account?: string | null): string {
+  return account ? `${tokenId}:${account.toLowerCase()}` : tokenId;
+}
+
+/// The key of a record: what `PassStore.put` MUST store it under and
+///  `PassStore.get` is called with.
+export function passRecordKey(record: Pick<PassRecord, "tokenId" | "account">): string {
+  return passKeyFor(record.tokenId, record.account);
+}
+
+/// Pass state: per token (ERC-721), or per id and account (ERC-1155 draft).
 export interface PassRecord {
   tokenId: string;
+  /// ERC-1155 binding only: the account this record belongs to. Absent on
+  ///  an ERC-721 record. Part of the record's key (`passRecordKey`).
+  account?: Address;
+  /// ERC-1155 binding only, and only for an issuer with no capability
+  ///  links: the account fell below the minimum holding and its installed
+  ///  pass was told so. The serial is kept, so the same card comes back when
+  ///  the holding returns. The acquisition URLs were retired when it went
+  ///  dark.
+  dark?: boolean;
+  /// ERC-1155 binding only: the newest block the node had when this account
+  ///  was last issued the pass (decimal string), when the chain reader can
+  ///  tell. A transfer log from an earlier block says nothing about this
+  ///  pass: whatever the balance did then, the account was read as holding
+  ///  afterwards and only then got its URLs.
+  issuedAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.
@@ -67,11 +96,25 @@ export interface PassRecord {
 }
 
 export interface PassStore {
-  get(tokenId: string): Promise<PassRecord | null>;
+  /// `key` is a token id for ERC-721 and `passKeyFor(id, account)` for the
+  ///  ERC-1155 binding.
+  get(key: string): Promise<PassRecord | null>;
+  /// Store under `passRecordKey(record)`. A store that keys on
+  ///  `record.tokenId` alone serves ERC-721 only: under ERC-1155 every holder
+  ///  of an id would overwrite the last.
   put(record: PassRecord): Promise<void>;
   /// OPTIONAL index of every token with a record, used to serve a
   ///  BatchPassUpdate range wider than `maxBatchRange`.
   tokenIds?(): Promise<string[]>;
+  /// The accounts currently issued a pass of `tokenId`: those with a record
+  ///  whose `lastIssuedTo` is set (a dark pass counts, a retired one does
+  ///  not). REQUIRED for the ERC-1155 binding (the issuer refuses to start
+  ///  without it) and unused for ERC-721. It is what lets the issuer push a
+  ///  PassUpdate to every pass of an id and read the balances of the
+  ///  accounts it issued to, with no index of the chain's holders. A store
+  ///  MAY return more (accounts whose pass was retired); the issuer skips
+  ///  them. It must not return fewer.
+  accounts?(tokenId: string): Promise<Address[]>;
 }
 
 /// What a link resolves to. Stored under the SHA-256 digest of the token
@@ -82,6 +125,8 @@ export interface PassStore {
 export interface LinkBinding {
   kind: "action" | "download";
   tokenId: string;
+  /// ERC-1155 binding only: the account whose record holds the link.
+  account?: Address;
   /// The action name (kind "action") or format key (kind "download").
   name: string;
   generation: number;
@@ -155,15 +200,18 @@ export function memoryStores(options: MemoryStoreOptions = {}): IssuerStores {
       },
     },
     passes: {
-      async get(tokenId) {
-        const r = passes.get(tokenId);
+      async get(key) {
+        const r = passes.get(key);
         return r ? structuredClone(r) : null;
       },
       async put(record) {
-        passes.set(record.tokenId, structuredClone(record));
+        passes.set(passRecordKey(record), structuredClone(record));
       },
       async tokenIds() {
-        return [...passes.keys()];
+        return [...new Set([...passes.values()].map((r) => r.tokenId))];
+      },
+      async accounts(tokenId) {
+        return [...passes.values()].filter((r) => r.tokenId === tokenId && r.account && r.lastIssuedTo !== null).map((r) => r.account!);
       },
     },
     links: {
@@ -207,6 +255,15 @@ export interface KeyValueStore {
   ///  across instances; without it the limiter reads and writes the counter
   ///  back and may undercount racing attempts.
   incr?(key: string, ttlSeconds: number): Promise<number>;
+  /// OPTIONAL, all three or none: an unordered set of strings under a key
+  ///  (Redis SADD, SREM, SMEMBERS). `kvStores` keeps the accounts issued a
+  ///  pass of an ERC-1155 id in one. Adding and removing must each be
+  ///  atomic. Without them the list is a JSON array that is read and written
+  ///  back, which two claims racing each other can get wrong; give an
+  ///  ERC-1155 issuer behind more than one instance the set operations.
+  setAdd?(key: string, member: string): Promise<void>;
+  setRemove?(key: string, member: string): Promise<void>;
+  setMembers?(key: string): Promise<string[]>;
 }
 
 export interface KvStoresOptions {
@@ -251,6 +308,34 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
   const nonceKey = (n: string) => `${ns}nonce:${n}`;
   const passKey = (t: string) => `${ns}pass:${t}`;
   const linkKey = (l: string) => `${ns}link:${l}`;
+  // ERC-1155 binding: the accounts currently issued a pass of an id (a
+  // record whose `lastIssuedTo` is set; a dark pass counts). An account is
+  // added when it is issued to and removed when its pass is retired, so the
+  // list is the live passes and not every account that ever claimed.
+  //
+  // With the store's set operations each change is one atomic call. Without
+  // them the list is one JSON array per id, read and written back, and two
+  // changes racing each other can lose one: the write is re-read and retried
+  // a few times, which narrows that and does not close it. An account
+  // missing from the list is still refused by the fresh entitlement read,
+  // and is still found when a transfer names it; what it misses is the
+  // PassUpdate push and the periodic holdings check.
+  const issuedKey = (t: string) => `${ns}issued:${t}`;
+  const holdersKey = (t: string) => `${ns}holders:${t}`;
+  const hasSets = typeof kv.setAdd === "function" && typeof kv.setRemove === "function" && typeof kv.setMembers === "function";
+  const readIssued = async (tokenId: string) => parse<string[]>(await kv.get(issuedKey(tokenId))) ?? [];
+  const setIssued = async (tokenId: string, account: string, member: boolean): Promise<void> => {
+    if (hasSets) {
+      if (member) await kv.setAdd!(holdersKey(tokenId), account);
+      else await kv.setRemove!(holdersKey(tokenId), account);
+      return;
+    }
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const issued = await readIssued(tokenId);
+      if (issued.includes(account) === member) return;
+      await kv.set(issuedKey(tokenId), JSON.stringify(member ? [...issued, account] : issued.filter((a) => a !== account)));
+    }
+  };
   // A client that parses JSON on read (@upstash/redis does by default, as
   // does Vercel KV) hands back the object rather than the string we wrote.
   // Accept both, so a shim written either way works.
@@ -300,13 +385,20 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
       },
     },
     passes: {
-      async get(tokenId) {
-        const record = parse<PassRecord>(await kv.get(passKey(tokenId)));
-        if (record || !readLegacy) return record;
-        return migrateLegacy(tokenId);
+      async get(key) {
+        const record = parse<PassRecord>(await kv.get(passKey(key)));
+        // 0.2.x rows are ERC-721 rows: a key that names an account has none.
+        if (record || !readLegacy || key.includes(":")) return record;
+        return migrateLegacy(key);
       },
       async put(record) {
-        await kv.set(passKey(record.tokenId), JSON.stringify(record));
+        await kv.set(passKey(passRecordKey(record)), JSON.stringify(record));
+        if (!record.account) return;
+        await setIssued(record.tokenId, record.account.toLowerCase(), record.lastIssuedTo !== null);
+      },
+      async accounts(tokenId) {
+        const members = hasSets ? await kv.setMembers!(holdersKey(tokenId)) : await readIssued(tokenId);
+        return members.map((a) => getAddress(a));
       },
     },
     links: {
@@ -328,6 +420,7 @@ export function kvStores(kv: KeyValueStore, options: KvStoresOptions): IssuerSto
 export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & { size(): number } {
   const now = options.now ?? Date.now;
   const map = new Map<string, { value: string; expiresAt: number | null }>();
+  const sets = new Map<string, Set<string>>();
   // Expired keys are dropped on access and by a periodic sweep on write, as
   // Redis expires keys nobody reads again.
   let lastSweep = now();
@@ -363,6 +456,17 @@ export function memoryKv(options: { now?: () => number } = {}): KeyValueStore & 
     },
     async del(key) {
       map.delete(key);
+    },
+    async setAdd(key, member) {
+      let set = sets.get(key);
+      if (!set) sets.set(key, (set = new Set()));
+      set.add(member);
+    },
+    async setRemove(key, member) {
+      sets.get(key)?.delete(member);
+    },
+    async setMembers(key) {
+      return [...(sets.get(key) ?? [])];
     },
     async incr(key, ttlSeconds) {
       sweep();

@@ -155,7 +155,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     record("chain.reachable", "The RPC endpoint answers eth_chainId", S.contract, "MUST", "fail", (e as Error).message);
     return finish();
   }
-  const ref: TokenRef = tokenRef(chainId, contract, tokenId);
+  let ref: TokenRef = tokenRef(chainId, contract, tokenId);
 
   // Contract interface.
   const supports = async (id: Hex): Promise<boolean | Error> => {
@@ -170,6 +170,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
   record("contract.erc165", "supportsInterface(0x01ffc9a7) is true (ERC-165)", S.contract, "MUST", erc165 === true ? "pass" : "fail", describe(erc165));
   const invalid = await supports("0xffffffff");
   record("contract.erc165-invalid", "supportsInterface(0xffffffff) is false (ERC-165)", S.contract, "MUST", invalid === false ? "pass" : "fail", describe(invalid));
+  // A contract that claims ERC-1155 has its tokens named under the erc1155
+  // namespace (working draft of the ERC-1155 binding), so the challenge is
+  // checked against that reference and not flagged for it.
+  if (erc165 === true && invalid === false && (await supports("0xd9b67a26")) === true) ref = tokenRef(chainId, contract, tokenId, "erc1155");
   const wp = await supports(WALLET_PASS_INTERFACE_ID);
   record("contract.interface-id", `supportsInterface(${WALLET_PASS_INTERFACE_ID}) is true`, S.contract, "MUST", wp === true ? "pass" : "fail", describe(wp));
 

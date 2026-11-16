@@ -1,3 +1,4 @@
+import { getMemberRuntime } from "@/lib/member";
 import { getRuntime, json } from "@/lib/server";
 
 export const runtime = "nodejs";
@@ -13,7 +14,16 @@ async function handle(): Promise<Response> {
   const rt = await getRuntime().catch((e: Error) => e);
   if (rt instanceof Error) return json({ error: "internal_error", message: rt.message }, { status: 500 });
   const result = await rt.sync();
-  return json(result ?? { skipped: "synced within the last minute" });
+  // The member pass has no logs to apply: its catch-up is the read over the
+  // accounts it issued to, under its own once a minute lease.
+  const member = await getMemberRuntime()
+    .then((m) => (m ? m.sync() : undefined))
+    .then((s) => (s ? { checked: s.checked, dark: s.dark.length, revived: s.revived.length } : s))
+    .catch((e: Error) => {
+      console.warn(`[member sync] ${e.message}`);
+      return undefined;
+    });
+  return json({ ...(result ?? { skipped: "synced within the last minute" }), ...(member === undefined ? {} : { member: member ?? "checked within the last minute" }) });
 }
 
 export { handle as GET, handle as POST };

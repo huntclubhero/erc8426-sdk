@@ -49,6 +49,56 @@ export const erc165Abi = [
   },
 ] as const;
 
+/// The ERC-1155 reads and events the working draft of the ERC-1155 binding
+///  uses: a balance is the entitlement, and the two transfer events are how a
+///  balance is seen to change.
+export const erc1155Abi = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "balanceOfBatch",
+    stateMutability: "view",
+    inputs: [
+      { name: "accounts", type: "address[]" },
+      { name: "ids", type: "uint256[]" },
+    ],
+    outputs: [{ name: "", type: "uint256[]" }],
+  },
+  {
+    type: "event",
+    name: "TransferSingle",
+    anonymous: false,
+    inputs: [
+      { name: "operator", type: "address", indexed: true },
+      { name: "from", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: true },
+      { name: "id", type: "uint256", indexed: false },
+      { name: "value", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "TransferBatch",
+    anonymous: false,
+    inputs: [
+      { name: "operator", type: "address", indexed: true },
+      { name: "from", type: "address", indexed: true },
+      { name: "to", type: "address", indexed: true },
+      { name: "ids", type: "uint256[]", indexed: false },
+      { name: "values", type: "uint256[]", indexed: false },
+    ],
+  },
+] as const;
+
 export const erc721Abi = [
   {
     type: "function",

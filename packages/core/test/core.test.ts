@@ -26,6 +26,7 @@ import {
   normalizeTokenId,
   parseActionUrn,
   parseAssetId,
+  sameToken,
   parseChallenge,
   parseManifest,
   parsePassIssuer,
@@ -67,7 +68,27 @@ describe("caip", () => {
     const id = assetId(1, EXAMPLE_CONTRACT.toLowerCase(), 412n);
     expect(id).toBe("eip155:1/erc721:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412");
     expect(parseAssetId(id)).toEqual(tokenRef(1, EXAMPLE_CONTRACT, "412"));
-    expect(parseAssetId("eip155:1/erc1155:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412")).toBeNull();
+    expect(parseAssetId("eip155:1/erc20:0x5F9B5a1cdED9d6B3f5E8a2C47B0e13d6A8F4c2e1/412")).toBeNull();
+  });
+  it("builds and parses an ERC-1155 asset id under its own namespace", () => {
+    const ref = tokenRef(1, EXAMPLE_CONTRACT.toLowerCase(), 412n, "erc1155");
+    expect(ref.standard).toBe("erc1155");
+    const id = assetId(ref);
+    expect(id).toBe(`eip155:1/erc1155:${EXAMPLE_CONTRACT}/412`);
+    expect(parseAssetId(id)).toEqual(ref);
+    // The default standard is never written out, so an ERC-721 reference
+    // keeps the shape it has always had.
+    expect("standard" in tokenRef(1, EXAMPLE_CONTRACT, 412n)).toBe(false);
+    expect("standard" in tokenRef(1, EXAMPLE_CONTRACT, 412n, "erc721")).toBe(false);
+    expect(() => tokenRef(1, EXAMPLE_CONTRACT, 412n, "erc20" as never)).toThrow(/invalid token standard/);
+  });
+  it("never matches an ERC-721 token to an ERC-1155 id of the same contract and number", () => {
+    const nft = tokenRef(1, EXAMPLE_CONTRACT, 412n);
+    const multi = tokenRef(1, EXAMPLE_CONTRACT, 412n, "erc1155");
+    expect(sameToken(nft, multi)).toBe(false);
+    expect(sameToken(multi, nft)).toBe(false);
+    expect(sameToken(multi, parseAssetId(assetId(multi))!)).toBe(true);
+    expect(sameToken(nft, { ...nft, standard: "erc721" })).toBe(true);
   });
   it("canonicalizes token ids so one token has one asset id", () => {
     expect(normalizeTokenId("007")).toBe("7");

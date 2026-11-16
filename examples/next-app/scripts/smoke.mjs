@@ -56,7 +56,9 @@ const getJson = async (url, init) => {
 };
 const post = (url, body) => getJson(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(body ?? {}) });
 
-const alice = privateKeyToAccount(generatePrivateKey());
+// SMOKE_KEY_A: a throwaway key that already has gas, for a hosted instance
+// whose daily drip is used up.
+const alice = privateKeyToAccount(process.env.SMOKE_KEY_A ?? generatePrivateKey());
 const bobKey = generatePrivateKey();
 const bob = privateKeyToAccount(bobKey);
 
@@ -119,6 +121,8 @@ step(stranger.status === 403 && stranger.code === "not_owner", "non-owner proof 
 // testnet drip anywhere else.
 if (Number(env.CHAIN_ID) === 31337) {
   await post(`${BASE}/api/dev/fund`, { address: alice.address });
+} else if ((await publicClient.getBalance({ address: alice.address })) > 0n) {
+  step(true, "the burner already has gas (no drip needed)");
 } else {
   const drip = await post(`${BASE}/api/drip`, { address: alice.address });
   step(drip.res.ok && (drip.body?.dripped || drip.body?.reason === "already funded"), "testnet drip funds the burner", JSON.stringify(drip.body).slice(0, 120));

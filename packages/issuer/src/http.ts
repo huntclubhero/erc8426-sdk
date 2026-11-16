@@ -23,6 +23,7 @@ import type { RateLimitRule } from "./rateLimit.js";
 import { RepeatCoalescer, errorCodeOf, memoryRepeatStore, sha256Hex, type RecordedOutcome } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
+import { passKeyFor } from "./stores.js";
 
 /// The HTTP surface, on the WHATWG Fetch API so one handler serves Next.js
 ///  route handlers, Hono, Bun, Deno, Cloudflare Workers and (through node.ts)
@@ -222,6 +223,25 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     return statusForIssuerError(authError) === 401 ? error(authError, { challenge }) : error(authError);
   }
 
+  // ERC-1155 binding. A proof that verified, from an account the fresh read
+  // then found short, is the same finding as a link or a download refused
+  // by that read: the issuer acts on it on this request (retires the pass or
+  // takes it dark) and does not wait for an event or a timer. A refusal for
+  // an action other than acquire may mean only that the account is not
+  // entitled to that action, so the pass is touched only when the account is
+  // not entitled to hold it either. Never throws: the refusal stands, and
+  // the next read acts if this one could not.
+  async function actOnLoss(result: { error: AuthError; account?: Address }, tokenId: string, action: string): Promise<void> {
+    if (config.standard !== "erc1155" || result.error !== "not_owner" || !result.account) return;
+    try {
+      if (action !== ACQUIRE_ACTION && (await x.entitled(tokenId, result.account, ACQUIRE_ACTION)).entitled) return;
+      const record = await x.stores.passes.get(passKeyFor(tokenId, result.account));
+      if (record) await x.lost(record);
+    } catch {
+      // Left to the next read.
+    }
+  }
+
   function corsHeaders(request: Request): Record<string, string> {
     const cors = config.cors;
     if (!cors) return {};
@@ -294,7 +314,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         params: input.params,
         request: input.request,
         notifyUpdate: async () => {
-          await x.onPassUpdate(input.tokenId);
+          await x.notifyAction(input.tokenId, input.account);
         },
       });
       return json(200, {
@@ -339,12 +359,19 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
-    if (!result.ok) return refuse(result.error, challenge);
+    if (!result.ok) {
+      await actOnLoss(result, tokenId, ACQUIRE_ACTION);
+      return refuse(result.error, challenge);
+    }
     // A first claim rotates before the manifest is built. Another entitled
     // account under an additive policy shares the holder of record's pass,
     // so the pass is always rendered for the holder of record.
     const record = await x.recordIssuance(tokenId, result.account);
-    return json(200, await x.buildManifest(record, record.lastIssuedTo ?? result.account));
+    const built = await x.buildManifest(record, record.lastIssuedTo ?? result.account);
+    // As on a download: a manifest built for a pass that went dark or was
+    // retired meanwhile is not handed out.
+    if (!(await x.settled(record))) return error("not_owner");
+    return json(200, built);
   }
 
   // GET {base}/:tokenId/challenge?address=&action=
@@ -400,7 +427,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       key,
       async () => {
         const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
-        if (!result.ok) return refuse(result.error, challengeUri);
+        if (!result.ok) {
+          await actOnLoss(result, tokenId, action);
+          return refuse(result.error, challengeUri);
+        }
         return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
       },
       recordIfNonceSpent,
@@ -417,12 +447,15 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
-    if (!result.ok) return refuse(result.error, challengeUri);
+    if (!result.ok) {
+      await actOnLoss(result, tokenId, ROTATE_ACTION);
+      return refuse(result.error, challengeUri);
+    }
     // Rotation retires the holder's links, so the prover must be the holder
     // of record or entitled to acquire right now. An account entitled to
     // rotate but excluded from acquire (an owner during an exclusive rental)
     // cannot use it to disturb the renter's pass.
-    const holder = await x.holderOf(tokenId);
+    const holder = await x.holderOf(tokenId, result.account);
     if (!holder || !isAddressEqual(holder, result.account)) {
       let entitled;
       try {
@@ -435,7 +468,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // The response never carries the manifest: a proof for any other action
     // MUST NOT resolve it. The holder re-adds the new pass with an acquire
     // proof, and the holder of record is unchanged.
-    await x.rotateOnRequest(tokenId);
+    await x.rotateOnRequest(tokenId, result.account);
     return json(200, { ok: true, rotated: true });
   }
 
@@ -457,8 +490,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function describeLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
     if (!resolved) return withLinkPageHeaders(error("unknown_capability"));
-    const { binding, def } = resolved;
+    const { binding, def, record } = resolved;
     const ctx: LinkPageContext = {
+      account: record.lastIssuedTo ?? null,
       token: x.token(binding.tokenId),
       action: binding.name,
       description: def.description,
@@ -510,7 +544,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       }
     }
     const readKey = entitled?.entitled ? `${entitled.via}:${holder!.toLowerCase()}` : "none";
-    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${await bodyHash(request, text)}`;
+    // The query string is part of what was asked: an issuer may put a
+    // harmless choice there (which poll, which slot), and a tap that names
+    // another choice is another request.
+    const key = `${scope}:link:${linkToken}:${binding.tokenId}:${binding.name}:${binding.generation}:${record.serial}:${holder ?? "-"}:${readKey}:${new URL(request.url).search}:${await bodyHash(request, text)}`;
     return coalesce(key, async () => {
       const body = parseBodyText(request, text);
       if (body === null) return error("invalid_request", { message: "body must be a JSON object or a form" });
@@ -523,7 +560,13 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       // A sold token behind a still-live link stops acting here, before any
       // rotation catches up. What this does NOT close is forwarding under an
       // unchanged owner: the residual the capability configuration discloses.
-      if (!entitled.entitled) return error("not_owner");
+      if (!entitled.entitled) {
+        // The issuer just took the read that shows the loss, so it acts on
+        // it now (ERC-1155): otherwise this link would answer again when
+        // the balance came back.
+        await x.lost(record);
+        return error("not_owner");
+      }
       return execute(def, {
         tokenId: binding.tokenId,
         action: binding.name,
@@ -551,9 +594,16 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     } catch {
       return error("read_failed");
     }
-    if (!entitled.entitled) return error("not_owner");
+    if (!entitled.entitled) {
+      await x.lost(record);
+      return error("not_owner");
+    }
     const content = await x.renderContent(record, holder, false);
     const file = await provider.passFile({ token: x.token(record.tokenId), owner: holder, content });
+    // The record was read before the chain was. If the pass went dark or was
+    // retired while this request rendered it live, the live file is not
+    // served, and the provider is told the dark pass again.
+    if (!(await x.settled(record))) return error("not_owner");
     const headers: Record<string, string> = { "Content-Type": file.contentType, "Cache-Control": "no-store" };
     if (file.filename) headers["Content-Disposition"] = `attachment; filename="${file.filename.replace(/["\\\r\n]/g, "")}"`;
     return new Response(typeof file.body === "string" ? file.body : new Uint8Array(file.body), { status: 200, headers });
@@ -563,7 +613,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function asHtml(request: Request, response: Response): Promise<Response> {
     if (!wantsHtml(request)) return response;
     const body = (await response.clone().json().catch(() => ({}))) as Json;
-    const message = response.ok ? "The action ran." : typeof body.message === "string" ? body.message : String(body.error ?? "Refused");
+    // The page a person sees after confirming says what happened, in the
+    // action's own words when it gave any (`message` on what `execute`
+    // returned), so "Done" is not all a holder is told.
+    const said = (body.result as { message?: unknown } | undefined)?.message;
+    const done = typeof said === "string" && said.trim() !== "" ? said.slice(0, 280) : "The action ran.";
+    const message = response.ok ? done : typeof body.message === "string" ? body.message : String(body.error ?? "Refused");
     const page = resultPage(response.ok, message, response.status);
     const retry = response.headers.get("Retry-After");
     if (retry) page.headers.set("Retry-After", retry);

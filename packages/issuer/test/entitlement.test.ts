@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { tokenRef } from "@erc8426/core";
-import { anyOf, checkEntitlement, delegateRegistry, ownerOnly, rental4907, type EntitlementPolicy } from "@erc8426/issuer";
+import { anyOf, checkEntitlement, delegateRegistry, minimumBalance, ownerOnly, rental4907, type ChainReader, type EntitlementPolicy } from "@erc8426/issuer";
 
 import { CONTRACT, FakeChain, TOKEN_ID, buildHarness, claim, newSigner } from "./helpers.js";
 
@@ -143,5 +143,81 @@ describe("entitlement through the issuer", () => {
     h.clock.advance(3_601_000);
     const back = await claim(h, owner);
     expect(back.res.status).toBe(200);
+  });
+});
+
+describe("minimumBalance (ERC-1155 binding, working draft)", () => {
+  const id = tokenRef(1, CONTRACT, TOKEN_ID, "erc1155");
+
+  function ledger() {
+    const balances = new Map<string, bigint>();
+    let failing = false;
+    let reads = 0;
+    const reader: ChainReader = {
+      async ownerOf() {
+        throw new Error("an ERC-1155 id has no owner");
+      },
+      async balanceOf(token, account) {
+        reads++;
+        if (failing) throw new Error("rpc unavailable");
+        return balances.get(`${token.tokenId}:${account.toLowerCase()}`) ?? 0n;
+      },
+    };
+    const set = (account: string, value: bigint) => balances.set(`${TOKEN_ID}:${account.toLowerCase()}`, value);
+    const check = (policy: EntitlementPolicy, account: string) =>
+      checkEntitlement(policy, { token: id, account: account as `0x${string}`, action: "acquire", reader, now: NOW });
+    return { set, check, fail: () => (failing = true), reads: () => reads };
+  }
+
+  it("entitles every account at or above the minimum, each on its own balance", async () => {
+    const { set, check } = ledger();
+    const a = newSigner().address;
+    const b = newSigner().address;
+    const c = newSigner().address;
+    set(a, 1n);
+    set(b, 5n);
+    expect(await check(minimumBalance(), a)).toEqual({ entitled: true, via: "balance" });
+    expect(await check(minimumBalance(), b)).toEqual({ entitled: true, via: "balance" });
+    expect((await check(minimumBalance(), c)).entitled).toBe(false);
+  });
+
+  it("selling one of three keeps the seller entitled at a minimum of 1 and not at a minimum of 3", async () => {
+    const { set, check } = ledger();
+    const seller = newSigner().address;
+    set(seller, 3n);
+    expect((await check(minimumBalance({ minimum: 3 }), seller)).entitled).toBe(true);
+    set(seller, 2n);
+    expect((await check(minimumBalance(), seller)).entitled).toBe(true);
+    expect((await check(minimumBalance({ minimum: 3 }), seller)).entitled).toBe(false);
+  });
+
+  it("reads fresh on every call: 1 to 0 to 1 is refused in the middle and entitled again after", async () => {
+    const { set, check, reads } = ledger();
+    const holder = newSigner().address;
+    set(holder, 1n);
+    expect((await check(minimumBalance(), holder)).entitled).toBe(true);
+    set(holder, 0n);
+    expect((await check(minimumBalance(), holder)).entitled).toBe(false);
+    set(holder, 1n);
+    expect((await check(minimumBalance(), holder)).entitled).toBe(true);
+    expect(reads()).toBe(3);
+  });
+
+  it("throws when the read cannot be taken, so the issuer answers 503 and not 403", async () => {
+    const { set, check, fail } = ledger();
+    const holder = newSigner().address;
+    set(holder, 1n);
+    fail();
+    await expect(check(minimumBalance(), holder)).rejects.toThrow(/rpc unavailable/);
+  });
+
+  it("refuses a minimum below 1 and a reader that cannot read balances", async () => {
+    expect(() => minimumBalance({ minimum: 0 })).toThrow(/at least 1/);
+    expect(() => minimumBalance({ minimum: -1n })).toThrow(/at least 1/);
+    expect(() => minimumBalance({ minimum: 1.5 })).toThrow(/invalid minimum/);
+    const { chain, owner } = setup();
+    await expect(
+      checkEntitlement(minimumBalance(), { token: id, account: owner as `0x${string}`, action: "acquire", reader: chain, now: NOW }),
+    ).rejects.toThrow(/needs a ChainReader with balanceOf/);
   });
 });

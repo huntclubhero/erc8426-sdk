@@ -33,6 +33,23 @@ export interface ServerConfig {
   networkLabel: string;
   apple: AppleEnv | null;
   google: GoogleEnv | null;
+  /// The ERC-1155 edition (working draft of the ERC-1155 binding). Null
+  ///  unless EDITION_CONTRACT_ADDRESS is set: the pet flow does not need it.
+  edition: EditionEnv | null;
+  /// The member pass: a second ERC-1155 id served by an issuer with no
+  ///  capability links, so its pass goes dark and comes back. Null unless
+  ///  MEMBER_CONTRACT_ADDRESS is set.
+  member: EditionEnv | null;
+}
+
+export interface EditionEnv {
+  /// An EditionPass deployment whose passBaseURI is
+  ///  NEXT_PUBLIC_BASE_URL + "/edition-pass/".
+  contract: Address;
+  /// The one id this demo serves.
+  id: bigint;
+  deployBlock: bigint;
+  googleClassSuffix: string;
 }
 
 export interface AppleEnv {
@@ -64,6 +81,8 @@ export interface PublicConfig {
   platforms: string[];
   /// Shown in the header so nobody mistakes the demo for a product.
   networkLabel: string;
+  edition: { contract: Address; id: string } | null;
+  member: { contract: Address; id: string } | null;
 }
 
 export type ConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
@@ -117,6 +136,52 @@ function googleEnv(env: NodeJS.ProcessEnv): GoogleEnv | null {
   }
 }
 
+/// The optional edition. A bad value here switches the edition off with a
+/// warning and never takes the pet flow down with it. An edition at the pet
+/// contract's own address is refused: the two issuers would share every
+/// record, nonce and cursor.
+function editionEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
+  const address = env.EDITION_CONTRACT_ADDRESS;
+  if (!address) return null;
+  const off = (why: string) => {
+    console.warn(`[config] edition disabled: ${why}`);
+    return null;
+  };
+  if (!isAddress(address)) return off("EDITION_CONTRACT_ADDRESS is not an address");
+  if (env.CONTRACT_ADDRESS && address.toLowerCase() === env.CONTRACT_ADDRESS.toLowerCase()) return off("EDITION_CONTRACT_ADDRESS is the pet contract");
+  if (env.EDITION_ID && !/^\d+$/.test(env.EDITION_ID)) return off("EDITION_ID must be a decimal id");
+  if (env.EDITION_DEPLOY_BLOCK && !/^\d+$/.test(env.EDITION_DEPLOY_BLOCK)) return off("EDITION_DEPLOY_BLOCK must be a block number");
+  return {
+    contract: getAddress(address),
+    id: BigInt(env.EDITION_ID || "1"),
+    deployBlock: BigInt(env.EDITION_DEPLOY_BLOCK || "0"),
+    googleClassSuffix: env.GOOGLE_EDITION_CLASS_SUFFIX || "erc8426_edition_example",
+  };
+}
+
+/// The optional member pass (an EditionPass deployment whose passBaseURI is
+/// NEXT_PUBLIC_BASE_URL + "/member-pass/"). Off with a warning on a bad
+/// value, and refused at the address of either other issuer.
+function memberEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
+  const address = env.MEMBER_CONTRACT_ADDRESS;
+  if (!address) return null;
+  const off = (why: string) => {
+    console.warn(`[config] member pass disabled: ${why}`);
+    return null;
+  };
+  if (!isAddress(address)) return off("MEMBER_CONTRACT_ADDRESS is not an address");
+  for (const other of [env.CONTRACT_ADDRESS, env.EDITION_CONTRACT_ADDRESS]) {
+    if (other && address.toLowerCase() === other.toLowerCase()) return off("MEMBER_CONTRACT_ADDRESS is another issuer's contract");
+  }
+  if (env.MEMBER_ID && !/^\d+$/.test(env.MEMBER_ID)) return off("MEMBER_ID must be a decimal id");
+  return {
+    contract: getAddress(address),
+    id: BigInt(env.MEMBER_ID || "1"),
+    deployBlock: 0n,
+    googleClassSuffix: env.GOOGLE_MEMBER_CLASS_SUFFIX || "erc8426_member_example",
+  };
+}
+
 function positiveInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
@@ -149,7 +214,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       operatorKey: env.OPERATOR_PRIVATE_KEY as Hex,
       baseUrl,
       domain,
-      deployBlock: BigInt(env.DEPLOY_BLOCK || "0"),
+      deployBlock: BigInt(/^\d+$/.test(env.DEPLOY_BLOCK ?? "") ? env.DEPLOY_BLOCK! : "0"),
       // Belt and braces: the flag AND an anvil chain id, so a testnet deploy
       // with a copied .env never exposes a faucet.
       devWallet: env.DEV_WALLET === "1" && chainId === ANVIL_CHAIN_ID,
@@ -162,6 +227,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       networkLabel: env.NETWORK_LABEL || (chainId === ANVIL_CHAIN_ID ? "Local chain" : `Testnet ${chainId}`),
       apple: appleEnv(env),
       google: googleEnv(env),
+      edition: editionEnv(env),
+      member: memberEnv(env),
     },
   };
 }
@@ -178,5 +245,7 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     mintEnabled: config.mintEnabled,
     networkLabel: config.networkLabel,
     platforms: [...(config.apple ? ["apple"] : []), ...(config.google ? ["google"] : [])],
+    edition: config.edition ? { contract: config.edition.contract, id: config.edition.id.toString() } : null,
+    member: config.member ? { contract: config.member.contract, id: config.member.id.toString() } : null,
   };
 }

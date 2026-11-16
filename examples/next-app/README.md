@@ -27,6 +27,39 @@ Open http://localhost:3000, click **Use dev wallet** (or connect a browser walle
 | My passes | The pets you own now, from Transfer logs plus a fresh `ownerOf`. |
 | Pass detail | Public on-chain state; **Unlock my pass** (gated manifest with a signed `acquire` proof); a live front and back preview of the pass; Add to Apple Wallet and Save to Google Wallet buttons when configured; care on the **signed path** (`client.signedAction`) and on the **capability path** (the links from the back of the pass); **Reset my pass links** (`client.rotatePassLinks`); a transfer form, after which your proof gets exactly 403 and your old links stop working; a live `PassUpdate` feed (`usePassUpdates`); and an activity log showing every status code. |
 
+## The ERC-1155 edition (working draft)
+
+The **Edition** page tries out a draft binding of ERC-8426 to ERC-1155. It is not part of the standard; it is here so the draft can be used before it is proposed. An ERC-1155 id has many holders and balances, so there is no "the owner":
+
+- A pass belongs to an id **and an account**. Two holders of the same edition hold two passes, each with its own links.
+- An account is entitled while a fresh `balanceOf(account, id)` is at least 1.
+- Sending away one unit of three changes nothing. Sending the last one loses the pass: the fresh read refuses the old links at once (403), and the issuer retires them when it catches up (404).
+- Holding again later is a first claim with new links, never the retired ones.
+- A holder can reset its own links and nobody else's.
+- The contract reuses the ERC-8426 interface id (`0xef5f1e71`): `passURI(uint256)` is the same function.
+
+On the page: claim up to 3 units of edition 1 (free, open, testnet only), unlock your pass, vote, send units to another address and try the old links.
+
+### One unit, one vote
+
+The action on the edition pass is a vote, because it is the case that shows what a balance read cannot do. A fresh `balanceOf` proves an account holds a unit now. It cannot prove the unit has not voted: admit a vote on the fresh read, record it against the account, and one unit votes, moves to a second account, and votes again.
+
+So the issuer's fresh read only admits the request, and the contract (`VoteEditionPass`) decides what the vote weighs: the account's balance at the proposal's snapshot, read from checkpoints it writes on every transfer. A unit that moves after the snapshot carries no vote, and the votes of all accounts never add up to more than the supply at the snapshot.
+
+A vote can arrive three ways, and the contract is told which:
+
+- **With the link on the pass** (the capability path), which is what a tap in Apple Wallet or Google Wallet does. Whoever holds the pass holds the link, so it is the weakest proof.
+- **With a signature**, relayed by the issuer (the signed path).
+- **In a transaction the holder sends**, the only proof the contract checks itself.
+
+One rule covers all three: a vote replaces the account's earlier vote only if it arrived a stronger way. So a link can cast a vote once and never change one, a signed vote replaces a link vote, and the holder's own transaction replaces either and is final. That is the bound ERC-8426 asks of a capability action, enforced on chain, and it means the holder can overrule the issuer.
+
+Every vote names its proposal: the link on the pass carries it (`?p=3`), the page a phone shows before anything happens says which proposal the tap is for, and a signed vote sends it beside the proof. A vote never lands on "whichever proposal is newest".
+
+"Open a new proposal" is a demo button (in a real deployment proposals come from governance). It exists because a visitor who claims after the last snapshot has no vote on that proposal, which is the lesson and also a dead end without it. One proposal is open at a time, for five minutes, so nobody can cut a vote short by opening another and holders hear of a new proposal at most that often.
+
+It is a second issuer in the same app (`lib/edition.ts`), with `standard: "erc1155"`, under `/edition-pass`, against `VoteEditionPass` from `@erc8426/contracts`. It is off unless `EDITION_CONTRACT_ADDRESS` is set; `pnpm chain` deploys one locally. `node scripts/smoke-edition.mjs` runs the whole flow headlessly against the running app, including the attempt to vote twice with one unit.
+
 ## Architecture
 
 ```text

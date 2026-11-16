@@ -32,6 +32,12 @@ export interface EntitlementRequest {
   reader: ChainReader;
   /// Wall clock, epoch milliseconds, for expiry checks.
   now: number;
+  /// Take the read at this block and not at the reader's own tag. Set only
+  ///  by the ERC-1155 holdings check for a transfer it was told about, to
+  ///  see a balance that left and came back before the check ran. Never set
+  ///  for an authorization: that read is always the fresh one. A policy
+  ///  that cannot read at a block ignores it.
+  blockNumber?: bigint;
 }
 
 export interface EntitlementPolicy {
@@ -57,6 +63,40 @@ export function ownerOnly(): EntitlementPolicy {
     async evaluate({ token, account, reader }) {
       const owner = await reader.ownerOf(token);
       return owner !== null && isAddressEqual(owner, account) ? { decision: "allow", via: "owner" } : { decision: "abstain" };
+    },
+  };
+}
+
+export interface MinimumBalanceOptions {
+  /// The holding that entitles an account. Default 1. An issuer that uses
+  ///  another value documents it per id.
+  minimum?: bigint | number;
+}
+
+/// ERC-1155 entitlement (working draft of the ERC-1155 binding): an account
+///  is entitled when a fresh `balanceOf(account, id)` is at least the minimum
+///  holding. There is no owner to compare against; the claimed account's own
+///  balance is the whole test.
+///
+///  What this read proves and does not: that the account holds at least the
+///  minimum now. Where an id has a supply above one its units have no
+///  identity, so the read never proves that a unit is unused. An entitlement
+///  that can be used up needs its own id with a supply of one, an action
+///  that changes the balance in the same transaction, or an id that cannot
+///  move for the period; a record of use kept against the account does not
+///  close it.
+export function minimumBalance(options: MinimumBalanceOptions = {}): EntitlementPolicy {
+  const raw = options.minimum ?? 1n;
+  if (typeof raw === "number" && !Number.isSafeInteger(raw)) throw new Error(`invalid minimum: ${raw}`);
+  const minimum = BigInt(raw);
+  // A minimum of zero would entitle every account that has ever been named.
+  if (minimum < 1n) throw new Error(`invalid minimum: ${minimum} (must be at least 1)`);
+  return {
+    name: "minimumBalance",
+    async evaluate({ token, account, reader, blockNumber }) {
+      if (!reader.balanceOf) throw new Error("minimumBalance needs a ChainReader with balanceOf (publicClientChainReader provides it)");
+      const balance = await reader.balanceOf(token, account, blockNumber);
+      return balance >= minimum ? { decision: "allow", via: "balance" } : { decision: "abstain" };
     },
   };
 }
