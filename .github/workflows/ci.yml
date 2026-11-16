@@ -23,6 +23,9 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      # The eight use-case demos each run on a fresh anvil chain and exit
+      # non-zero when an expectation fails.
+      - run: pnpm --filter @erc8426-examples/use-cases demo:all
 
   contracts:
     runs-on: ubuntu-latest
