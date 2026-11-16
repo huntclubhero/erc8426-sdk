@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -97,11 +98,19 @@ export class LinkRefused extends Error {
   }
 }
 
+/// POST a capability link, as the confirm page does when the holder confirms.
+///  Every call is one deliberate tap, so every call posts an `attempt` value
+///  of its own, as the issuer's confirm page does. The issuer answers an
+///  identical POST inside its repeat window (30 seconds by default) with the
+///  first outcome and does not run the action again: that is what keeps a
+///  phone resending an aborted POST from acting twice. Without `attempt`,
+///  five quick taps on one link would be one action and four recorded
+///  answers, and the chain's bound would never be reached.
 export async function tapLink(url: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify(params !== undefined ? { params } : {}),
+    body: JSON.stringify({ attempt: randomUUID(), ...(params !== undefined ? { params } : {}) }),
   });
   const body = (await res.json()) as Record<string, unknown>;
   if (!res.ok) throw new LinkRefused(res.status, body);
