@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased (example app only, no package change)
+
+- Example app: a rental that ends by itself ([erc8426-demo.vercel.app/rental](https://erc8426-demo.vercel.app/rental), `lib/rental.ts`, `scripts/smoke-rental.mjs`). An ERC-721 key with ERC-4907 is rented to a visitor for a few minutes under `rental4907()`, with a one tap door link on the pass. It exists to watch entitlement end with no transfer and no event. What a real run shows: the fresh read refuses the renter's link, download and signed request the moment the rental ends; the issuer retires nothing at that moment; the same key rented to the same account again finds the old link working; the owner's first claim retires it. Whether the issuer's own read counts as observing the loss is an open question on the ERC-8426 thread, so no package behaviour is changed here.
+
 ## 0.5.0 (every package to 0.5.0, contracts to 0.4.0): a working draft of the ERC-1155 binding
 
 **Upgrade every `@erc8426` package together.** In 0.x a `^0.4.0` range does not admit 0.5.0, so a project that moves one package and leaves another at 0.4.x installs two copies of `@erc8426/core`, and `instanceof WalletPassError` fails across them.

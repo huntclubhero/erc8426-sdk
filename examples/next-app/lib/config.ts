@@ -40,6 +40,16 @@ export interface ServerConfig {
   ///  capability links, so its pass goes dark and comes back. Null unless
   ///  MEMBER_CONTRACT_ADDRESS is set.
   member: EditionEnv | null;
+  /// The rental: an ERC-721 key with ERC-4907, rented to visitors for a few
+  ///  minutes. Null unless RENTAL_CONTRACT_ADDRESS is set.
+  rental: RentalEnv | null;
+}
+
+export interface RentalEnv {
+  /// A RentalPass deployment owned by the operator, whose passBaseURI is
+  ///  NEXT_PUBLIC_BASE_URL + "/rental-pass/".
+  contract: Address;
+  googleClassSuffix: string;
 }
 
 export interface EditionEnv {
@@ -83,6 +93,7 @@ export interface PublicConfig {
   networkLabel: string;
   edition: { contract: Address; id: string } | null;
   member: { contract: Address; id: string } | null;
+  rental: { contract: Address } | null;
 }
 
 export type ConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
@@ -182,6 +193,22 @@ function memberEnv(env: NodeJS.ProcessEnv): EditionEnv | null {
   };
 }
 
+/// The optional rental. Off with a warning on a bad value, and refused at
+/// the address of any other issuer.
+function rentalEnv(env: NodeJS.ProcessEnv): RentalEnv | null {
+  const address = env.RENTAL_CONTRACT_ADDRESS;
+  if (!address) return null;
+  const off = (why: string) => {
+    console.warn(`[config] rental disabled: ${why}`);
+    return null;
+  };
+  if (!isAddress(address)) return off("RENTAL_CONTRACT_ADDRESS is not an address");
+  for (const other of [env.CONTRACT_ADDRESS, env.EDITION_CONTRACT_ADDRESS, env.MEMBER_CONTRACT_ADDRESS]) {
+    if (other && address.toLowerCase() === other.toLowerCase()) return off("RENTAL_CONTRACT_ADDRESS is another issuer's contract");
+  }
+  return { contract: getAddress(address), googleClassSuffix: env.GOOGLE_RENTAL_CLASS_SUFFIX || "erc8426_rental_example" };
+}
+
 function positiveInt(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
@@ -229,6 +256,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
       google: googleEnv(env),
       edition: editionEnv(env),
       member: memberEnv(env),
+      rental: rentalEnv(env),
     },
   };
 }
@@ -247,5 +275,6 @@ export function publicConfig(config: ServerConfig): PublicConfig {
     platforms: [...(config.apple ? ["apple"] : []), ...(config.google ? ["google"] : [])],
     edition: config.edition ? { contract: config.edition.contract, id: config.edition.id.toString() } : null,
     member: config.member ? { contract: config.member.contract, id: config.member.id.toString() } : null,
+    rental: config.rental ? { contract: config.rental.contract } : null,
   };
 }
