@@ -31,7 +31,7 @@ Requirements: Foundry's `anvil` (`~/.foundry/bin/anvil`, or set `ANVIL_PATH`), a
 - `lib/chain.ts`: viem clients, runtime actors funded with `anvil_setBalance`, deploy from `@erc8426/contracts/artifacts`, send and read. It also forwards `Transfer`, `PassUpdate` and `BatchPassUpdate` from receipts to the issuer (`onTransfer`, `onPassUpdate`), standing in for an indexer webhook or `watchTransfers` / `watchPassUpdates`.
 - `lib/server.ts`: listen first, then build the issuer, because its `domain` and `baseUrl` must be the exact origin that serves it (clients refuse to sign a challenge for any other domain).
 - `lib/preview.ts`: a stand-in wallet platform. Apple and Google passes need issuer certificates and platform accounts, so the demos plug in a `PassFileProvider` under the manifest key `preview`. It serves the rendered `PassContent` as JSON from the issuer's rotating download URL and prints every push. Swap in `@erc8426/apple` and `@erc8426/google` for production; the issuer config does not change.
-- `lib/demo.ts`: installing a pass, tapping a link (GET describes the link, POST acts), and mapping contract reverts to `ActionError`.
+- `lib/demo.ts`: installing a pass, tapping a link (GET describes the link, POST acts; each tap posts an `attempt` value of its own, as the confirm page does, because the issuer answers an identical POST inside its repeat window with the first outcome), and mapping contract reverts to `ActionError`.
 - `lib/narrate.ts`: output formatting and expectations. A demo exits non-zero if any expectation fails.
 
 ## Reading the output
