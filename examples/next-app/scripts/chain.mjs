@@ -161,7 +161,19 @@ if (!member) throw new Error("the member pass deployment produced no contract ad
 const memberOpenHash = await wallet.writeContract({ address: member, abi: memberArtifact.abi, functionName: "setOpen", args: [1n, true] });
 await publicClient.waitForTransactionReceipt({ hash: memberOpenHash });
 
+// The rental: an ERC-721 key with ERC-4907, owned by the operator (the house)
+// and rented to visitors for a few minutes. Its issuer lives at /rental-pass.
+const rentalArtifact = JSON.parse(readFileSync(require.resolve("@erc8426/contracts/artifacts/RentalPass.json"), "utf8"));
+const rentalHash = await wallet.deployContract({
+  abi: rentalArtifact.abi,
+  bytecode: rentalArtifact.bytecode,
+  args: [`${baseUrl}/rental-pass/`, operator.address],
+});
+const rental = (await publicClient.waitForTransactionReceipt({ hash: rentalHash })).contractAddress;
+if (!rental) throw new Error("the rental deployment produced no contract address");
+
 writeEnv({
+  RENTAL_CONTRACT_ADDRESS: rental,
   MEMBER_CONTRACT_ADDRESS: member,
   MEMBER_ID: "1",
   EDITION_CONTRACT_ADDRESS: edition,
