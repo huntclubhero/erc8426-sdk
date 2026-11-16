@@ -8,10 +8,11 @@ Each requirement below says what stands behind it:
 - (not built) is text only. It stays a proposal until it runs.
 - (open) is a question for reviewers.
 
-Running demos, both on Robinhood Chain testnet (chain id 46630), both with verified source:
+Running demos on Robinhood Chain testnet (chain id 46630). The first two contracts have verified source:
 
-- A pass with one tap links, which is retired when its account stops holding: <https://erc8426-demo.vercel.app/edition>, contract `VoteEditionPass` at `0x7de2842c27ea0652e0688e0def03715dd8a4d89e`.
+- A pass with one tap links, which is retired when its account stops holding: <https://erc8426-demo.vercel.app/edition>, contract `VoteEditionPass` at `0x4966fe595829e7c537d5309a234fff068e13f123`.
 - A pass with no links, which goes dark and comes back: <https://erc8426-demo.vercel.app/member>, contract `EditionPass` at `0x42aaeaaa9be01f6cf9b5e3b03a15d53a06e175fe`.
+- An ERC-721 rental that ends by the clock, which is where open question 1 comes from: <https://erc8426-demo.vercel.app/rental>, contract `RentalPass` at `0x0853985646c829ac885e7ce35e9eb52ee22fa3f1`.
 
 ## What this is
 
