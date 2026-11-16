@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased: a working draft of the ERC-1155 binding (not published)
+## 0.5.0 (every package to 0.5.0, contracts to 0.4.0): a working draft of the ERC-1155 binding
+
+**Upgrade every `@erc8426` package together.** In 0.x a `^0.4.0` range does not admit 0.5.0, so a project that moves one package and leaves another at 0.4.x installs two copies of `@erc8426/core`, and `instanceof WalletPassError` fails across them.
 
 ERC-8426 puts ERC-1155 out of scope and sketches the binding a future extension would use: an account beside the token id, and `balanceOf(account, id)` against a minimum. This is that binding, built so it can be reviewed and broken before it is proposed. The text is [`docs/drafts/erc-1155-wallet-pass-binding.md`](docs/drafts/erc-1155-wallet-pass-binding.md), with every line marked built or not built. **It is a draft: names and behaviour under `standard: "erc1155"` can change with review, and none of it is part of ERC-8426.** Nothing changes for an ERC-721 issuer unless a line below says so.
 
@@ -25,7 +27,7 @@ Two hosted demos run on it: a pass with one tap vote links, retired when its acc
 - Use-case demos: every tap posts an `attempt` of its own, as the confirm page does. They had been tapping one link several times with an identical body, which the issuer answers from its repeat store, so the pet game's "a 5th feed is refused" step failed and three more failures were hidden behind it. The demos now run in CI. (#21)
 - Example app: the pass list scans Transfer logs in spans. One query over the contract's whole history had outgrown the public node's limit of ten million blocks, and the hosted list answered 500. (#22)
 
-## Earlier unreleased notes (documentation only, no package change)
+**Documentation carried in this release**
 
 - `docs/deployment-notes.md`: a section on session grants on a shared account. Two grant requests for one account that are in flight together can be assigned the same validation slot (reproduced on a test network; the provider confirmed the cause from its logs), the first session to act wins, the other fails at send on every try while a simulation passes for it. New lesson 15, serialize session grants per account; lessons 15 to 26 become 16 to 27.
 - `docs/security.md`: checklist item for one session grant at a time per account.

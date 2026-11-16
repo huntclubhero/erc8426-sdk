@@ -119,6 +119,14 @@ Every use case below ships as a Solidity contract in [`packages/contracts/src/ex
 
 The partner app pattern is where the programmability opens up: a static pass links into an app (universal link or app link), and the app uses `@erc8426/client` to run signed actions of any shape, so the card becomes a front door to everything the contract can do.
 
+## ERC-1155 (working draft)
+
+ERC-8426 covers ERC-721. For tokens with many holders (editions, memberships, votes) this SDK carries a working draft of an ERC-1155 binding since 0.5.0: a pass belongs to an id and an account, and it works while a fresh `balanceOf(account, id)` is at least a minimum. It is a draft under review on the ERC-8426 thread, it is not part of ERC-8426, and its names and behaviour can change.
+
+- The proposed text, each requirement marked built or not built: [`docs/drafts/erc-1155-wallet-pass-binding.md`](docs/drafts/erc-1155-wallet-pass-binding.md)
+- Turn it on with `standard: "erc1155"` on the issuer. The contracts are `ERC1155WalletPass` and the examples `EditionPass`, `VoteEditionPass` and `SwapOnRedeemTicket`.
+- Two hosted demos on a test network, both from [`examples/next-app`](examples/next-app): [a vote cast from the card, one unit one vote](https://erc8426-demo.vercel.app/edition), and [a pass that goes dark and comes back](https://erc8426-demo.vercel.app/member).
+
 ## Built with ERC-8426
 
 These were built by the author of the standard. They are the reason the spec reads the way it does.
@@ -158,6 +166,7 @@ Read [docs/security.md](docs/security.md) before going to production.
 - [Apple Wallet setup](docs/platforms/apple.md) and [Google Wallet setup](docs/platforms/google.md)
 - [Deploying](docs/deploy.md)
 - [FAQ](docs/faq.md)
+- [ERC-1155 binding, working draft](docs/drafts/erc-1155-wallet-pass-binding.md)
 
 ## Development
 
