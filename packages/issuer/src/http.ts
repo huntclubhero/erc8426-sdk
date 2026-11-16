@@ -367,7 +367,11 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // account under an additive policy shares the holder of record's pass,
     // so the pass is always rendered for the holder of record.
     const record = await x.recordIssuance(tokenId, result.account);
-    return json(200, await x.buildManifest(record, record.lastIssuedTo ?? result.account));
+    const built = await x.buildManifest(record, record.lastIssuedTo ?? result.account);
+    // As on a download: a manifest built for a pass that went dark or was
+    // retired meanwhile is not handed out.
+    if (!(await x.settled(record))) return error("not_owner");
+    return json(200, built);
   }
 
   // GET {base}/:tokenId/challenge?address=&action=
@@ -596,6 +600,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     }
     const content = await x.renderContent(record, holder, false);
     const file = await provider.passFile({ token: x.token(record.tokenId), owner: holder, content });
+    // The record was read before the chain was. If the pass went dark or was
+    // retired while this request rendered it live, the live file is not
+    // served, and the provider is told the dark pass again.
+    if (!(await x.settled(record))) return error("not_owner");
     const headers: Record<string, string> = { "Content-Type": file.contentType, "Cache-Control": "no-store" };
     if (file.filename) headers["Content-Disposition"] = `attachment; filename="${file.filename.replace(/["\\\r\n]/g, "")}"`;
     return new Response(typeof file.body === "string" ? file.body : new Uint8Array(file.body), { status: 200, headers });

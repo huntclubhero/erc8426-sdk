@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { getAddress, isAddress } from "viem";
 
 import { underLimit } from "@/lib/kv";
@@ -15,6 +16,9 @@ export async function GET(request: Request): Promise<Response> {
   if (loaded instanceof Error) return json({ error: "internal_error", message: loaded.message }, { status: 500 });
   if (!loaded) return json({ error: "not_found", message: "No member pass is configured" }, { status: 404 });
   const m = loaded;
+  // The page polls this, so on a serverless host it also drives the read
+  // over every issued account (at most once a minute across instances).
+  if (!m.rt.config.watchers) after(() => m.sync().then(() => undefined, (e: Error) => console.warn(`[member sync] ${e.message}`)));
   const account = new URL(request.url).searchParams.get("account");
   if (account && !isAddress(account)) return json({ error: "invalid_request", message: "account must be an address" }, { status: 400 });
 
@@ -47,8 +51,11 @@ export async function GET(request: Request): Promise<Response> {
 
 /// Ask the issuer to read one account's balance now and act on it, as a
 /// watcher would have on the transfer: dark when it holds no unit, live
-/// again when it does. It is a read of the chain and can only bring a pass
-/// in line with it, so it needs no proof; it is capped per visitor.
+/// again when it does. It needs no proof because it only makes the issuer
+/// look: the issuer takes a pass dark only when two reads agree. A node
+/// that lags can still answer both, so the look is capped per visitor and
+/// per account, and a pass taken dark by mistake comes back on the next
+/// read that sees the unit.
 export async function POST(request: Request): Promise<Response> {
   const m = await getMemberRuntime().catch((e: Error) => e);
   if (m instanceof Error) return json({ error: "internal_error", message: m.message }, { status: 500 });
@@ -56,8 +63,12 @@ export async function POST(request: Request): Promise<Response> {
   const body = (await request.json().catch(() => null)) as { account?: unknown } | null;
   const account = typeof body?.account === "string" && isAddress(body.account) ? getAddress(body.account) : null;
   if (!account) return json({ error: "invalid_request", message: "account must be an address" }, { status: 400 });
-  if (m.rt.redis && !(await underLimit(m.rt.redis, `${m.rt.prefix}limit:member-check:ip:${clientIp(request)}`, 120, 3600))) {
-    return json({ error: "rate_limited", message: "Too many checks from this visitor. Try again later." }, { status: 429 });
+  if (
+    m.rt.redis &&
+    (!(await underLimit(m.rt.redis, `${m.rt.prefix}limit:member-check:ip:${clientIp(request)}`, 120, 3600)) ||
+      !(await underLimit(m.rt.redis, `${m.rt.prefix}limit:member-check:account:${account.toLowerCase()}`, 12, 600)))
+  ) {
+    return json({ error: "rate_limited", message: "Too many checks. Try again in a few minutes." }, { status: 429 });
   }
   try {
     const s = await m.check(account);

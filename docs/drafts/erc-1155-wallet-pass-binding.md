@@ -105,6 +105,7 @@ ERC-8426 makes a transfer the trigger in several places, among them the gated co
 - A transfer that leaves the sender at or above the minimum MUST NOT retire the sender's URLs. Selling one of three at a minimum of 1 changes nothing but the count. (built)
 - A transfer never touches the pass of an account that is not its sender or receiver. (built)
 - The moment is the read. A Pass Issuer that takes a fresh read and finds the account below the minimum SHOULD apply what follows then, on that request, whichever request it is (a link, a download, or the account's own proof), and not wait for an event or a timer. Otherwise the link it just refused answers again when the balance returns. (built: our first version answered 403 and left the link alive)
+- Acting on a loss costs the holder more than a refusal does: a retired card has to be added again, and a dark one tells their lock screen. A node that lags can answer one read with an old balance. A Pass Issuer SHOULD act on a loss only when a second read agrees. The refusal itself needs no second read. (built: one stale read used to take a live pass dark)
 
 What happens to the pass depends on which path its actions take:
 
@@ -112,6 +113,8 @@ What happens to the pass depends on which path its actions take:
 - A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. It is the default for such a pass; a Pass Issuer MAY retire instead. (built, and seen on a real phone in Apple Wallet: the card went dark with a notification and came back as the same card)
   - The acquisition URLs MUST still be retired, including when a balance left and came back. In the gated configuration they are possession proofs for the download. (built)
   - A dark pass SHOULD say that it is dark, for the reason a superseded pass says why. (built)
+  - A dark pass keeps its serial, so what the wallet platform holds for that serial is all that makes the card dark. A Pass Issuer MUST NOT hand out, or leave with a platform, live content rendered from a read taken before the pass went dark. (built: in our first version a download in flight while the unit left put the live card back)
+  - A platform that updates a pass by merging keeps what an update leaves out. A dark pass replaces what the live pass showed (a barcode, for one) and does not merely omit it. (built in the example, found by review; not yet seen on a Google device)
 - Staking and escrow: use a documented entitlement that reads the staking or escrow contract's record fresh, so the holder never loses entitlement in the first place. (not built)
 
 ## How the issuer finds out
@@ -161,4 +164,5 @@ Not built: per unit passes, the public configuration, delegates, a staking polic
 
 1. The normative wording for "`passURI` throws for a token that is not valid" where a contract tracks no supply.
 2. Whether the fan-out of `PassUpdate` gets a SHOULD on pacing.
-3. Per unit passes are left out of this version, with their discovery sketched above (a manifest member, plus an optional contract view under its own identifier). Is anyone building something that needs per unit in the first version?
+3. A read from a node that lags cannot be told from a true one. A second read catches most of it and not all. Is there a better rule than "two reads agree" that an issuer on a public node can follow?
+4. Per unit passes are left out of this version, with their discovery sketched above (a manifest member, plus an optional contract view under its own identifier). Is anyone building something that needs per unit in the first version?

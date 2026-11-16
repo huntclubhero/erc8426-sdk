@@ -423,6 +423,109 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(404);
   });
 
+  it("does not act on one stale read: a loss is acted on only when a second read agrees", async () => {
+    for (const make of [signedOnly, harness]) {
+      const h = make();
+      const alice = newSigner();
+      h.chain.setBalance(ID, alice.address, 1n);
+      const first = await claim(h, alice, ID);
+      const download = new URL(first.body.formats.apple).pathname;
+      const pushes = h.notified.length;
+      // One answer from a node that lags: the balance before the claim.
+      const real = h.chain.balanceOf.bind(h.chain);
+      let stale = true;
+      h.chain.balanceOf = async (...args) => {
+        if (!stale) return real(...args);
+        stale = false;
+        return 0n;
+      };
+      expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+      expect(h.notified).toHaveLength(pushes);
+      expect((await h.get(download)).status).toBe(200);
+    }
+  });
+
+  it("acts once when two checks find the same loss together", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    await claim(h, alice, ID);
+    h.chain.setBalance(ID, alice.address, 0n);
+    const pushes = h.notified.length;
+    const both = await Promise.all([h.issuer.checkHoldings(ID, { accounts: [alice.address] }), h.issuer.checkHoldings(ID, { accounts: [alice.address] })]);
+    expect(both.reduce((n, s) => n + s.dark.length, 0)).toBe(1);
+    expect((await recordOf(h, alice.address))!.dark).toBe(true);
+    // One pass, one provider set: told once.
+    const told = h.notified.slice(pushes);
+    expect(new Set(told.map((n) => n.format)).size).toBe(told.length);
+  });
+
+  it("does not serve a live file, or leave live content with a provider, for a pass that went dark while the download ran", async () => {
+    let gate: Promise<void> | null = null;
+    let reached = () => {};
+    const h = signedOnly({
+      render: async (ctx) => {
+        // The live render of the racing download waits here, as it would
+        // on a chain read, while the unit leaves and the issuer finds out.
+        if (gate && !ctx.dark) {
+          reached();
+          await gate;
+        }
+        return { serial: ctx.serial, organizationName: "Example", description: ctx.dark ? "dark" : "live", title: "Member", links: [] };
+      },
+    });
+    const alice = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    const first = await claim(h, alice, ID);
+    const download = new URL(first.body.formats.apple).pathname;
+
+    let release = () => {};
+    gate = new Promise<void>((r) => (release = r));
+    const atRender = new Promise<void>((r) => (reached = r));
+    const racing = h.get(download);
+    await atRender;
+    h.chain.setBalance(ID, alice.address, 0n);
+    expect((await h.issuer.checkHoldings(ID)).dark).toEqual([alice.address]);
+    expect(h.notified.at(-1)!.ctx.content.description).toBe("dark");
+    release();
+    const res = await racing;
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toBe("not_owner");
+    // Whatever the provider was handed for the live file, the last thing it
+    // was told for this serial is the dark pass.
+    expect(h.notified.at(-1)!.ctx.content.description).toBe("dark");
+    expect((await recordOf(h, alice.address))!.dark).toBe(true);
+  });
+
+  it("dates a pass that came back, so a transfer log from before it does not replace its new URLs", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    const bob = newSigner();
+    h.chain.head = 101n;
+    h.chain.setBalance(ID, alice.address, 1n);
+    await claim(h, alice, ID);
+    // The unit leaves at block 102 and the issuer finds out by a read.
+    h.chain.head = 102n;
+    h.chain.setBalance(ID, alice.address, 0n);
+    h.chain.setBalanceAt(102n, ID, alice.address, 0n);
+    expect((await h.issuer.checkHoldings(ID)).dark).toEqual([alice.address]);
+    // It comes back at 103, the pass with it, and new URLs are handed out.
+    h.chain.head = 103n;
+    h.chain.setBalance(ID, alice.address, 1n);
+    expect((await h.issuer.checkHoldings(ID)).revived).toEqual([alice.address]);
+    expect((await recordOf(h, alice.address))!.issuedAtBlock).toBe("103");
+    const again = await claim(h, alice, ID);
+    const download = new URL(again.body.formats.apple).pathname;
+    expect((await h.get(download)).status).toBe(200);
+    // The log of the transfer at 102 arrives late.
+    await h.issuer.onTransfer(ID, alice.address, bob.address, 102n);
+    expect((await h.get(download)).status).toBe(200);
+    expect((await recordOf(h, alice.address))!.dark).toBeUndefined();
+  });
+
   it("brings a dark pass back on the account's own claim", async () => {
     const h = signedOnly();
     const alice = newSigner();

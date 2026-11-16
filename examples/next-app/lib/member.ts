@@ -23,6 +23,13 @@ import { getRuntime, type Runtime } from "./server";
 /// and why), keeps its serial, and comes back live on the same card when the
 /// account holds a unit again. The acquisition URLs are still replaced each
 /// time: they are possession proofs for the download.
+///
+/// What this demo does not do: it reads no transfer logs. The issuer finds
+/// out by reading balances (on the page's request, and about once a minute
+/// while the site has visitors), so a unit that leaves and comes back
+/// between two reads is never seen, and its pass and URLs stay as they were.
+/// The edition next door reads the logs for that (lib/edition.ts); the
+/// library call is `issuer.onTransfer(id, from, to, blockNumber)`.
 
 export const memberAbi = parseAbi([
   "function balanceOf(address account, uint256 id) view returns (uint256)",
@@ -43,7 +50,7 @@ export interface MemberRuntime {
   issuer: Issuer;
   apple: AppleFormatProvider | null;
   /// Whether `account` has an installed pass, and whether it is dark.
-  passOf(account: Address): Promise<{ serial: string; dark: boolean } | null>;
+  passOf(account: Address): Promise<{ dark: boolean } | null>;
   /// Read one account's balance fresh and act on it now: dark when it is
   ///  below one unit, live again when it holds.
   check(account: Address): Promise<HoldingsSummary>;
@@ -121,8 +128,13 @@ async function createMemberRuntime(rt: Runtime, member: EditionEnv): Promise<Mem
         { key: "site", label: "Demo site", value: `${config.baseUrl}/member` },
       ],
       links: [],
-      // A dark pass presents nothing to scan.
-      ...(off ? {} : { barcode: { format: "qr" as const, message: assetId(token), altText: `Member #${token.tokenId}` } }),
+      // A dark pass presents nothing useful to scan. The code is replaced
+      // and not removed: Google Wallet updates an object by PATCH, which
+      // keeps a member the update leaves out, so a dark pass with no
+      // barcode would go on showing the live one there.
+      barcode: off
+        ? { format: "qr" as const, message: "This pass is dark: the account holds no unit.", altText: "Dark" }
+        : { format: "qr" as const, message: assetId(token), altText: `Member #${token.tokenId}` },
     };
     return content;
   };
@@ -159,6 +171,10 @@ async function createMemberRuntime(rt: Runtime, member: EditionEnv): Promise<Mem
         classSuffix: member.googleClassSuffix,
         origins: [new URL(config.baseUrl).origin],
         unhostedImages: "omit",
+        // A save link names the object, and a dark pass keeps its object, so
+        // a link handed out before the pass went dark still saves it until
+        // the link expires. Five minutes, where the default is an hour.
+        ttlSeconds: 300,
         messageFor: () => ({ header: "Your member pass changed", body: "Open the pass to see it." }),
         onError: (err, where) => console.warn(`[google member] ${where}: ${err.message}`),
       }),
@@ -192,7 +208,7 @@ async function createMemberRuntime(rt: Runtime, member: EditionEnv): Promise<Mem
   const passOf = async (account: Address) => {
     const record = await issuer.stores.passes.get(passKeyFor(id, account));
     if (!record || record.lastIssuedTo === null) return null;
-    return { serial: record.serial, dark: record.dark === true };
+    return { dark: record.dark === true };
   };
   const check = (account: Address) => issuer.checkHoldings(id, { accounts: [account] });
   let memorySyncedAt = 0;

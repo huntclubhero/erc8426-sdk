@@ -131,7 +131,8 @@ step(live.status === 200 && fieldOf(live.content, "status") === "Active", "holdi
 step((live.content?.links ?? []).length === 0, "the pass carries no links");
 const serial = live.content?.serial;
 const before = await state();
-step(Boolean(before.pass) && before.pass.dark === false && before.pass.serial === serial, "the issuer has a live pass on record for A");
+step(Boolean(before.pass) && before.pass.dark === false, "the issuer has a live pass on record for A");
+step(before.pass?.serial === undefined, "the public state does not give out the pass serial");
 
 // 4. Send the unit away: dark, not retired.
 await write("safeTransferFrom", [alice.address, AWAY, id, 1n, "0x"]);
@@ -139,7 +140,7 @@ await until(async () => (await balance()) === 0n, 30_000);
 const went = await check();
 step(went.res.ok && went.body.dark === true, "A holds none: the issuer read the balance and took the pass dark", JSON.stringify(went.body));
 const darkState = await state();
-step(Boolean(darkState.pass) && darkState.pass.dark === true && darkState.pass.serial === serial, "the pass is dark and kept its serial (it was not retired)");
+step(Boolean(darkState.pass) && darkState.pass.dark === true, "the pass is dark, and still on record (it was not retired)");
 const oldDownload = await preview(first.manifest);
 step(oldDownload.status === 404, "its download address from before was replaced", `HTTP ${oldDownload.status}`);
 const whileDark = await refusal(() => passes.getManifest(token, { signer: alice }));

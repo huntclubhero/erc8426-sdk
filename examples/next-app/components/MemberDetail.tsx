@@ -33,7 +33,7 @@ interface MemberState {
   claimLimit: string;
   open: boolean;
   passUri: string;
-  holder: { account: string; balance: string; claimed: string; hasGas: boolean; pass: { serial: string; dark: boolean } | null } | null;
+  holder: { account: string; balance: string; claimed: string; hasGas: boolean; pass: { dark: boolean } | null } | null;
 }
 
 interface Unlocked {
@@ -121,31 +121,46 @@ export function MemberDetail() {
   /// watcher would have on the transfer.
   const check = async (who: string) => {
     const res = await fetch("/api/member", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account: who }) }).catch(() => null);
-    return res?.ok ? ((await res.json()) as { dark: boolean; revived: boolean; pass: { serial: string; dark: boolean } | null }) : null;
+    return res?.ok ? ((await res.json()) as { dark: boolean; revived: boolean; pass: { dark: boolean } | null }) : null;
+  };
+
+  /// The node that answers a read can be a moment behind the one that mined
+  /// the transaction. Wait until a read shows the change before asking the
+  /// issuer to look, or it looks too early and sees the old balance.
+  const balanceShows = async (who: `0x${string}`, want: (held: bigint) => boolean) => {
+    for (let i = 0; i < 15; i++) {
+      const held = await publicClient.readContract({ address: member.contract, abi: memberAbi, functionName: "balanceOf", args: [who, BigInt(member.id)] }).catch(() => null);
+      if (held !== null && want(held)) return true;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return false;
   };
 
   const claim = () =>
     run("claim", async () => {
       if (!walletClient || !address) return;
+      const who = address;
       const hadDarkPass = state?.holder?.pass?.dark === true;
       try {
         const hash = await walletClient.writeContract({ address: member.contract, abi: memberAbi, functionName: "claim", args: [BigInt(member.id), 1n] });
         await publicClient.waitForTransactionReceipt({ hash });
-        const seen = await check(address);
+        await balanceShows(who, (held) => held >= 1n);
+        const seen = hadDarkPass ? await check(who) : null;
+        if (current.current !== who) return;
         if (hadDarkPass) {
           log(
             "Holding again",
             true,
             seen?.revived
               ? `Claimed 1 unit, transaction ${shortHex(hash)}. The issuer read your balance and brought your pass back: the same card, the same serial, live again. Look at your wallet.`
-              : `Claimed 1 unit, transaction ${shortHex(hash)}. Your pass comes back when the issuer next reads your balance.`,
+              : `Claimed 1 unit, transaction ${shortHex(hash)}. The issuer has not seen it yet. Your pass comes back the next time it reads your balance, within about a minute while this page is open.`,
           );
         } else {
           log("Claimed", true, `1 unit of membership ${member.id}, transaction ${shortHex(hash)}.`);
         }
         await load();
       } catch (e) {
-        log("Claim failed", false, describe(e));
+        if (current.current === who) log("Claim failed", false, describe(e));
       }
     });
 
@@ -174,28 +189,35 @@ export function MemberDetail() {
   const sendAway = () =>
     run("send", async () => {
       if (!walletClient || !address) return;
+      const who = address;
+      const hadPass = Boolean(state?.holder?.pass);
       try {
-        const held = await publicClient.readContract({ address: member.contract, abi: memberAbi, functionName: "balanceOf", args: [address, BigInt(member.id)] });
+        const held = await publicClient.readContract({ address: member.contract, abi: memberAbi, functionName: "balanceOf", args: [who, BigInt(member.id)] });
         if (held < 1n) return log("Send", false, "You hold no unit.");
         const hash = await walletClient.writeContract({
           address: member.contract,
           abi: memberAbi,
           functionName: "safeTransferFrom",
-          args: [address, AWAY, BigInt(member.id), held, "0x"],
+          args: [who, AWAY, BigInt(member.id), held, "0x"],
         });
         await publicClient.waitForTransactionReceipt({ hash });
-        const seen = await check(address);
+        await balanceShows(who, (left) => left < 1n);
+        const seen = hadPass ? await check(who) : null;
+        if (current.current !== who) return;
         setUnlocked(null);
+        const sent = `${held} ${held === 1n ? "unit" : "units"} sent, transaction ${shortHex(hash)}. You hold none now.`;
         log(
           "Sent away",
           true,
-          seen?.dark
-            ? `${held} ${held === 1n ? "unit" : "units"} sent, transaction ${shortHex(hash)}. You hold none now. The issuer read your balance and took your pass dark: it stays in your wallet, says it is dark and why, and its download addresses were replaced. Look at your wallet.`
-            : `${held} ${held === 1n ? "unit" : "units"} sent, transaction ${shortHex(hash)}. You hold none now. ${seen?.pass ? "Your pass goes dark when the issuer next reads your balance." : "You had not unlocked a pass, so there is none to go dark."}`,
+          !hadPass
+            ? `${sent} You had not unlocked a pass, so there is none to go dark.`
+            : seen?.dark || seen?.pass?.dark
+              ? `${sent} The issuer read your balance and took your pass dark: it stays in your wallet, says it is dark and why, and its download addresses were replaced. Look at your wallet.`
+              : `${sent} The issuer has not acted on it yet. Your pass goes dark the next time it reads your balance, within about a minute while this page is open.`,
         );
         await load();
       } catch (e) {
-        log("Send failed", false, describe(e));
+        if (current.current === who) log("Send failed", false, describe(e));
       }
     });
 
@@ -279,7 +301,7 @@ export function MemberDetail() {
                   ) : null}
                   {balance >= 1n ? (
                     <button type="button" className="btn" onClick={() => void sendAway()} disabled={busy !== null} aria-busy={busy === "send"}>
-                      Send my unit away
+                      {balance === 1n ? "Send my unit away" : `Send all ${balance.toString()} of my units away`}
                     </button>
                   ) : null}
                 </div>
@@ -356,7 +378,7 @@ export function MemberDetail() {
               The edition pass on this site carries vote links that work with one tap and no signature. A copy of that card could vote, so when its account stops holding, the card is retired for good and a returning holder gets a new one.
             </p>
             <p className="muted small">
-              This pass carries no such link. A copy of it can do nothing, so the issuer may keep the card and switch it off: it goes dark, says why, and comes back when the account holds again. The download addresses are still replaced every time, because they hand
+              This pass carries no such link. A copy of it can do nothing, so the issuer may keep the card and switch it off: it goes dark, says why, and comes back when the account holds again. Its download addresses are still replaced each time the issuer sees the unit gone, because they hand
               out the pass itself.
             </p>
           </section>

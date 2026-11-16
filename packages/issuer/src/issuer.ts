@@ -27,7 +27,7 @@ import { checkEntitlement, minimumBalance, ownerOnly, type EntitlementPolicy, ty
 import { IssuerError } from "./errors.js";
 import { createRouter } from "./http.js";
 import { eoaSignatureVerifier, publicClientSignatureVerifier, type SignatureVerifier, type VerifyMessageClient } from "./signature.js";
-import { memoryStores, passKeyFor, type IssuerStores, type LinkBinding, type PassRecord } from "./stores.js";
+import { memoryStores, passKeyFor, passRecordKey, type IssuerStores, type LinkBinding, type PassRecord } from "./stores.js";
 
 /// Providers are core's delivery seam: a `PassFormatProvider` returns an
 ///  acquisition URL; a `PassFileProvider` returns the file, which the issuer
@@ -263,6 +263,11 @@ export interface IssuerInternals {
   ///  holdings check would. ERC-721: nothing (the new owner's claim or the
   ///  observed transfer rotates). Never throws.
   lost(record: PassRecord): Promise<void>;
+  /// ERC-1155: after a pass was rendered and handed to a provider for a
+  ///  request, whether the record is still the live pass that was rendered.
+  ///  False when it went dark or was retired while the request ran; if it
+  ///  went dark, the dark content is pushed again first. ERC-721: true.
+  settled(record: PassRecord): Promise<boolean>;
 }
 
 type RotationReason = "transfer" | "claim" | "owner_request";
@@ -643,10 +648,46 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return next;
   }
 
+  // Acting on a loss costs the holder something a refusal does not: a retired
+  // card has to be added again, and a dark one tells their lock screen. A
+  // node that lags can answer one read with an old balance, so the loss is
+  // acted on only when a second read agrees, and only if the record is still
+  // the live pass that was read (another request may have acted meanwhile).
+  // Returns what was done, or null when nothing was.
+  //
+  // One at a time per pass within this process, so two requests that find
+  // the same loss together act on it once. Across instances there is no
+  // compare and set on a record: two of them can both act, which costs a
+  // second push and nothing else.
+  const losing = new Map<string, Promise<unknown>>();
+  async function loseIfConfirmed(record: PassRecord, account: Address): Promise<"retired" | "dark" | null> {
+    const key = passRecordKey(record);
+    const turn = (losing.get(key) ?? Promise.resolve()).then(
+      async () => {
+        if ((await internals.entitled(record.tokenId, account, ACQUIRE_ACTION)).entitled) return null;
+        const current = await stores.passes.get(key);
+        if (!current || current.lastIssuedTo === null || current.dark || current.serial !== record.serial) return null;
+        return lose(current);
+      },
+    );
+    const settled = turn.catch(() => undefined);
+    losing.set(key, settled);
+    void settled.then(() => {
+      if (losing.get(key) === settled) losing.delete(key);
+    });
+    return turn;
+  }
+
   // A dark pass whose account holds again: the same card, live.
   async function revive(record: PassRecord): Promise<void> {
     delete record.dark;
     record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
+    // The account was just read as holding, so this is a new issuance as far
+    // as an older transfer log is concerned: a log from before it, delivered
+    // late, must not be held against the pass that came back.
+    const head = await chain?.blockNumber?.().catch(() => undefined);
+    if (head === undefined) delete record.issuedAtBlock;
+    else record.issuedAtBlock = head.toString();
     await stores.passes.put(record);
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, false, "revive");
   }
@@ -712,7 +753,15 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         summary.retired.push(account);
       } else if (!holds) {
         if (record.dark) continue;
-        summary[(await lose(record)) === "retired" ? "retired" : "dark"].push(account);
+        let did: "retired" | "dark" | null;
+        try {
+          did = await loseIfConfirmed(record, account);
+        } catch (error) {
+          onError(error, { operation: "holdings:read", tokenId: id });
+          failed.push(account);
+          continue;
+        }
+        if (did) summary[did].push(account);
       } else if (record.dark) {
         await revive(record);
         summary.revived.push(account);
@@ -919,10 +968,25 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // of the id is left alone: no read, no push.
       await refreshAccount(normalizeTokenId(tokenId), account);
     },
+    async settled(record) {
+      if (!is1155) return true;
+      const current = await stores.passes.get(passRecordKey(record));
+      if (!current || current.lastIssuedTo === null || current.serial !== record.serial) return false;
+      if (!current.dark) return true;
+      // The pass went dark while this request was rendering it live, and
+      // the provider may have stored that live content. Say dark again, so
+      // the last thing a provider holds for the serial is the dark pass.
+      try {
+        await notify(current, current.lastIssuedTo, false, "dark");
+      } catch (error) {
+        onError(error, { operation: "holdings:lost", tokenId: record.tokenId });
+      }
+      return false;
+    },
     async lost(record) {
       if (!is1155 || record.lastIssuedTo === null || record.dark) return;
       try {
-        await lose(record);
+        await loseIfConfirmed(record, record.lastIssuedTo);
       } catch (error) {
         onError(error, { operation: "holdings:lost", tokenId: record.tokenId });
       }
