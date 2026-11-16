@@ -447,6 +447,54 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     h.chain.setBalance(ID, alice.address, 0n);
     const res = await h.post(`/wallet-pass/${ID}/actions/levelUp`, p);
     expect(res.status).toBe(403);
+    // The read that refused it is acted on then: the pass is dark now, with
+    // no link, download, event or timer involved.
+    expect((await recordOf(h, alice.address))!.dark).toBe(true);
+    expect((await recordOf(h, alice.address))!.lastIssuedTo).not.toBeNull();
+  });
+
+  it("acts on the loss when the account's own proof meets the fresh read: acquire, action and rotate", async () => {
+    for (const path of ["acquire", "action", "rotate"] as const) {
+      const h = harness();
+      const alice = newSigner();
+      const bob = newSigner();
+      h.chain.setBalance(ID, alice.address, 1n);
+      h.chain.setBalance(ID, bob.address, 1n);
+      await claim(h, alice, ID);
+      await claim(h, bob, ID);
+      const aliceLinks = await linksOf(h, alice.address);
+      const bobLinks = await linksOf(h, bob.address);
+      const proof = path === "acquire" ? null : await signChallenge(h, alice, ID, path === "action" ? "levelUp" : "rotate");
+      h.chain.setBalance(ID, alice.address, 0n);
+
+      const res =
+        path === "acquire"
+          ? (await claim(h, alice, ID)).res
+          : await h.post(path === "action" ? `/wallet-pass/${ID}/actions/levelUp` : `/wallet-pass/${ID}/rotate`, proof!);
+      expect(res.status, path).toBe(403);
+      // An issuer with capability links retires: the link is gone for good,
+      // also when the balance comes back, and nobody else's pass is touched.
+      expect((await recordOf(h, alice.address))!.lastIssuedTo, path).toBeNull();
+      h.chain.setBalance(ID, alice.address, 1n);
+      expect((await h.post(aliceLinks.feed!, {})).status, path).toBe(404);
+      expect(await linksOf(h, bob.address), path).toEqual(bobLinks);
+      expect((await h.post(bobLinks.feed!, {})).status, path).toBe(200);
+    }
+  });
+
+  it("leaves the pass alone when a proof is refused for a reason other than the balance", async () => {
+    const h = harness();
+    const alice = newSigner();
+    const mallory = newSigner();
+    h.chain.setBalance(ID, alice.address, 1n);
+    await claim(h, alice, ID);
+    const links = await linksOf(h, alice.address);
+    // A stranger's proof is refused and concerns no pass of Alice's.
+    expect((await claim(h, mallory, ID)).res.status).toBe(403);
+    expect((await h.post(`/wallet-pass/${ID}/rotate`, await signChallenge(h, mallory, ID, "rotate"))).status).toBe(403);
+    expect((await recordOf(h, alice.address))!.lastIssuedTo).toBe(alice.address);
+    expect(await linksOf(h, alice.address)).toEqual(links);
+    expect((await h.post(links.feed!, {})).status).toBe(200);
   });
 
   it("can be told to retire all the same", async () => {
@@ -573,11 +621,16 @@ describe("ERC-1155 binding: the transfer watcher", () => {
       { eventName: "TransferSingle", blockNumber: 10n, args: { from, to, id: 7n, value: 1n } },
       { eventName: "TransferBatch", blockNumber: 11n, args: { from, to, ids: [1n, 2n, 1n], values: [1n, 1n, 1n] } },
       { eventName: "TransferSingle", removed: true, blockNumber: 12n, args: { from, to, id: 9n, value: 1n } },
+      // A transfer of zero units is free and can name anyone: not a hint.
+      { eventName: "TransferSingle", blockNumber: 13n, args: { from, to, id: 5n, value: 0n } },
+      { eventName: "TransferBatch", blockNumber: 14n, args: { from, to, ids: [3n, 4n], values: [0n, 0n] } },
+      { eventName: "TransferBatch", blockNumber: 15n, args: { from, to, ids: [3n, 4n], values: [0n, 2n] } },
     ]);
     expect(calls).toEqual([
       [7n, from, to, 10n],
       [1n, from, to, 11n],
       [2n, from, to, 11n],
+      [4n, from, to, 15n],
     ]);
   });
 });

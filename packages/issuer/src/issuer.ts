@@ -258,8 +258,8 @@ export interface IssuerInternals {
   /// What an action's `notifyUpdate` runs. ERC-721: the token's pass update.
   ///  ERC-1155: the acting account's pass only, never every holder's.
   notifyAction(tokenId: string, account: Address): Promise<void>;
-  /// A fresh read on a link or download request found the record's account
-  ///  not entitled. ERC-1155: retire the pass or take it dark now, as a
+  /// A fresh read on a request (a link, a download, or a verified proof)
+  ///  found the record's account not entitled. ERC-1155: retire the pass or take it dark now, as a
   ///  holdings check would. ERC-721: nothing (the new owner's claim or the
   ///  observed transfer rotates). Never throws.
   lost(record: PassRecord): Promise<void>;

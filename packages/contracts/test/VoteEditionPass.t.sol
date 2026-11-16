@@ -232,6 +232,63 @@ contract VoteEditionPassTest is Test {
         assertEq(yes + no, supplyAtSnapshot);
     }
 
+    /// @dev The same invariant with room to move: up to 8 holders with up to
+    ///  a million units each, up to 24 transfers after the snapshot between
+    ///  16 accounts (zero unit transfers and transfers back included, with
+    ///  time passing in between), then every account votes, by any of the
+    ///  three ways. Units that moved after the snapshot carry no vote, so
+    ///  the tally is exactly the supply at the snapshot, never more.
+    function testFuzz_votesAreExactlyTheSnapshotSupply_manyHoldersManyMoves(uint256 seed) public {
+        VoteEditionPass big = new VoteEditionPass("https://meta.example/{id}.json", "https://issuer.example/edition-pass/", owner, 1_000_000);
+        vm.startPrank(owner);
+        big.setOpen(ID, true);
+        big.setVoteOperator(operator, true);
+        vm.stopPrank();
+
+        address[16] memory accounts;
+        for (uint256 i = 0; i < 16; ++i) {
+            accounts[i] = address(uint160(0xA11CE000 + i));
+        }
+        uint256 holders = bound(uint256(keccak256(abi.encode(seed, "holders"))), 2, 8);
+        uint256 supplyAtSnapshot;
+        for (uint256 i = 0; i < holders; ++i) {
+            uint256 amount = bound(uint256(keccak256(abi.encode(seed, "amount", i))), 1, 1_000_000);
+            vm.prank(accounts[i]);
+            big.claim(ID, amount);
+            supplyAtSnapshot += amount;
+        }
+        vm.prank(operator);
+        uint256 pid = big.propose(ID, "Paint the clubhouse", 1 hours);
+        skip(1);
+
+        uint256 moves = bound(uint256(keccak256(abi.encode(seed, "moves"))), 0, 24);
+        for (uint256 m = 0; m < moves; ++m) {
+            address from = accounts[uint256(keccak256(abi.encode(seed, "from", m))) % 16];
+            address to = accounts[uint256(keccak256(abi.encode(seed, "to", m))) % 16];
+            uint256 amount = bound(uint256(keccak256(abi.encode(seed, "units", m))), 0, big.balanceOf(from, ID));
+            vm.prank(from);
+            big.safeTransferFrom(from, to, ID, amount, "");
+            skip(uint256(keccak256(abi.encode(seed, "wait", m))) % 3);
+        }
+        // An account that claims after the snapshot has no vote either.
+        vm.prank(accounts[15]);
+        try big.claim(ID, 7) {} catch {}
+
+        for (uint256 i = 0; i < 16; ++i) {
+            uint256 way = uint256(keccak256(abi.encode(seed, "way", i))) % 3;
+            bool support = uint256(keccak256(abi.encode(seed, "support", i))) % 2 == 0;
+            if (way == 0) {
+                vm.prank(accounts[i]);
+                try big.castVote(pid, support) {} catch {}
+            } else {
+                vm.prank(operator);
+                try big.castVoteFor(accounts[i], pid, support, way == 2) {} catch {}
+            }
+        }
+        VoteEditionPass.Proposal memory p = big.proposal(pid);
+        assertEq(p.yes + p.no, supplyAtSnapshot);
+    }
+
     // ---- link votes and signed votes ------------------------------------------
 
     function test_aLinkVotesOnceAndCannotChangeAVote() public {

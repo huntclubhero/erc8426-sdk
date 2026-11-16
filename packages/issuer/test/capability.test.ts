@@ -148,6 +148,59 @@ describe("capability links (The capability configuration)", () => {
     expectLinkPageHeaders(refused);
   });
 
+  it("gives a custom confirm page the account the link was issued to, without a chain read", async () => {
+    const seen: Array<string | null> = [];
+    const h = buildHarness({
+      capability: {
+        enabled: true,
+        confirmPage: (ctx) => {
+          seen.push(ctx.account);
+          return new Response("ok", { status: 200, headers: { "Content-Type": "text/html" } });
+        },
+      },
+    });
+    const signer = newSigner();
+    const links = await issuePassTo(h, signer);
+    const reads = h.chain.reads;
+    const page = await h.get(links.feed!, { Accept: "text/html" });
+    expect(page.status).toBe(200);
+    expectLinkPageHeaders(page);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.toLowerCase()).toBe(signer.address.toLowerCase());
+    expect(h.chain.reads).toBe(reads);
+    expect(h.executed).toHaveLength(0);
+  });
+
+  it("tells the holder what happened in the action's own words, escaped, when it returns a message", async () => {
+    const said = (message: unknown) => ({
+      feed: { description: "Feed the pet", capability: true, bound: "Idempotent; moves no value", execute: () => ({ fed: true, message }) },
+    });
+    const submit = async (message: unknown) => {
+      const h = buildHarness({ actions: said(message) });
+      const links = await issuePassTo(h, newSigner());
+      const res = await h.issuer.handler(
+        new Request(`https://issuer.example${links.feed}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "text/html" },
+          body: "action=feed",
+        }),
+      );
+      expect(res.status).toBe(200);
+      return res.text();
+    };
+    const html = await submit('You fed <b>Rex</b> & "friends"');
+    expect(html).toContain("Done");
+    expect(html).toContain("You fed &#60;b&#62;Rex&#60;/b&#62; &#38; &#34;friends&#34;");
+    expect(html).not.toContain("<b>Rex</b>");
+    expect(html).not.toContain("The action ran.");
+    // Anything that is not a non-empty string keeps the built-in sentence,
+    // and a long message is cut.
+    for (const not of [undefined, "", "   ", 7, { text: "x" }]) expect(await submit(not)).toContain("The action ran.");
+    const long = await submit("a".repeat(400));
+    expect(long).toContain("a".repeat(280));
+    expect(long).not.toContain("a".repeat(281));
+  });
+
   it("uses a custom confirm page when configured, and adds the link page headers to it", async () => {
     const h = buildHarness({
       capability: { enabled: true, confirmPage: (ctx) => new Response(`confirm ${ctx.action}`, { headers: { "Content-Type": "text/plain" } }) },

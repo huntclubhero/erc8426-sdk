@@ -68,6 +68,9 @@ export interface ActionDefinition<Result = unknown> {
   transfersOrBurns?: boolean;
   /// Apply the effect. Throw an `ActionError` to refuse with a chosen status;
   ///  the return value is sent back as `result` (keep it JSON serializable).
+  ///  When a browser posted the confirm page's form, a string `message` on
+  ///  the returned object is what the built-in result page shows the holder
+  ///  (up to 280 characters, escaped), in place of "The action ran."
   execute(ctx: ActionContext): Result | Promise<Result>;
 }
 
@@ -80,6 +83,12 @@ export interface LinkPageContext {
   /// The URL the confirm page POSTs to (the link itself).
   postUrl: string;
   request: Request;
+  /// The account the link was issued to, or null for a link not yet issued
+  ///  to anyone. From the issuer's own record: no chain read is taken for a
+  ///  GET, so this says who the link belongs to, not that they still hold.
+  ///  A page can use it to show that account's public state (for example
+  ///  that it has already acted).
+  account: Address | null;
 }
 
 export interface CapabilityConfig {

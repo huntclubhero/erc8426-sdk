@@ -351,7 +351,10 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       if (receipt.status !== "success") throw new ActionError(502, "action_failed", "The vote transaction reverted.");
       await notifyUpdate();
-      return { action, proposalId: proposal.proposalId, support, signed: path === "signed", transactionHash: hash };
+      // `message` is what the phone shows after Confirm on a pass link.
+      const title = await proposalById(BigInt(proposal.proposalId)).then((p) => p.title, () => null);
+      const message = `You voted ${support ? "Yes" : "No"} on proposal ${proposal.proposalId}${title ? `: ${title}` : ""}. Your pass will update in a moment.`;
+      return { action, proposalId: proposal.proposalId, support, signed: path === "signed", transactionHash: hash, message };
     },
   });
 
@@ -387,6 +390,16 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           );
         if (!found) return shell("This link is out of date", "<h1>This link is out of date</h1><p>It does not name a proposal. Open your pass again and use the link it shows now.</p>");
         if (!found.votable) return shell("Voting is closed", `<h1>Voting is closed</h1><p>Proposal ${escapeHtml(found.proposalId)}, ${escapeHtml(found.title)}, is no longer open for votes.</p>`);
+        // A link votes once. Someone who comes back to this page (the back
+        // button, an old tab) is told so, and is not offered a button that
+        // can only be refused. Reading a ballot changes nothing.
+        const cast = ctx.account ? await ballot(found.proposalId, ctx.account).catch(() => null) : null;
+        if (cast && cast.choice !== "none") {
+          return shell(
+            "Already voted",
+            `<h1>You already voted ${cast.choice === "yes" ? "Yes" : "No"}</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><p><small>A link on the pass votes once and cannot change a vote. While the proposal is open you can change it with a signature on the demo site.</small></p>`,
+          );
+        }
         return shell(
           `Vote ${support}`,
           `<h1>Vote ${support}?</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><form method="post" action="${escapeHtml(`${ctx.postUrl}?p=${found.proposalId}`)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><input type="hidden" name="attempt" value="${escapeHtml(newAttempt())}"><button type="submit">Confirm: vote ${support}</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,

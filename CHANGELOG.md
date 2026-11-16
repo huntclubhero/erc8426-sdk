@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased (documentation only, no package change)
+## Unreleased: a working draft of the ERC-1155 binding (not published)
+
+ERC-8426 puts ERC-1155 out of scope and sketches the binding a future extension would use: an account beside the token id, and `balanceOf(account, id)` against a minimum. This is that binding, built so it can be reviewed and broken before it is proposed. The text is [`docs/drafts/erc-1155-wallet-pass-binding.md`](docs/drafts/erc-1155-wallet-pass-binding.md), with every line marked built or not built. **It is a draft: names and behaviour under `standard: "erc1155"` can change with review, and none of it is part of ERC-8426.** Nothing changes for an ERC-721 issuer unless a line below says so.
+
+Two hosted demos run on it: a pass with one tap vote links, retired when its account stops holding ([erc8426-demo.vercel.app/edition](https://erc8426-demo.vercel.app/edition)), and a pass with no links, which goes dark and comes back ([erc8426-demo.vercel.app/member](https://erc8426-demo.vercel.app/member)).
+
+**The binding (new, opt in)**
+
+- `@erc8426/contracts`: `IERC1155WalletPass` and the `ERC1155WalletPass` base (`passURI(uint256)`, `PassUpdate`, `BatchPassUpdate`; the same ERC-165 identifier as the ERC-721 interface, `0xef5f1e71`, asserted in a test; `passURI` reverts for an id with no supply; no `PassUpdate` on transfer unless a contract opts in). Examples: `EditionPass` (open claim, holding only), `VoteEditionPass` (one unit one vote, weighed at a snapshot; a vote replaces an earlier one only if it arrived a stronger way: link, then relayed signature, then the holder's own transaction), `SwapOnRedeemTicket` (a redemption that changes the balance in the same transaction).
+- `@erc8426/core`: `TokenRef.standard` and the `erc1155` CAIP-19 namespace; `sameToken` refuses a match across standards; `erc1155Abi`; `ChainReader.balanceOf`.
+- `@erc8426/issuer`: `standard: "erc1155"` (gated configuration only). A pass belongs to an id and an account (`PassRecord.account`, `passKeyFor`, `passRecordKey`); a store serving the binding implements `PassStore.accounts(tokenId)`. Entitlement is a fresh `balanceOf` against `minimumBalance`. `lostEntitlement: "retire" | "dark"`: with capability actions a pass is retired when its account falls below the minimum, and "dark" is refused; without them the default is "dark" (the pass keeps its serial, is rendered with `RenderContext.dark`, has its acquisition URLs replaced, and comes back when the account holds again). `issuer.checkHoldings(id, { accounts, blockNumber })` is the read over issued accounts; `onTransfer(id, from, to, blockNumber)` treats a transfer as a hint; `rotate(id, account)` and `capabilityLinksFor(id, account)` act for one holder; `watchTransfers1155`. A request refused by the fresh read retires or darkens the pass at once.
+- `@erc8426/client`: `TokenInput.standard`. Without it the client asks the contract once (ERC-165, `0xd9b67a26`) which namespace the challenge must name, and refuses to sign a challenge that names the token under the other one.
+- Example app: the two demos above, each a second issuer in the same app (`lib/edition.ts`, `lib/member.ts`), with scripted checks (`scripts/smoke-edition.mjs`, `scripts/smoke-member.mjs`). `tests/testnet` runs the gated flow against a public testnet with five funded keys.
+
+**Changes an ERC-721 issuer can see**
+
+- `@erc8426/issuer`: on `POST /links/:link` the query string is part of the request, so two taps that differ only in the query string are two requests and are not answered from the repeat store as one. An issuer whose links carry no query string sees no change.
+- `@erc8426/issuer`: the built-in page shown after a holder confirms a pass link says what happened in the action's own words when `execute` returns a string `message` (escaped, up to 280 characters). Without one it still says "The action ran."
+- `@erc8426/issuer`: `LinkPageContext.account`, the account a link was issued to (from the issuer's record, no chain read), so a custom confirm page can show that account's public state, for example that it has already acted.
+
+**Fixes to the examples**
+
+- Use-case demos: every tap posts an `attempt` of its own, as the confirm page does. They had been tapping one link several times with an identical body, which the issuer answers from its repeat store, so the pet game's "a 5th feed is refused" step failed and three more failures were hidden behind it. The demos now run in CI. (#21)
+- Example app: the pass list scans Transfer logs in spans. One query over the contract's whole history had outgrown the public node's limit of ten million blocks, and the hosted list answered 500. (#22)
+
+## Earlier unreleased notes (documentation only, no package change)
 
 - `docs/deployment-notes.md`: a section on session grants on a shared account. Two grant requests for one account that are in flight together can be assigned the same validation slot (reproduced on a test network; the provider confirmed the cause from its logs), the first session to act wins, the other fails at send on every try while a simulation passes for it. New lesson 15, serialize session grants per account; lessons 15 to 26 become 16 to 27.
 - `docs/security.md`: checklist item for one session grant at a time per account.

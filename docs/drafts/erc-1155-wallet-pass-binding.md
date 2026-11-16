@@ -2,7 +2,7 @@
 
 Status: a proposed draft for review on the Ethereum Magicians thread for ERC-8426. It is not an ERC pull request and is not yet formatted as one. It is a companion to ERC-8426 and would require ERC-165, ERC-1155 and ERC-8426.
 
-Every line below is marked with what stands behind it:
+Each requirement below says what stands behind it:
 
 - (built) runs in tests on this branch, and where it says so, on a public testnet.
 - (not built) is text only. It stays a proposal until it runs.
@@ -19,14 +19,14 @@ ERC-8426 binds a wallet pass to one ERC-721 token and its one owner. This docume
 
 ## Design goal
 
-ERC-8426 exists so that a person can use what they hold from the wallet that is already on their phone. They add a card to Apple Wallet or Google Wallet, they watch it change, and they tap it. There is no browser extension, no separate app, no seed phrase to look after, and nothing to learn about a chain before the first tap. Once the card is added, the everyday action is a tap on it. Two implementations work this way today: a pet that lives on its pass and is cared for from the pass, and a collection on mainnet whose holders tend what they hold from the card.
+ERC-8426 exists so that a person can use what they hold from the wallet that is already on their phone. They add a card to Apple Wallet or Google Wallet, they watch it change, and they tap it. There is no browser extension, no separate app, no seed phrase to look after, and nothing to learn about a chain before the first tap. Once the card is added, the everyday action is a tap on it. It has run this way in two implementations: a pet that lived on its pass and was cared for from the pass, through a season on a test network, and a collection on mainnet whose holders tend what they hold from the card today.
 
 This binding keeps that for tokens with many holders, and it is the test for what belongs in this document:
 
 - What the holder does stays a tap on a card. A rule that keeps that tap safe belongs here even when it is strict, because a tap that nobody can abuse is the only reason it can go without a signature.
 - The work lands on the Pass Issuer and the contract. Nearly every MUST below is something the holder never sees.
 - Anything that would give the holder one more step, one more signature, one more app or one more thing to understand needs a reason this document can state. Where there is none, it is left out or made optional.
-- The signed path stays for what a link must never do: move value, change who is entitled, or overrule a link. It is the exception and the card is the front door.
+- The signed path stays for what a link must never do: transfer or burn what is held, change who is entitled, or overrule a link. It is the exception and the card is the front door.
 
 ## Scope: holding only
 
@@ -40,7 +40,7 @@ Out of scope, and named so nobody assumes otherwise:
 ## The binding
 
 - A pass is bound to a pair: a token id and an account. Two accounts that hold the same id hold two passes, with two sets of URLs. (built)
-- An account is entitled to the pass of an id when a fresh `balanceOf(account, id)` is at least the minimum holding for that id. The minimum defaults to 1. A Pass Issuer that uses another minimum MUST document it per id. (built)
+- An account is entitled to the pass of an id when a fresh `balanceOf(account, id)` is at least the minimum holding for that id. The minimum defaults to 1. A Pass Issuer that uses another minimum MUST document it per id. (built with one minimum for the whole issuer; a minimum per id is not built)
 - The fresh entitlement read of ERC-8426 is that `balanceOf` read, taken at request time at `latest`, for the account the challenge names or the capability URL was issued to. (built)
 - The claimed account is always named in the challenge. The token resource is the CAIP-19 identifier under the `erc1155` namespace: `eip155:<chain>/erc1155:<contract>/<id>`. A proof that names the same contract and id under `erc721` MUST be refused as `binding_mismatch`. (built)
 - One pass per pair. A balance above the minimum does not make more passes. The pass MAY show the balance. (built)
@@ -51,9 +51,9 @@ This version has one mode, one pass per account, so there is nothing for a walle
 
 - The rule: the live passes drawn on an account's balance, its delegates' included, MUST never number more than that balance at the fresh read. Units have no identity, so an issuer that retires one pass when one unit leaves MUST say which one.
 - Discovery ships with the mode, never after it. Nobody should have to read an issuer's documentation to learn which mode an id uses.
-  - The manifest carries it, as a member a Client reads with everything else it needs to render the pass. This is the required place.
+  - The manifest carries it, as a member a Client reads when it gets the pass. This is the required place.
   - A gated manifest cannot be read without a holder's proof, so an indexer cannot see that member. For those readers a contract MAY also answer a view, `passBindingMode(uint256 id)`, under an ERC-165 identifier of its own. It is a separate, optional interface so that `passURI(uint256)` stays the only function of the wallet pass interface and the identifier `0xef5f1e71` stays shared with ERC-721.
-  - Where both exist they MUST agree, and a contract that changes the mode of an id emits an event for it.
+  - Where both exist they MUST agree, and a contract that changes the mode of an id emits an event of its own for it. It does not reuse `PassUpdate`, which tells issuers to render again and push to phones.
 
 ## Contract interface
 
@@ -91,7 +91,7 @@ One exception, found by running it: before it signs, a Client checks that the ch
 
 ## Actions under this binding
 
-- A bound on a capability action that is counted per account is not a bound. Units move, so one unit that visits N accounts gets N times the bound. Under this binding the documented bound of a capability action MUST hold however many accounts a unit passes through. In practice the bound is enforced against something a moving unit cannot multiply: a snapshot, the id as a whole, or the chain. (built, after our own first demo action, "5 stamps per account per day", was defeated exactly this way)
+- A bound on a capability action that is counted per account is not a bound. Units move, so one unit that visits N accounts gets N times the bound. Under this binding the documented bound of a capability action MUST hold however many accounts a unit passes through. In practice the bound is enforced against something a moving unit cannot multiply: a snapshot, the id as a whole, or the chain. (built, after our own first demo action, "5 stamps per account per day", turned out to have exactly this hole)
 - The fresh read admits the request. It MUST NOT decide what the action weighs. The worked example is a vote, one unit one vote: weight is the account's balance at the proposal's snapshot, from checkpoints the contract writes on every transfer, so the votes of all accounts never exceed the supply at the snapshot. A unit that moves after the snapshot carries no vote. (built: `VoteEditionPass`, with a fuzz test of that invariant)
 - Where an action can arrive by both paths, the signed path SHOULD be able to override the capability path, and never the reverse. In the example a vote arrives by the link on the pass, by a signature the Pass Issuer relays, or in the holder's own transaction, and replaces an earlier vote only if it arrived a stronger way. A link votes once and never changes a vote. (built)
 - An action that concerns one of several open things names which one. In the example the link carries the proposal, and the page shown before confirming says which proposal the tap is for. (built)
@@ -100,15 +100,15 @@ Whose button it is when an id has many holders, and actions that spend a fungibl
 
 ## Losing entitlement
 
-ERC-8426 says "on transfer" in three places: the gated configuration, the capability conditions and the Pass Issuer requirements. The trigger is losing entitlement, which a transfer may or may not cause. A rental ending is not a transfer either, so that wording is to be corrected in ERC-8426 itself. For this binding, an account loses entitlement when its balance of the id falls below the minimum.
+ERC-8426 makes a transfer the trigger in several places, among them the gated configuration, the capability conditions and the Pass Issuer requirements. The trigger is losing entitlement, which a transfer may or may not cause. A rental ending is not a transfer either, so that wording is to be corrected in ERC-8426 itself. For this binding, an account loses entitlement when its balance of the id falls below the minimum.
 
 - A transfer that leaves the sender at or above the minimum MUST NOT retire the sender's URLs. Selling one of three at a minimum of 1 changes nothing but the count. (built)
 - A transfer never touches the pass of an account that is not its sender or receiver. (built)
-- A Pass Issuer that takes a fresh read and finds the account below the minimum SHOULD act on it then, on any request, and not wait for an event or a timer. Otherwise the link it just refused answers again when the balance returns. (built: our first version answered 403 and left the link alive)
+- The moment is the read. A Pass Issuer that takes a fresh read and finds the account below the minimum SHOULD apply what follows then, on that request, whichever request it is (a link, a download, or the account's own proof), and not wait for an event or a timer. Otherwise the link it just refused answers again when the balance returns. (built: our first version answered 403 and left the link alive)
 
 What happens to the pass depends on which path its actions take:
 
-- A pass that carries even one capability link: the Pass Issuer MUST retire the account's links and acquisition URLs when it finds the account below the minimum. The account leaves the issued set. If it holds again, its next acquisition is a first claim with new URLs and never the retired ones, the rule ERC-8426 states since ethereum/ERCs #2173. Reason: the link stands in for the proof, the holder stopped guarding the card when the balance left, and a return would revive every copy with nobody having done anything. (built)
+- A pass that carries even one capability link is retired and never taken dark: the Pass Issuer MUST retire the account's links and acquisition URLs. The account leaves the issued set. If it holds again, its next acquisition is a first claim with new URLs and never the retired ones, the rule ERC-8426 states since ethereum/ERCs #2173. Reason: the link stands in for the proof, the holder stopped guarding the card when the balance left, and a return would revive every copy with nobody having done anything. (built)
 - A pass whose every action takes the signed path: the installed pass MAY go dark and come back. The link only reaches the flow and the proof carries the authority, so a copy in someone else's hands still cannot sign. This is an exception to Gated acquisition and has to be written as one. It is the default for such a pass; a Pass Issuer MAY retire instead. (built, and seen on a real phone in Apple Wallet: the card went dark with a notification and came back as the same card)
   - The acquisition URLs MUST still be retired, including when a balance left and came back. In the gated configuration they are possession proofs for the download. (built)
   - A dark pass SHOULD say that it is dark, for the reason a superseded pass says why. (built)
@@ -120,7 +120,7 @@ What happens to the pass depends on which path its actions take:
 - `TransferSingle` and `TransferBatch` are a hint that says which two accounts to read now. A transfer of zero units is free, can name anyone, and MUST NOT count as a signal. (built)
 - What the read cannot see is a balance that left and came back between two reads. The events are still for that: with the block of the transfer, the issuer reads the balance at that block as well. This matters only for a pass that is retired on loss. (built)
   - That read applies to the accounts of that transfer only, and never to a pass issued after that block. (built: our first version let a late log retire a pass claimed after the unit came back)
-  - It is best effort, a SHOULD and not a MUST. A node keeps old state for a limited time, a few hours on the public testnet node used here. A log that arrives later cannot be read at its block, and the reference issuer then changes nothing and reports a failed read.
+  - It is best effort, a SHOULD and not a MUST. A node keeps old state for a limited time: on the public testnet node used here a read 18 minutes back was answered and one 35 minutes back was not. A log that arrives later cannot be read at its block, and the reference issuer then changes nothing and reports a failed read.
 - The receiver needs no trigger: an account that newly reaches the minimum is served by its own first claim. (built)
 - As in ERC-8426, the fresh read at the time of the request is the boundary. Everything above only closes the residual window.
 
@@ -135,7 +135,7 @@ There is no "the owner".
 
 ## Freshness
 
-- `PassUpdate(id)` reaches every pass issued for that id. The Pass Issuer already keeps the set of accounts it issued to, so the push needs no holder index. Each account gets its own fresh read first, so content is never pushed to an account that no longer holds. (built)
+- `PassUpdate(id)` reaches every pass issued for that id. The Pass Issuer already keeps the set of accounts it issued to, so the push needs no holder index. Each account gets its own fresh read first, so live content is never pushed to an account that no longer holds. (built)
 - One holder's action concerns that holder's pass. It MUST NOT cause a read or a push for every other holder of the id. (built: our first version fanned out on every action, which made any holder a way to make the issuer notify everyone)
 - A transfer that leaves an account entitled MAY refresh that account's pass, since it can show the balance. (built)
 - The issued set is the live passes: an account leaves it when its pass is retired. Behind more than one instance it needs atomic add and remove. (built)
@@ -149,11 +149,11 @@ There is no "the owner".
 ## What stands behind this draft
 
 - A reference ERC-1155 base contract with `passURI` and the events, and three example contracts (`EditionPass`, `VoteEditionPass`, `SwapOnRedeemTicket`), with forge tests.
-- The SDK taught the binding for the gated configuration, per account: core, issuer, client and the example app, with unit tests and an end to end run on a local chain against the real Apple and Google providers.
+- The SDK taught the binding for the gated configuration, per account: core, issuer, client and the example app, with unit tests and an end to end run on a local chain with the SDK's Apple and Google provider packages (self-signed certificates, and a stand-in for the Google Wallet API).
 - A scripted run of the whole gated flow against a public testnet, in `tests/testnet`, that anyone can repeat with five funded keys.
 - The two hosted demos above, each with a scripted check against it (`examples/next-app/scripts/smoke-edition.mjs`, 38 steps, and `smoke-member.mjs`, 16 steps).
 - A real phone: a vote cast from the card in Apple Wallet with no signature, recorded on chain as a link vote, after a lock screen notification of the proposal; and the member pass going dark and coming back on the same card.
-- Two adversarial reviews of the build. Their findings are fixed with tests and several became lines of this text.
+- Two adversarial reviews of the build. Their findings are fixed, nearly all with a test, and several became lines of this text.
 
 Not built: per unit passes, the public configuration, delegates, a staking policy, `balanceOfBatch` in one call, a conformance profile for this binding, and a reference server for the ERC assets.
 

@@ -44,5 +44,5 @@ The report lists the contract and every transaction hash, so the run can be chec
 
 ## What a public chain showed that a local one did not
 
-- A public node keeps old state for a limited time (a few hours on the node used here). The read at the block of a transfer log only works inside that window. A log that arrives later changes nothing and the issuer reports a failed read; the fresh read stays the boundary either way.
+- A public node keeps old state for a limited time (well under an hour on the node used here: a read 18 minutes back was answered, one 35 minutes back was not). The read at the block of a transfer log only works inside that window. A log that arrives later changes nothing and the issuer reports a failed read; the fresh read stays the boundary either way.
 - A read taken right after a receipt can be answered by a node that has not seen that block yet. The run waits for balances to settle and does not read them once.

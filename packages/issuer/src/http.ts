@@ -23,6 +23,7 @@ import type { RateLimitRule } from "./rateLimit.js";
 import { RepeatCoalescer, errorCodeOf, memoryRepeatStore, sha256Hex, type RecordedOutcome } from "./repeat.js";
 import { ActionError, IssuerError, statusForIssuerError, type IssuerErrorCode } from "./errors.js";
 import type { IssuerInternals } from "./issuer.js";
+import { passKeyFor } from "./stores.js";
 
 /// The HTTP surface, on the WHATWG Fetch API so one handler serves Next.js
 ///  route handlers, Hono, Bun, Deno, Cloudflare Workers and (through node.ts)
@@ -222,6 +223,25 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     return statusForIssuerError(authError) === 401 ? error(authError, { challenge }) : error(authError);
   }
 
+  // ERC-1155 binding. A proof that verified, from an account the fresh read
+  // then found short, is the same finding as a link or a download refused
+  // by that read: the issuer acts on it on this request (retires the pass or
+  // takes it dark) and does not wait for an event or a timer. A refusal for
+  // an action other than acquire may mean only that the account is not
+  // entitled to that action, so the pass is touched only when the account is
+  // not entitled to hold it either. Never throws: the refusal stands, and
+  // the next read acts if this one could not.
+  async function actOnLoss(result: { error: AuthError; account?: Address }, tokenId: string, action: string): Promise<void> {
+    if (config.standard !== "erc1155" || result.error !== "not_owner" || !result.account) return;
+    try {
+      if (action !== ACQUIRE_ACTION && (await x.entitled(tokenId, result.account, ACQUIRE_ACTION)).entitled) return;
+      const record = await x.stores.passes.get(passKeyFor(tokenId, result.account));
+      if (record) await x.lost(record);
+    } catch {
+      // Left to the next read.
+    }
+  }
+
   function corsHeaders(request: Request): Record<string, string> {
     const cors = config.cors;
     if (!cors) return {};
@@ -339,7 +359,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
-    if (!result.ok) return refuse(result.error, challenge);
+    if (!result.ok) {
+      await actOnLoss(result, tokenId, ACQUIRE_ACTION);
+      return refuse(result.error, challenge);
+    }
     // A first claim rotates before the manifest is built. Another entitled
     // account under an additive policy shares the holder of record's pass,
     // so the pass is always rendered for the holder of record.
@@ -400,7 +423,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       key,
       async () => {
         const result = await x.authorize({ ...proof.proof, tokenId, action, ...(freshRead ? { freshRead } : {}) });
-        if (!result.ok) return refuse(result.error, challengeUri);
+        if (!result.ok) {
+          await actOnLoss(result, tokenId, action);
+          return refuse(result.error, challengeUri);
+        }
         return execute(def, { tokenId, action, account: result.account, via: result.via, path: "signed", params: body.params, request });
       },
       recordIfNonceSpent,
@@ -417,7 +443,10 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // A rotate proof, and only a rotate proof, with its own fresh read.
     const result = await x.authorize({ ...proof.proof, tokenId, action: ROTATE_ACTION });
-    if (!result.ok) return refuse(result.error, challengeUri);
+    if (!result.ok) {
+      await actOnLoss(result, tokenId, ROTATE_ACTION);
+      return refuse(result.error, challengeUri);
+    }
     // Rotation retires the holder's links, so the prover must be the holder
     // of record or entitled to acquire right now. An account entitled to
     // rotate but excluded from acquire (an owner during an exclusive rental)
@@ -457,8 +486,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function describeLink(request: Request, linkToken: string): Promise<Response> {
     const resolved = await resolveActionLink(linkToken);
     if (!resolved) return withLinkPageHeaders(error("unknown_capability"));
-    const { binding, def } = resolved;
+    const { binding, def, record } = resolved;
     const ctx: LinkPageContext = {
+      account: record.lastIssuedTo ?? null,
       token: x.token(binding.tokenId),
       action: binding.name,
       description: def.description,
@@ -575,7 +605,12 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   async function asHtml(request: Request, response: Response): Promise<Response> {
     if (!wantsHtml(request)) return response;
     const body = (await response.clone().json().catch(() => ({}))) as Json;
-    const message = response.ok ? "The action ran." : typeof body.message === "string" ? body.message : String(body.error ?? "Refused");
+    // The page a person sees after confirming says what happened, in the
+    // action's own words when it gave any (`message` on what `execute`
+    // returned), so "Done" is not all a holder is told.
+    const said = (body.result as { message?: unknown } | undefined)?.message;
+    const done = typeof said === "string" && said.trim() !== "" ? said.slice(0, 280) : "The action ran.";
+    const message = response.ok ? done : typeof body.message === "string" ? body.message : String(body.error ?? "Refused");
     const page = resultPage(response.ok, message, response.status);
     const retry = response.headers.get("Retry-After");
     if (retry) page.headers.set("Retry-After", retry);
