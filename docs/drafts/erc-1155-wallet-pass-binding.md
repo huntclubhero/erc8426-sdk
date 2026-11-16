@@ -4,7 +4,7 @@ Status: a proposed draft for review on the Ethereum Magicians thread for ERC-842
 
 Each requirement below says what stands behind it:
 
-- (built) runs in tests on this branch, and where it says so, on a public testnet.
+- (built) runs in tests in this repository, and where it says so, on a public testnet.
 - (not built) is text only. It stays a proposal until it runs.
 - (open) is a question for reviewers.
 
