@@ -65,6 +65,9 @@ const minted = await post(`${BASE}/api/mint`, { to: alice.address });
 const tokenId = minted.body?.tokenId;
 step(minted.res.ok && tokenId, "mint via /api/mint", `token ${tokenId}`);
 const token = { contract: env.CONTRACT_ADDRESS, tokenId };
+// The "My passes" list: a scan of the contract's whole Transfer history.
+const listed = await getJson(`${BASE}/api/passes?owner=${alice.address}`);
+step(listed.res.ok && Array.isArray(listed.body?.pets) && listed.body.pets.some((p) => String(p.tokenId) === String(tokenId)), "the owner's pass list shows the new pet", `HTTP ${listed.res.status}`);
 
 // 2. The contract advertises the interface and points at this app.
 step(await passes.supportsWalletPass(env.CONTRACT_ADDRESS), "supportsInterface(0xef5f1e71)");
