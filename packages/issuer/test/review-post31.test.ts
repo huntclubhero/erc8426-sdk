@@ -932,3 +932,69 @@ describe("review of the fix, second pass: the block a transfer log reported is k
     expect((await recordOf(h, alice.address))!.reportedAtBlock).toBeUndefined();
   });
 });
+
+/// From the third pass of that review.
+
+describe("review of the fix, third pass: a reported block below the block the record carries", () => {
+  it("a late log from before the issuance does not lower what a loss is tested against", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    // Two units from 50, one sold at 80, the other at 90, holds again from
+    // 115. Claimed at 120 on 0.5.2: a block, no mark.
+    h.chain.setBalanceFrom(50n, ID, alice.address, 2n);
+    h.chain.setBalanceFrom(80n, ID, alice.address, 1n);
+    h.chain.setBalanceFrom(90n, ID, alice.address, 0n);
+    h.chain.setBalanceFrom(115n, ID, alice.address, 1n);
+    h.chain.fresh = 120n;
+    h.chain.lagging = 120n;
+    expect((await claim(h, alice, ID)).res.status).toBe(200);
+    const stored = (await recordOf(h, alice.address))!;
+    unmark(stored);
+    await h.issuer.stores.passes.put(stored);
+    // A catch-up job replays the log of block 80. The head is named by a
+    // node at 119, so the pass is not dated in this call.
+    h.chain.fresh = 300n;
+    h.chain.lagging = 119n;
+    h.chain.headFrom = "lagging";
+    await h.issuer.onTransfer(ID, alice.address, newSigner().address, 80n);
+    const after = (await recordOf(h, alice.address))!;
+    expect(after.reportedAtBlock).toBe("80");
+    expect(after.issuedAtBlock).toBe("120");
+    // A later check is answered by a node stuck at 100, below the 120.
+    h.chain.lagging = 100n;
+    h.chain.latestFrom = "lagging";
+    expect((await h.issuer.checkHoldings(ID)).dark).toEqual([]);
+    const record = (await recordOf(h, alice.address))!;
+    expect(record.dark).toBeUndefined();
+    expect(record.lastIssuedTo).toBe(alice.address);
+  });
+
+  it("the same in one call: the log of an old sale replayed while every answer comes from a node behind the issuance", async () => {
+    for (const make of [signedOnly, harness1155]) {
+      const h = make();
+      const alice = newSigner();
+      h.chain.setBalanceFrom(50n, ID, alice.address, 1n);
+      h.chain.setBalanceFrom(80n, ID, alice.address, 0n);
+      h.chain.setBalanceFrom(115n, ID, alice.address, 1n);
+      h.chain.fresh = 120n;
+      h.chain.lagging = 120n;
+      expect((await claim(h, alice, ID)).res.status).toBe(200);
+      const stored = (await recordOf(h, alice.address))!;
+      unmark(stored);
+      await h.issuer.stores.passes.put(stored);
+      h.chain.lagging = 100n;
+      h.chain.latestFrom = "lagging";
+      h.chain.headFrom = "lagging";
+      expect(await h.issuer.onTransfer(ID, alice.address, newSigner().address, 80n)).toBe(false);
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+      // A real loss, read at or after the block the record carries, is acted on.
+      h.chain.setBalanceFrom(130n, ID, alice.address, 0n);
+      h.chain.lagging = 131n;
+      h.chain.fresh = 131n;
+      const swept = await h.issuer.checkHoldings(ID);
+      expect([...swept.retired, ...swept.dark]).toEqual([alice.address]);
+    }
+  });
+});

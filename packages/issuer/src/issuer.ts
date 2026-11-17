@@ -972,11 +972,21 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // What a loss of this pass is tested against: its date, or for a pass
   // with none the block a transfer log reported. A node cannot name a head
   // at or after that block without having reached the transfer, so a loss
-  // read there is acted on. What that leaves, for a pass with no date only:
-  // a log from before its issuance, delivered late, and a later read through
-  // a node that is also behind the issuance.
+  // read there is acted on. A log can be delivered late, from before the
+  // pass was issued, so where the record carries an earlier version's block
+  // the later of the two is used: a head below that block is behind the
+  // issuance whatever a log reported. What that leaves is a pass with no
+  // block at all (or a 0.5.0 head that lay below the read that admitted
+  // it): a log from before its issuance, delivered late, and then, at any
+  // time until the pass is dated, a read through a node that is also behind
+  // the issuance.
   function lossFloor(record: PassRecord): bigint | undefined {
-    return datedAt(record) ?? reportedBlock(record);
+    const dated = datedAt(record);
+    if (dated !== undefined) return dated;
+    const reported = reportedBlock(record);
+    if (reported === undefined) return undefined;
+    const unmarked = unmarkedBlock(record);
+    return unmarked !== undefined && unmarked > reported ? unmarked : reported;
   }
 
   // Keep the block of a transfer log that named an account whose pass has
