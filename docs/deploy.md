@@ -107,7 +107,7 @@ export async function POST(req: Request) {
     if (log.address.toLowerCase() !== COLLECTION.toLowerCase()) continue;
     try {
       const ev = decodeEventLog({ abi: [...erc721Abi, ...walletPassAbi], data: log.data, topics: log.topics });
-      if (ev.eventName === "Transfer") await issuer.onTransfer(ev.args.tokenId, ev.args.from, ev.args.to);
+      if (ev.eventName === "Transfer") await issuer.onTransfer(ev.args.tokenId, ev.args.from, ev.args.to, BigInt(log.blockNumber));
       if (ev.eventName === "PassUpdate") await issuer.onPassUpdate(ev.args.tokenId);
       if (ev.eventName === "BatchPassUpdate") await issuer.onPassUpdate(ev.args.fromTokenId, ev.args.toTokenId); // inclusive
     } catch {
@@ -118,6 +118,6 @@ export async function POST(req: Request) {
 }
 ```
 
-- `onTransfer` is idempotent and does nothing for a token it never issued, so redelivery is safe.
+- `onTransfer` is idempotent and does nothing for a token it never issued, so redelivery is safe. Give it the log's block: a log delivered late, from before the block the current pass is dated with, then changes nothing (without the block it would retire the pass of a seller who bought back and claimed again).
 - A missed or late webhook degrades hygiene, never authorization: the fresh ownership read refuses the previous owner's links until rotation catches up. Still, backfill after an outage (for example with `@erc8426/client`'s `getPassUpdates` and a `Transfer` log query from the last processed block).
 - Answer quickly and let the provider retry on failure; pushes that fail are reported through the issuer's `onError`, not thrown.
