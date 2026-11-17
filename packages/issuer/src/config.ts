@@ -44,10 +44,24 @@ export interface ActionContext {
   ///  for choices that carry no authority, and keep the documented bound true
   ///  for every possible value on the capability path.
   params: unknown;
+  /// Capability path, for an action with a `subject`: the subject the link
+  ///  was minted for, from the issuer's own record of the link and not from
+  ///  the request. The action acts on this and nothing else. Absent on the
+  ///  signed path, where the request names what it concerns (in `params`,
+  ///  which the signature does not cover).
+  subject?: string;
   request: Request;
   /// Bump the token's `updatedAt` and push fresh content to installed passes.
   ///  Call it when the action changed state rendered on the pass.
   notifyUpdate(): Promise<void>;
+}
+
+/// What an action's `subject` is asked with.
+export interface SubjectContext {
+  token: TokenRef;
+  /// The account the pass is issued to.
+  account: Address;
+  action: string;
 }
 
 export interface ActionDefinition<Result = unknown> {
@@ -66,6 +80,26 @@ export interface ActionDefinition<Result = unknown> {
   ///  changes who is entitled to it. Such an action MUST NOT be reachable
   ///  through a capability link, so config validation refuses the pair.
   transfersOrBurns?: boolean;
+  /// For a capability action that concerns one of several things that open
+  ///  and close (a proposal, a round, a sitting): name the one that is open
+  ///  for this pass now, or null when none is. The action's link is then
+  ///  minted for that one thing, is bound to it in the issuer's record, and
+  ///  ENDS with it: once this function answers anything else, the link
+  ///  resolves to nothing and the pass is given a link for the next thing
+  ///  the next time it is rendered. A link that someone saw once therefore
+  ///  stops working when the thing it was for closes, where a link with no
+  ///  subject works for as long as the account holds.
+  ///
+  ///  Ending a link is not a rotation: the pass keeps its serial, its other
+  ///  links and its acquisition URLs, and the next link is delivered to the
+  ///  same installed pass. It does nothing for a copied pass, which is
+  ///  pushed each new link like the original; rotation is the remedy there.
+  ///
+  ///  Called fresh on every render and on every use of the link; nothing is
+  ///  cached. Return a short stable identifier (at most 128 characters). A
+  ///  throw means it could not be told: the link is left as it is, a render
+  ///  omits it, and a use of it answers 503. Requires `capability: true`.
+  subject?(ctx: SubjectContext): string | null | Promise<string | null>;
   /// Apply the effect. Throw an `ActionError` to refuse with a chosen status;
   ///  the return value is sent back as `result` (keep it JSON serializable).
   ///  When a browser posted the confirm page's form, a string `message` on
@@ -89,6 +123,10 @@ export interface LinkPageContext {
   ///  A page can use it to show that account's public state (for example
   ///  that it has already acted).
   account: Address | null;
+  /// For an action with a `subject`: the subject this link was minted for.
+  ///  A GET takes no read, so this says what the link is for, not that the
+  ///  subject is still open.
+  subject?: string;
 }
 
 export interface CapabilityConfig {
@@ -471,6 +509,10 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
     if (!def || typeof def.execute !== "function") throw new IssuerConfigError(`action "${name}" needs an execute function`);
     if (typeof def.description !== "string" || def.description.trim() === "") {
       throw new IssuerConfigError(`action "${name}" needs a description`);
+    }
+    if (def.subject !== undefined && typeof def.subject !== "function") throw new IssuerConfigError(`action "${name}": subject must be a function`);
+    if (def.subject && !def.capability) {
+      throw new IssuerConfigError(`action "${name}" has a subject but is not a capability action: a subject binds the action's capability link, and a signed request names what it concerns itself`);
     }
     if (!def.capability) continue;
     if (!capability.enabled) {

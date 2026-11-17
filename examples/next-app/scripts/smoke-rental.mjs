@@ -112,46 +112,47 @@ await sleep(wait);
 const userAfter = await publicClient.readContract({ address: contract, abi, functionName: "userOf", args: [id] });
 step(/^0x0+$/.test(userAfter), "the rental ended on chain: userOf is nobody, and no transaction did it", userAfter.slice(0, 10));
 
-// 4. Before anyone observes it: what does the renter's pass still do?
+// 4. The first request after the end is the issuer observing it.
 const view1 = (await getJson(`${BASE}/api/rental?tokenId=${tokenId}`)).body.key;
-step(view1.issuedTo === "renter", "the issuer has observed nothing yet: its record still says the pass is the renter's", view1.issuedTo);
+step(view1.issuedTo === "renter", "before any request the issuer has observed nothing: its record still says the pass is the renter's", view1.issuedTo);
 const open2 = await tap(link);
 step(open2.res.status === 403 && open2.body?.error === "not_owner", "the renter's link is refused by the fresh read at once", `HTTP ${open2.res.status} ${open2.body?.error}`);
+const view2 = (await getJson(`${BASE}/api/rental?tokenId=${tokenId}`)).body.key;
+step(view2.issuedTo === "nobody", "that read was the observation: the pass is issued to nobody now", view2.issuedTo);
+const open3 = await tap(link);
+step(open3.res.status === 404, "the renter's link is retired (404)", `HTTP ${open3.res.status} ${open3.body?.error ?? ""}`);
 const file2 = await preview(first.manifest);
-step(file2.status === 403, "the renter's download is refused by the fresh read too", `HTTP ${file2.status}`);
+step(file2.status === 404, "the renter's download is retired with it", `HTTP ${file2.status}`);
 const again = await refusal(() => passes.getManifest(token, { signer: renter }));
 step(again?.status === 403, "the renter's own signed request is refused", `${again?.status} ${again?.serverCode ?? again?.code}`);
-const view2 = (await getJson(`${BASE}/api/rental?tokenId=${tokenId}`)).body.key;
-const open3 = await tap(link);
-// THE QUESTION this run exists to answer: after the issuer itself has read
-// the chain and refused the renter three times, are the renter's links
-// retired (404), or still only refused (403)?
-console.log(`      observed by three refused requests: issuer record says "${view2.issuedTo}", the renter's link now answers HTTP ${open3.res.status} ${open3.body?.error ?? ""}`);
-const retiredOnRefusal = open3.res.status === 404;
-step(open3.res.status === 403 || open3.res.status === 404, retiredOnRefusal ? "RESULT: the refused requests retired the renter's link (404)" : "RESULT: the refused requests did NOT retire the renter's link: still 403, the link is still known", `HTTP ${open3.res.status}`);
 
-// 5. If nothing retired it: the same key rented to the same account again.
-if (!retiredOnRefusal) {
-  const re = await house({ do: "rent-again", tokenId, account: renter.address, seconds: SECONDS });
-  step(re.res.ok, "the same key is rented to the same account again, the owner never having claimed", JSON.stringify(re.body?.error ?? "ok"));
-  const open4 = await tap(link);
-  console.log(`      the link from the FIRST rental now answers HTTP ${open4.res.status} ${open4.body?.error ?? ""}`);
-  step(open4.res.status === 200 || open4.res.status === 404, open4.res.status === 200 ? "RESULT: the old link works again in the second rental (it was never retired)" : "RESULT: the old link was retired, the second rental needs a new claim", `HTTP ${open4.res.status}`);
-  const expires2 = Number(await publicClient.readContract({ address: contract, abi, functionName: "userExpires", args: [id] }));
-  const wait2 = Math.max(0, expires2 * 1000 - Date.now()) + 6000;
-  console.log(`      (waiting ${Math.round(wait2 / 1000)} s for the second rental to end)`);
-  await sleep(wait2);
-}
+// 5. The same key rented to the same account again: the old link stays dead.
+const re = await house({ do: "rent-again", tokenId, account: renter.address, seconds: SECONDS });
+step(re.res.ok, "the same key is rented to the same account again, the owner never having claimed", JSON.stringify(re.body?.error ?? "ok"));
+const open4 = await tap(link);
+step(open4.res.status === 404, "the link from the first rental does not wake up", `HTTP ${open4.res.status} ${open4.body?.error ?? ""}`);
+const second = await passes.getManifest(token, { signer: renter });
+const live2 = await preview(second.manifest);
+const link2 = live2.content?.links?.find((l) => l.key === "unlock")?.url;
+step(live2.status === 200 && Boolean(link2) && link2 !== link, "the renter claims again and gets a new pass with a new link");
+step(live2.content?.serial !== live.content?.serial, "the new pass is a new card (a new serial)");
+const open5 = await tap(link2);
+step(open5.res.status === 200, "the new link opens the door", `HTTP ${open5.res.status}`);
+const expires2 = Number(await publicClient.readContract({ address: contract, abi, functionName: "userExpires", args: [id] }));
+const wait2 = Math.max(0, expires2 * 1000 - Date.now()) + 6000;
+console.log(`      (waiting ${Math.round(wait2 / 1000)} s for the second rental to end)`);
+await sleep(wait2);
 
-// 6. The owner takes the key back: its first claim.
+// 6. Nobody asks this time: the owner's claim is the first request.
 const back = await house({ do: "owner-claims", tokenId });
 step(back.body?.status === 200, "after check out the owner claims its pass", `HTTP ${back.body?.status} ${back.body?.error ?? ""}`);
 const view3 = (await getJson(`${BASE}/api/rental?tokenId=${tokenId}`)).body.key;
 step(view3.issuedTo === "owner", "the issuer now records the pass as the owner's", view3.issuedTo);
-const open5 = await tap(link);
-step(open5.res.status === 404, "the renter's link is retired for good", `HTTP ${open5.res.status} ${open5.body?.error ?? ""}`);
-const file5 = await preview(first.manifest);
-step(file5.status === 404, "the renter's download is retired", `HTTP ${file5.status}`);
+const open6 = await tap(link2);
+step(open6.res.status === 404, "the second rental's link is retired by the owner's claim", `HTTP ${open6.res.status} ${open6.body?.error ?? ""}`);
+const file6 = await preview(second.manifest);
+step(file6.status === 404, "and its download", `HTTP ${file6.status}`);
+step((await tap(link)).res.status === 404, "the first rental's link is still retired");
 
 console.log(failures === 0 ? "\nAll rental checks passed." : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

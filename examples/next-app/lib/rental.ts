@@ -23,8 +23,10 @@ import { getRuntime, type Runtime } from "./server";
 ///  - the fresh read refuses the renter's link and download at once;
 ///  - the installed pass carries its check out time, so the device itself
 ///    shows it expired, with no push;
-///  - the renter's links are retired when the issuer observes the loss,
-///    which for this issuer is the owner's next claim.
+///  - that read is the issuer observing the loss, so it retires the
+///    renter's links and download by it and tells the installed card. A
+///    new rental of the same key to the same account does not wake the old
+///    link: the renter adds the pass again.
 
 export const rentalAbi = parseAbi([
   "function mint(address to) returns (uint256)",
@@ -49,7 +51,7 @@ export interface RentalView {
   /// The current ERC-4907 user, or null when none (or expired on chain).
   user: Address | null;
   expires: number;
-  /// Whether the rental is active by this server's clock, as the issuer reads it.
+  /// Whether the rental is active by the contract's own answer (`userOf`), as the issuer reads it.
   active: boolean;
   /// Who the issuer last issued this key's pass to: the renter of record, the owner, or nobody yet.
   issuedTo: "renter" | "owner" | "nobody" | "someone else";
@@ -236,7 +238,7 @@ async function createRentalRuntime(rt: Runtime, rental: RentalEnv): Promise<Rent
     const who = record?.lastIssuedTo ?? null;
     const guest = renter ?? known;
     const issuedTo = who === null ? "nobody" : who.toLowerCase() === r.owner.toLowerCase() ? "owner" : guest && who.toLowerCase() === guest.toLowerCase() ? "renter" : "someone else";
-    return { tokenId, owner: r.owner, user: r.user, expires: r.expires, active: r.user !== null && r.expires * 1000 > Date.now(), issuedTo, unlocks };
+    return { tokenId, owner: r.owner, user: r.user, expires: r.expires, active: r.user !== null, issuedTo, unlocks };
   };
 
   const setUser = async (tokenId: string, account: Address, seconds: number) => {
@@ -273,7 +275,7 @@ async function createRentalRuntime(rt: Runtime, rental: RentalEnv): Promise<Rent
     if (!known || known.toLowerCase() !== account.toLowerCase()) throw new RentalRefused(403, "not_your_key", "This key was not rented to this account by this demo.");
     const r = await read(tokenId);
     if (r.owner.toLowerCase() !== rt.operator.account.address.toLowerCase()) throw new RentalRefused(409, "not_the_house", "The house no longer owns this key.");
-    if (r.user !== null && r.expires * 1000 > Date.now()) throw new RentalRefused(409, "still_rented", "This rental has not ended yet.");
+    if (r.user !== null) throw new RentalRefused(409, "still_rented", "This rental has not ended yet.");
     return setUser(tokenId, account, seconds);
   };
 

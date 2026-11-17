@@ -184,9 +184,7 @@ step(parseChallenge(challenge.message)?.token?.standard === "erc1155" && challen
 const p1 = await openProposal();
 step(Boolean(p1), "a proposal opened", `proposal ${p1}`);
 const a1 = await manifestOf(alice);
-step(typeof a1.yes === "string" && a1.yes.endsWith(`?p=${p1}`) && typeof a1.no === "string", "A's pass carries vote links that name the proposal");
-const bareLink = await post(a1.yes.split("?")[0]);
-step(bareLink.res.status === 400 && bareLink.body?.error === "proposal_required", "a vote link that names no proposal does nothing: 400 proposal_required", `HTTP ${bareLink.res.status} ${bareLink.body?.error ?? ""}`);
+step(typeof a1.yes === "string" && !a1.yes.includes("?") && typeof a1.no === "string", "A's pass carries vote links, and the URL names no proposal");
 const confirm = await fetch(a1.yes, { headers: { accept: "text/html" } });
 const confirmHtml = await confirm.text();
 step(confirm.status === 200 && confirmHtml.includes(`Proposal ${p1}`) && (await state(alice)).holder.ballot.choice === "none", "opening the link shows which proposal it is for and votes nothing");
@@ -196,7 +194,7 @@ step(bNone?.status === 403 && bNone?.code === "not_owner", "B holds none: 403 no
 
 // C unlocks its pass during proposal 1 and keeps the link, without voting.
 const c1 = carol ? await manifestOf(carol) : null;
-if (carol) step(typeof c1.no === "string" && c1.no.includes(`p=${p1}`), "C holds a vote link printed for proposal 1, and does not use it");
+if (carol) step(typeof c1.no === "string", "C holds a vote link minted for proposal 1, and does not use it");
 
 // 5. The cheat: move a unit to a second account after the snapshot and vote
 // with it there too.
@@ -257,14 +255,16 @@ step(Boolean(p2) && p2 !== p1, "a second proposal opened", `proposal ${p2}`);
 const b2 = await manifestOf(bob);
 step(typeof b2.yes === "string" && (await state(bob)).holder.ballot.power === "3", "B has 3 votes on the new proposal, and vote links");
 
-// The life of a link: the one C was given during proposal 1 is the same
-// link for every proposal, with the proposal as a parameter.
+// The life of a link: the one C was given during proposal 1 was minted
+// for proposal 1 and ended with it.
 if (carol) {
-  const reused = c1.no.replace(`p=${p1}`, `p=${p2}`);
-  const r = await post(reused);
-  const b = (await state(carol)).holder.ballot;
-  console.log(`      C's link from proposal ${p1}, pointed at proposal ${p2}: HTTP ${r.res.status} ${r.body?.error ?? ""}, ballot ${b.choice} by ${b.source}`);
-  step(r.res.status === 200 && b.choice === "no" && b.source === "link", "RESULT: a link seen during one proposal casts the account's first vote on a later one (its bound is over the life of the link)", `HTTP ${r.res.status}`);
+  for (const reused of [c1.no, `${c1.no}?p=${p2}`]) {
+    const r = await post(reused);
+    const b = (await state(carol)).holder.ballot;
+    step(r.res.status === 404 && r.body?.error === "unknown_capability" && b.choice === "none", `a link seen during proposal ${p1} casts nothing on proposal ${p2}: it ended with its proposal${reused === c1.no ? "" : " (with the new proposal named in the URL)"}`, `HTTP ${r.res.status} ${r.body?.error ?? ""}, ballot ${b.choice}`);
+  }
+  const c2 = await manifestOf(carol);
+  step(typeof c2.no === "string" && c2.no !== c1.no, "C's pass now carries a new link, for the open proposal");
 }
 // D takes its link for proposal 2 now and keeps it for the end of the vote.
 const d2 = dave ? await manifestOf(dave) : null;

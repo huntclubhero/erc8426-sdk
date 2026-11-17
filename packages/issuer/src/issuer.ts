@@ -256,6 +256,11 @@ export interface IssuerInternals {
   buildManifest(record: PassRecord, owner: Address): Promise<PassManifest>;
   renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent>;
   resolveLink(linkToken: string, kind: LinkBinding["kind"]): Promise<{ binding: LinkBinding; record: PassRecord } | null>;
+  /// For a resolved action link whose action has a `subject`: whether the
+  ///  subject the link was minted for is still the open one. "ended" also
+  ///  ends the link in the record (and mints the next one, if a subject is
+  ///  open). "unknown" when the subject could not be told.
+  linkSubject(record: PassRecord, action: string): Promise<{ state: "current"; subject: string } | { state: "ended" | "unknown" }>;
   onPassUpdate: Issuer["onPassUpdate"];
   /// What an action's `notifyUpdate` runs. ERC-721: the token's pass update.
   ///  ERC-1155: the acting account's pass only, never every holder's.
@@ -398,6 +403,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     ...(record.account ? { account: record.account } : {}),
     name,
     generation: record.generation,
+    ...(kind === "action" && record.linkSubjects?.[name] !== undefined ? { subject: record.linkSubjects[name] } : {}),
   });
   const keyring = resolveLinkKeyring(options, config);
   const onError =
@@ -450,6 +456,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   async function fill(record: PassRecord): Promise<boolean> {
     let changed = await rebind(record);
     for (const action of config.capabilityActions) {
+      // A link with a subject is minted for the subject that is open when
+      // the pass is rendered (see syncSubjects), never ahead of it.
+      if (config.actions[action]?.subject) continue;
       if (record.links[action]) continue;
       const seed = newLinkSeed();
       await stores.links.put(await keyring.digestOfSeed(seed), bindingOf(record, "action", action));
@@ -501,12 +510,86 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return record;
   }
 
+  // The subject an action's link should be minted for right now, for the
+  // pass of `account`. Throws when it could not be told.
+  async function subjectNow(action: string, tokenId: string, account: Address): Promise<string | null> {
+    const raw = await config.actions[action]!.subject!({ token: token(tokenId), account, action });
+    if (raw === null) return null;
+    if (typeof raw !== "string" || raw === "" || raw.length > 128) throw new Error(`action "${action}": subject must be null or a string of 1 to 128 characters`);
+    return raw;
+  }
+
+  // Bring the links of actions with a `subject` in line with what is open
+  // now. A link whose subject is no longer the open one has ENDED: its
+  // binding is deleted and its seed dropped, so it resolves to nothing from
+  // here on. Where a subject is open a link is minted for it. Nothing else
+  // about the pass changes: the same serial, generation, other links and
+  // acquisition URLs. That is why this is not a rotation, and why the next
+  // link goes to the same installed pass.
+  //
+  // The stored record is read again and written, and `record` (which the
+  // caller goes on to render) is given the result. A subject that could not
+  // be told leaves that action's link as it is and returns its name, so a
+  // render can leave the link out.
+  async function syncSubjects(record: PassRecord, account: Address): Promise<string[]> {
+    const scoped = config.capabilityActions.filter((a) => config.actions[a]?.subject);
+    if (scoped.length === 0) return [];
+    const stored = await stores.passes.get(passRecordKey(record));
+    // Rotated or retired meanwhile: those links are that rotation's business.
+    if (!stored || stored.serial !== record.serial || stored.generation !== record.generation) return [];
+    const untold: string[] = [];
+    const ended: string[] = [];
+    const minted: [string, string][] = [];
+    for (const action of scoped) {
+      let open: string | null;
+      try {
+        open = await subjectNow(action, stored.tokenId, account);
+      } catch (error) {
+        onError(error, { operation: "subject", tokenId: stored.tokenId });
+        untold.push(action);
+        continue;
+      }
+      const seed = stored.links[action];
+      if (seed ? stored.linkSubjects?.[action] === open : open === null) continue;
+      if (seed) {
+        ended.push(await keyring.digestOfSeed(seed));
+        delete stored.links[action];
+        if (stored.linkSubjects) delete stored.linkSubjects[action];
+      }
+      if (open !== null) {
+        const next = newLinkSeed();
+        stored.linkSubjects = { ...(stored.linkSubjects ?? {}), [action]: open };
+        stored.links[action] = next;
+        minted.push([action, next]);
+      }
+    }
+    if (ended.length > 0 || minted.length > 0) {
+      if (stored.linkSubjects && Object.keys(stored.linkSubjects).length === 0) delete stored.linkSubjects;
+      // The record first: from this moment an ended link resolves to nothing
+      // even if deleting its binding below fails.
+      await stores.passes.put(stored);
+      for (const [action, seed] of minted) await stores.links.put(await keyring.digestOfSeed(seed), bindingOf(stored, "action", action));
+      await stores.links.delete(ended);
+    }
+    record.links = stored.links;
+    if (stored.linkSubjects) record.linkSubjects = stored.linkSubjects;
+    else delete record.linkSubjects;
+    return untold;
+  }
+
   async function renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent> {
+    let links: Record<string, string> = {};
+    if (!superseded) {
+      // Only a pass that is issued carries links worth minting.
+      const untold = record.lastIssuedTo !== null && !record.dark ? await syncSubjects(record, record.lastIssuedTo) : [];
+      links = await linkUrls(record);
+      for (const action of untold) delete links[action];
+    }
     const content = await options.render({
       token: token(record.tokenId),
       owner,
       serial: record.serial,
-      links: superseded ? {} : await linkUrls(record),
+      links,
       superseded: Boolean(superseded),
       ...(superseded ? { supersededReason: superseded } : {}),
       ...(record.dark && !superseded ? { dark: true } : {}),
@@ -569,6 +652,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       downloads: {},
       rotatedAt: nowSeconds(),
     };
+    delete next.linkSubjects;
     // A retired pass is gone, not dark: the next claim starts a new one.
     if (reason === "transfer") delete next.dark;
     if (reason !== "owner_request") {
@@ -602,6 +686,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       downloads: {},
       rotatedAt: nowSeconds(),
     };
+    delete next.linkSubjects;
     await stores.passes.put(next);
     await stores.links.delete(await digestsOf(record));
     const holder = record.lastIssuedTo;
@@ -1093,6 +1178,22 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return (await keyring.token(seed)) === linkToken ? { binding, record } : null;
     },
 
+    async linkSubject(record, action) {
+      const minted = record.linkSubjects?.[action];
+      const holder = record.lastIssuedTo;
+      if (minted === undefined || holder === null) return { state: "ended" };
+      let open: string | null;
+      try {
+        open = await subjectNow(action, record.tokenId, holder);
+      } catch (error) {
+        onError(error, { operation: "subject", tokenId: record.tokenId });
+        return { state: "unknown" };
+      }
+      if (open === minted) return { state: "current", subject: minted };
+      await syncSubjects(record, holder);
+      return { state: "ended" };
+    },
+
     async notifyAction(tokenId, account) {
       if (!is1155) {
         await internals.onPassUpdate(tokenId);
@@ -1282,7 +1383,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       if (is1155 && !account) throw new IssuerError("invalid_request", "capabilityLinksFor needs the account under the ERC-1155 binding");
       let record = await stores.passes.get(keyOf(normalizeTokenId(tokenId), account));
       if (record) record = await settle(record);
-      return record ? await linkUrls(record) : {};
+      if (!record) return {};
+      const untold = record.lastIssuedTo !== null && !record.dark ? await syncSubjects(record, record.lastIssuedTo) : [];
+      const links = await linkUrls(record);
+      for (const action of untold) delete links[action];
+      return links;
     },
   };
 }

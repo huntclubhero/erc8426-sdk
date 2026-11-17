@@ -307,7 +307,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
   async function execute(
     def: ActionDefinition,
-    input: { tokenId: string; action: string; account: Address; via: string; path: "signed" | "capability"; params: unknown; request: Request },
+    input: { tokenId: string; action: string; account: Address; via: string; path: "signed" | "capability"; params: unknown; subject?: string; request: Request },
   ): Promise<Response> {
     try {
       const result = await def.execute({
@@ -317,6 +317,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         via: input.via,
         path: input.path,
         params: input.params,
+        ...(input.subject === undefined ? {} : { subject: input.subject }),
         request: input.request,
         notifyUpdate: async () => {
           await x.notifyAction(input.tokenId, input.account);
@@ -506,6 +507,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       bound: def.bound ?? "",
       postUrl: x.linkUrl(linkToken),
       request,
+      ...(record.linkSubjects?.[binding.name] === undefined ? {} : { subject: record.linkSubjects[binding.name] }),
     };
     if (config.capability.confirmPage) return withLinkPageHeaders(await config.capability.confirmPage(ctx));
     if (wantsHtml(request)) return withLinkPageHeaders(defaultConfirmPage(ctx));
@@ -542,6 +544,16 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
     const holder = record.lastIssuedTo;
+    // A link minted for one subject (a proposal, a round) ends with it. The
+    // subject is asked fresh, and a link whose subject is no longer the
+    // open one is a link that no longer resolves.
+    let subject: string | undefined;
+    if (def.subject && holder) {
+      const s = await x.linkSubject(record, binding.name);
+      if (s.state === "unknown") return error("read_failed");
+      if (s.state !== "current") return error("unknown_capability", { message: "this link has ended: what it was for has closed" });
+      subject = s.subject;
+    }
     let entitled: EntitlementResult | null = null;
     if (holder) {
       try {
@@ -581,6 +593,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         via: entitled.via,
         path: "capability",
         params: body.params,
+        ...(subject === undefined ? {} : { subject }),
         request,
       });
     });

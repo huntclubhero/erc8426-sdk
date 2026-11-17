@@ -71,6 +71,9 @@ export interface PassRecord {
   ///  the holder's URL is derived from the seed with `linkSecret` and is
   ///  never stored, so a read of this record yields no link.
   links: Record<string, string>;
+  /// For an action with a `subject`: action name to the subject its current
+  ///  link in `links` was minted for. Absent for every other action.
+  linkSubjects?: Record<string, string>;
   /// Format key to the seed of its current download link, for providers the
   ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
@@ -130,6 +133,10 @@ export interface LinkBinding {
   /// The action name (kind "action") or format key (kind "download").
   name: string;
   generation: number;
+  /// Kind "action", for an action with a `subject`: the one thing (a
+  ///  proposal, a round, a sitting) this link was minted for. The link acts
+  ///  on that thing only and ends with it.
+  subject?: string;
 }
 
 /// Keyed by link digest (lowercase hex SHA-256 of the token), not by token.
