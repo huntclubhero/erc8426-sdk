@@ -98,7 +98,9 @@ export interface ActionDefinition<Result = unknown> {
   ///  Called fresh on every render and on every use of the link; nothing is
   ///  cached. Return a short stable identifier (at most 128 characters). A
   ///  throw means it could not be told: the link is left as it is, a render
-  ///  omits it, and a use of it answers 503. Requires `capability: true`.
+  ///  omits it, and a use of it answers 503. It is asked for one pass at a
+  ///  time, so an answer that never comes holds that pass's renders and
+  ///  link uses: give its reads a timeout. Requires `capability: true`.
   subject?(ctx: SubjectContext): string | null | Promise<string | null>;
   /// Apply the effect. Throw an `ActionError` to refuse with a chosen status;
   ///  the return value is sent back as `result` (keep it JSON serializable).

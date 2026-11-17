@@ -34,7 +34,10 @@ export interface ChainReader {
   ///  loss only when it is read at that block or a later one, so a node that
   ///  lags cannot take a pass away. Under the ERC-1155 binding it also keeps
   ///  a transfer log from an earlier block from being held against a pass
-  ///  that was claimed after it.
+  ///  that was claimed after it. A reader that takes its reads at a tag
+  ///  other than `latest` MUST NOT provide it: a head is the newest block,
+  ///  and a read at it would bypass the tag (`publicClientChainReader`
+  ///  leaves it out for "safe" and "finalized").
   blockNumber?(): Promise<bigint>;
   /// ERC-4907 rental state. `user` is null when there is no user. Needed only
   ///  by the `rental4907` policy.

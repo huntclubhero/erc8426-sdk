@@ -171,6 +171,45 @@ describe("second pass: a lagging node and the ERC-721 claim paths", () => {
   });
 });
 
+describe("second pass: what the fixes themselves got wrong", () => {
+  it("public mode: a manifest request for an unchanged owner writes nothing, block after block", async () => {
+    const h = hist({ mode: "public" });
+    const owner = newSigner();
+    h.chain.ownerFrom(1n, owner.address);
+    expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+    const passes = h.issuer.stores.passes;
+    const put = passes.put.bind(passes);
+    let puts = 0;
+    passes.put = async (record) => {
+      puts++;
+      return put(record);
+    };
+    for (let i = 1n; i <= 5n; i++) {
+      h.chain.head = 100n + i;
+      expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+    }
+    expect(puts).toBe(0);
+  });
+
+  it("a claim read behind the block the pass is dated with says so, with both blocks, to the claimer and to onError", async () => {
+    const h = hist();
+    const seller = newSigner();
+    const buyer = newSigner();
+    // A chain that was reset under a kept store: the pass is dated 5000 and
+    // the head is 40.
+    h.chain.head = 5000n;
+    h.chain.ownerFrom(1n, seller.address);
+    expect((await claim(h, seller)).res.status).toBe(200);
+    h.chain.ownerFrom(2n, buyer.address);
+    h.chain.head = 40n;
+    const refused = await claim(h, buyer);
+    expect(refused.res.status).toBe(503);
+    expect(String(refused.body.message)).toMatch(/block 40,/);
+    expect(String(refused.body.message)).toMatch(/block 5000 /);
+    expect(h.errors.map((e) => String((e as Error).message)).join(" ")).toMatch(/5000/);
+  });
+});
+
 describe("second pass: an issuer that reads at safe or finalized", () => {
   it("keeps admitting claims at its own tag: the newest block does not decide", async () => {
     const seller = newSigner();
@@ -284,6 +323,32 @@ describe("second pass: ending a link does not write an old record back", () => {
     h.poll.delay = 0;
     expect((await h.post(pathOf(a["vote-yes"]), { attempt: 1 })).status).toBe(200);
     expect((await h.post(pathOf(b["vote-yes"]), { attempt: 2 })).status).toBe(200);
+  });
+
+  it("a slow answer about the subject does not overwrite a newer one", async () => {
+    const h = polled();
+    const owner = newSigner();
+    h.chain.setOwner(TOKEN_ID, owner.address);
+    expect((await claim(h, owner)).res.status).toBe(200);
+    h.poll.open = "5";
+    await h.issuer.capabilityLinksFor(TOKEN_ID);
+    // A render asks while "5" is open, and its answer is slow.
+    let release!: () => void;
+    h.poll.gate = new Promise<void>((r) => (release = r));
+    const slow = h.issuer.capabilityLinksFor(TOKEN_ID);
+    await new Promise((r) => setTimeout(r, 10));
+    h.poll.gate = null;
+    // "5" closes and "6" opens. A second render is asked for.
+    h.poll.open = "6";
+    // It waits its turn behind the first, so the answers are applied in the
+    // order they were asked for.
+    const fresh = h.issuer.capabilityLinksFor(TOKEN_ID);
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await slow;
+    const links = await fresh;
+    expect((await rec(h))!.linkSubjects).toEqual({ "vote-yes": "6" });
+    expect((await h.post(pathOf(links["vote-yes"]), {})).status).toBe(200);
   });
 
   it("a link whose subject closed stays ended when the subject cannot be told at that moment", async () => {

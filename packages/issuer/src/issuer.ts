@@ -532,37 +532,49 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // acquisition URLs. That is why this is not a rotation, and why the next
   // link goes to the same installed pass.
   //
-  // The subjects are asked FIRST, with no record in hand: `subject` is the
+  // One pass at a time (a turn per pass, see `inTurn`). Inside a turn the
+  // subjects are asked FIRST, with no record in hand: `subject` is the
   // integrator's code and may take a chain read's time, and a record read
   // before it and written after it would put an old pass back over a
-  // rotation, a transfer or a retirement that landed meanwhile. Then, one
-  // at a time per pass, the stored record is read, changed and written with
-  // nothing awaited in between. A record that is no longer the caller's
-  // (another serial or generation) is left alone and reported as `stale`.
-  // Across instances there is no compare and set on a record: two of them
-  // can each mint a link for one subject, and the later write wins.
+  // rotation, a transfer or a retirement that landed meanwhile. Then the
+  // stored record is read, changed and written with nothing awaited in
+  // between. Asking inside the turn keeps the answers in order too: an
+  // answer that was slow to come cannot be applied after a newer one. A
+  // record that is no longer the caller's (another serial or generation) is
+  // left alone and reported as `stale`. Across instances there is no compare
+  // and set on a record: two of them can each mint a link for one subject,
+  // and the later write wins.
   //
   // `record` (which the caller goes on to render) is given the result. A
   // subject that could not be told leaves that action's link as it is and
   // is named in `untold`, so a render can leave the link out.
-  const syncing = new Map<string, Promise<unknown>>();
+  const turns = new Map<string, Promise<unknown>>();
+  function inTurn<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const turn = (turns.get(key) ?? Promise.resolve()).then(run);
+    const settled = turn.catch(() => undefined);
+    turns.set(key, settled);
+    void settled.then(() => {
+      if (turns.get(key) === settled) turns.delete(key);
+    });
+    return turn;
+  }
   async function syncSubjects(record: PassRecord, account: Address): Promise<{ untold: string[]; stale: boolean }> {
     const scoped = config.capabilityActions.filter((a) => config.actions[a]?.subject);
     if (scoped.length === 0) return { untold: [], stale: false };
-    const untold: string[] = [];
-    const open = new Map<string, string | null>();
-    for (const action of scoped) {
-      try {
-        open.set(action, await subjectNow(action, record.tokenId, account));
-      } catch (error) {
-        onError(error, { operation: "subject", tokenId: record.tokenId });
-        untold.push(action);
-      }
-    }
     const key = passRecordKey(record);
-    const turn = (syncing.get(key) ?? Promise.resolve()).then(async () => {
+    return inTurn(key, async () => {
+      const untold: string[] = [];
+      const open = new Map<string, string | null>();
+      for (const action of scoped) {
+        try {
+          open.set(action, await subjectNow(action, record.tokenId, account));
+        } catch (error) {
+          onError(error, { operation: "subject", tokenId: record.tokenId });
+          untold.push(action);
+        }
+      }
       const stored = await stores.passes.get(key);
-      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation) return true;
+      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation) return { untold, stale: true };
       // Nothing is awaited from here to the put.
       const endedSeeds: string[] = [];
       const minted: [string, string][] = [];
@@ -592,14 +604,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       record.links = stored.links;
       if (stored.linkSubjects) record.linkSubjects = stored.linkSubjects;
       else delete record.linkSubjects;
-      return false;
+      return { untold, stale: false };
     });
-    const settled = turn.catch(() => undefined);
-    syncing.set(key, settled);
-    void settled.then(() => {
-      if (syncing.get(key) === settled) syncing.delete(key);
-    });
-    return { untold, stale: await turn };
   }
 
   async function renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent> {
@@ -846,13 +852,29 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // A claim by the account the pass is already issued to: the same pass,
   // read as entitled at `block`. Noted, so that a node behind this claim
   // cannot take the pass (a rental that ended unread and was taken up
-  // again, a pass issued before passes were dated).
+  // again, a pass issued before passes were dated). Written in the pass's
+  // turn on a record read there, and only this one field: the record the
+  // caller holds was read before other awaits and may be behind.
+  //
+  // Not in the public configuration. There the manifest is served to anyone
+  // and a request is not a claim by the holder: noting each one would be a
+  // write per token per block that any visitor can cause. A public pass
+  // keeps the block it was issued at.
   async function heldAt(record: PassRecord, block: bigint | undefined): Promise<void> {
-    if (block === undefined) return;
-    const dated = datedAt(record);
-    if (dated !== undefined && block <= dated) return;
-    record.heldAtBlock = block.toString();
-    await stores.passes.put(record);
+    if (block === undefined || config.mode === "public") return;
+    const before = datedAt(record);
+    if (before !== undefined && block <= before) return;
+    const key = passRecordKey(record);
+    await inTurn(key, async () => {
+      const stored = await stores.passes.get(key);
+      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation || stored.lastIssuedTo === null) return;
+      const dated = datedAt(stored);
+      if (dated === undefined || block > dated) {
+        stored.heldAtBlock = block.toString();
+        await stores.passes.put(stored);
+      }
+      if (stored.heldAtBlock !== undefined) record.heldAtBlock = stored.heldAtBlock;
+    });
   }
 
   // Acting on a loss costs the holder something a refusal does not: a retired
@@ -1189,7 +1211,13 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // the buyer claimed after it.
       const dated = datedAt(record);
       if (block !== undefined && dated !== undefined && block < dated) {
-        throw new IssuerError("read_failed", "the claim was read at a block behind the one the current pass was issued at");
+        // Transient on a live chain: the next try names a later head. It
+        // does not pass by itself where the chain was reset under a kept
+        // store (a dev chain restarted, a testnet wiped): the pass records
+        // of the old chain have to go too.
+        const message = `the claim was read at block ${block}, behind block ${dated} that the current pass is dated with; try again (if this chain was reset, its pass records must be reset with it)`;
+        onError(new Error(message), { operation: "claim:behind", tokenId });
+        throw new IssuerError("read_failed", message);
       }
       // Under an additive policy (delegation) the holder of record may still
       // be entitled: then this is not a new holder, just another entitled
