@@ -64,6 +64,20 @@ export interface PassRecord {
   ///  from `issuedAtBlock` because it does not say when the URLs were
   ///  issued: a transfer log is still tested against `issuedAtBlock`.
   heldAtBlock?: string;
+  /// Set when `issuedAtBlock` and `heldAtBlock` are blocks a read was taken
+  ///  at and found the account entitled (0.5.3 on). A record without it was
+  ///  written by an earlier version: 0.5.0 stored a head no read was taken
+  ///  at, and nothing in a record tells that block from a later version's.
+  ///  So a block without this mark is not tested against: the pass counts
+  ///  as having no block until a read dates it again.
+  datedByRead?: true;
+  /// ERC-1155 binding, and only on a record with no `datedByRead` block:
+  ///  the newest block of a transfer log that named this account (decimal
+  ///  string). A pass with no date has nothing to test a loss against, and
+  ///  under this binding a transfer log only brings a read about, so the
+  ///  block the log reported is kept and a loss read at that block or a
+  ///  later one is acted on. Removed when the pass is dated.
+  reportedAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.

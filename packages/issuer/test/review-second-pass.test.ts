@@ -280,6 +280,11 @@ describe("second pass: ending a link does not write an old record back", () => {
             if (poll.delay) await new Promise((r) => setTimeout(r, poll.delay));
             return open;
           },
+          // A subject has closed once it is no longer the open one: every node here is current.
+          subjectClosed: ({ subject }) => {
+            if (poll.failing) throw new Error("rpc unavailable");
+            return subject !== poll.open;
+          },
           execute: () => ({ ok: true }),
         },
       },
@@ -378,6 +383,7 @@ describe("second pass: ending a link does not write an old record back", () => {
           capability: true,
           bound: "One vote per proposal",
           subject: () => (hang ? new Promise<string>(() => undefined) : "5"),
+          subjectClosed: () => false,
           execute: () => ({ ok: true }),
         },
       },

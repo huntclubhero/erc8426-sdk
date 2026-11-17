@@ -193,9 +193,11 @@ watchPassUpdates({ client: publicClient, issuer });
 or from an indexer webhook (Alchemy, QuickNode, Goldsky):
 
 ```ts
-await issuer.onTransfer(tokenId, from, to);
+await issuer.onTransfer(tokenId, from, to, log.blockNumber);
 await issuer.onPassUpdate(fromTokenId, toTokenId); // inclusive range
 ```
+
+Pass the log's block where you have it. A log from the block the current pass is dated with, or an earlier one, is then set aside: a seller who bought back and claimed again does not lose the new pass to the log of the first sale, delivered late. Without the block every log acts.
 
 A lagging watcher degrades hygiene, never authorization: the fresh read refuses the previous owner's links until rotation catches up.
 

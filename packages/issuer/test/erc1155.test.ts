@@ -297,9 +297,9 @@ describe("ERC-1155 binding: rotation follows the minimum, not the transfer", () 
     await claim(h, bob, ID);
     h.chain.setBalance(ID, alice.address, 0n);
     const summary = await h.issuer.checkHoldings(ID);
-    expect(summary).toEqual({ checked: 2, retired: [alice.address], dark: [], revived: [], urlsRetired: [] });
+    expect(summary).toEqual({ checked: 2, retired: [alice.address], dark: [], revived: [], urlsRetired: [], dated: [] });
     // A second pass over the same state does nothing more.
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [], dated: [] });
   });
 
   it("needs no trigger for the receiver: its first claim serves it", async () => {
@@ -391,7 +391,7 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(200);
 
     h.chain.setBalance(ID, alice.address, 0n);
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [alice.address], revived: [], urlsRetired: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [alice.address], revived: [], urlsRetired: [], dated: [] });
     let record = (await recordOf(h, alice.address))!;
     expect(record.dark).toBe(true);
     expect(record.serial).toBe(serial);
@@ -406,11 +406,11 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
     expect((await h.get(download)).status).toBe(404);
     // A second look at a dark pass pushes nothing more.
     const pushes = h.notified.length;
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [], dated: [] });
     expect(h.notified).toHaveLength(pushes);
 
     h.chain.setBalance(ID, alice.address, 1n);
-    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [alice.address], urlsRetired: [] });
+    expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [alice.address], urlsRetired: [], dated: [] });
     record = (await recordOf(h, alice.address))!;
     expect(record.dark).toBeUndefined();
     expect(record.serial).toBe(serial);
@@ -439,7 +439,7 @@ describe("ERC-1155 binding: a signed path pass goes dark and comes back", () => 
         stale = false;
         return 0n;
       };
-      expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [] });
+      expect(await h.issuer.checkHoldings(ID)).toEqual({ checked: 1, retired: [], dark: [], revived: [], urlsRetired: [], dated: [] });
       const record = (await recordOf(h, alice.address))!;
       expect(record.dark).toBeUndefined();
       expect(record.lastIssuedTo).toBe(alice.address);
