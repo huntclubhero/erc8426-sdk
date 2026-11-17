@@ -803,3 +803,132 @@ describe("review of the fix: a loss is tested against the date of the record as 
     expect(record.lastIssuedTo).toBe(alice.address);
   });
 });
+
+/// From the second pass of that review.
+
+describe("review of the fix, second pass: the block a transfer log reported is kept until the pass has a date (ERC-1155)", () => {
+  /// Alice holds from 100 and claims at 101 on an earlier version. She sells
+  /// at 105, and the nodes disagree by one block when the log arrives.
+  async function soldAt105(h: H, shape: "a block with no mark" | "no block") {
+    const alice = newSigner();
+    const bob = newSigner();
+    h.chain.setBalanceFrom(100n, ID, alice.address, 1n);
+    h.chain.fresh = 101n;
+    h.chain.lagging = 101n;
+    const first = await claim(h, alice, ID);
+    expect(first.res.status).toBe(200);
+    const stored = (await recordOf(h, alice.address))!;
+    if (shape === "no block") asEarlier(stored);
+    else unmark(stored);
+    await h.issuer.stores.passes.put(stored);
+    h.chain.setBalanceFrom(105n, ID, alice.address, 0n);
+    h.chain.setBalanceFrom(105n, ID, bob.address, 1n);
+    h.chain.fresh = 105n;
+    h.chain.lagging = 104n;
+    return { alice, bob, first };
+  }
+  const caughtUp = (h: H) => {
+    h.chain.fresh = 500n;
+    h.chain.lagging = 500n;
+    h.chain.latestFrom = "fresh";
+    h.chain.headFrom = "fresh";
+  };
+  const gone = (record: PassRecord) => record.dark === true || record.lastIssuedTo === null;
+
+  for (const shape of ["a block with no mark", "no block"] as const) {
+    it(`a log that arrives while the node naming the head is one block behind is not lost: the next check acts (${shape})`, async () => {
+      for (const make of [signedOnly, harness1155]) {
+        const h = make();
+        const { alice, bob } = await soldAt105(h, shape);
+        h.chain.latestFrom = "fresh";
+        h.chain.headFrom = "lagging";
+        await h.issuer.onTransfer(ID, alice.address, bob.address, 105n);
+        expect((await recordOf(h, alice.address))!.reportedAtBlock).toBe("105");
+        caughtUp(h);
+        const swept = await h.issuer.checkHoldings(ID);
+        expect([...swept.retired, ...swept.dark]).toEqual([alice.address]);
+        expect(gone((await recordOf(h, alice.address))!)).toBe(true);
+      }
+    });
+
+    it(`a display only pass whose account read as holding at the tag and not at the log's block goes dark on the next check (${shape})`, async () => {
+      const h = signedOnly();
+      const { alice, bob } = await soldAt105(h, shape);
+      h.chain.latestFrom = "lagging";
+      h.chain.headFrom = "fresh";
+      await h.issuer.onTransfer(ID, alice.address, bob.address, 105n);
+      caughtUp(h);
+      expect((await h.issuer.checkHoldings(ID)).dark).toEqual([alice.address]);
+      expect((await recordOf(h, alice.address))!.dark).toBe(true);
+    });
+
+    it(`a refused request acts once a log has reported a block, and a node behind that block still takes nothing (${shape})`, async () => {
+      const h = signedOnly();
+      const { alice, bob, first } = await soldAt105(h, shape);
+      h.chain.latestFrom = "fresh";
+      h.chain.headFrom = "lagging";
+      await h.issuer.onTransfer(ID, alice.address, bob.address, 105n);
+      const download = new URL(first.body.formats.apple).pathname;
+      // Still behind the log: refused, nothing taken.
+      expect((await h.get(download)).status).toBe(403);
+      expect(gone((await recordOf(h, alice.address))!)).toBe(false);
+      caughtUp(h);
+      expect((await h.get(download)).status).toBe(403);
+      expect(gone((await recordOf(h, alice.address))!)).toBe(true);
+    });
+  }
+
+  it("the reported block goes when the pass is dated, and the pass is not dated below it", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    const carol = newSigner();
+    // Alice holds two from 100 and claims; at 105 she sends one away and
+    // still holds. The log names her.
+    h.chain.setBalanceFrom(100n, ID, alice.address, 2n);
+    h.chain.fresh = 101n;
+    h.chain.lagging = 101n;
+    expect((await claim(h, alice, ID)).res.status).toBe(200);
+    const stored = (await recordOf(h, alice.address))!;
+    asEarlier(stored);
+    await h.issuer.stores.passes.put(stored);
+    h.chain.setBalanceFrom(105n, ID, alice.address, 1n);
+    h.chain.fresh = 105n;
+    h.chain.lagging = 104n;
+    h.chain.headFrom = "lagging";
+    // The read at the log's block cannot be taken through the node at 104: read_failed.
+    await expect(h.issuer.onTransfer(ID, alice.address, carol.address, 105n)).rejects.toThrow(/could not be taken/);
+    let record = (await recordOf(h, alice.address))!;
+    expect(record.reportedAtBlock).toBe("105");
+    expect(record.datedByRead).toBeUndefined();
+    // A check finds her holding, and the head named is 104, below the
+    // reported block: the pass is not dated there.
+    expect((await h.issuer.checkHoldings(ID)).dated).toEqual([]);
+    record = (await recordOf(h, alice.address))!;
+    expect(record.reportedAtBlock).toBe("105");
+    expect(record.datedByRead).toBeUndefined();
+    h.chain.lagging = 106n;
+    h.chain.fresh = 106n;
+    const swept = await h.issuer.checkHoldings(ID);
+    expect(swept.dated).toEqual([alice.address]);
+    record = (await recordOf(h, alice.address))!;
+    expect(record.datedByRead).toBe(true);
+    expect(record.heldAtBlock).toBe("106");
+    expect(record.reportedAtBlock).toBeUndefined();
+    // Dated once: the next sweep dates nothing.
+    expect((await h.issuer.checkHoldings(ID)).dated).toEqual([]);
+  });
+
+  it("a marked pass keeps no reported block", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    h.chain.setBalanceFrom(100n, ID, alice.address, 2n);
+    h.chain.fresh = 101n;
+    h.chain.lagging = 101n;
+    expect((await claim(h, alice, ID)).res.status).toBe(200);
+    h.chain.setBalanceFrom(105n, ID, alice.address, 1n);
+    h.chain.fresh = 105n;
+    h.chain.lagging = 105n;
+    await h.issuer.onTransfer(ID, alice.address, newSigner().address, 105n);
+    expect((await recordOf(h, alice.address))!.reportedAtBlock).toBeUndefined();
+  });
+});

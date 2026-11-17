@@ -84,6 +84,12 @@ export interface HoldingsSummary {
   /// "dark" mode with a transfer's block: accounts that hold now but did
   ///  not at that block. The card stays; its acquisition URLs were replaced.
   urlsRetired: Address[];
+  /// Accounts whose pass had no block a read was taken at (issued by an
+  ///  earlier version) and was dated by this check: found holding, and read
+  ///  as holding once more at a named head. Such a pass that is not listed
+  ///  here and not retired or dark is still undated; the next check tries
+  ///  again.
+  dated: Address[];
 }
 
 export interface IssuerErrorContext {
@@ -954,6 +960,45 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       delete record.datedByRead;
     }
     delete record.heldAtBlock;
+    delete record.reportedAtBlock;
+  }
+
+  // The block a transfer log reported for a pass with no date (see
+  // `PassRecord.reportedAtBlock`).
+  function reportedBlock(record: PassRecord): bigint | undefined {
+    return !record.datedByRead && record.reportedAtBlock !== undefined ? BigInt(record.reportedAtBlock) : undefined;
+  }
+
+  // What a loss of this pass is tested against: its date, or for a pass
+  // with none the block a transfer log reported. A node cannot name a head
+  // at or after that block without having reached the transfer, so a loss
+  // read there is acted on. What that leaves, for a pass with no date only:
+  // a log from before its issuance, delivered late, and a later read through
+  // a node that is also behind the issuance.
+  function lossFloor(record: PassRecord): bigint | undefined {
+    return datedAt(record) ?? reportedBlock(record);
+  }
+
+  // Keep the block of a transfer log that named an account whose pass has
+  // no date. The read the log brings about may not settle the matter (the
+  // node naming the head is a block behind the log, or the account reads as
+  // holding at the tag): without this the log's block would be gone, and
+  // with it the only thing a loss of this pass can be tested against.
+  async function reportAt(record: PassRecord, block: bigint): Promise<void> {
+    if (record.lastIssuedTo === null || record.dark || datedAt(record) !== undefined) return;
+    const before = reportedBlock(record);
+    if (before !== undefined && block <= before) return;
+    const key = passRecordKey(record);
+    await inTurn(key, async () => {
+      const stored = await stores.passes.get(key);
+      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation || stored.lastIssuedTo === null || stored.datedByRead) return;
+      const had = reportedBlock(stored);
+      if (had === undefined || block > had) {
+        stored.reportedAtBlock = block.toString();
+        await stores.passes.put(stored);
+      }
+      if (stored.reportedAtBlock !== undefined) record.reportedAtBlock = stored.reportedAtBlock;
+    });
   }
 
   // A claim by the account the pass is already issued to: the same pass,
@@ -983,12 +1028,17 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           // behind can read the account as entitled from an earlier holding
           // period, and a pass dated there would be taken by the next node
           // that is behind its real issuance.
-          const floor = unmarkedBlock(stored);
+          // Nor below the block of a transfer log that named the account:
+          // the read would be of the state before that transfer.
+          const stored0 = unmarkedBlock(stored);
+          const reported = reportedBlock(stored);
+          const floor = stored0 !== undefined && reported !== undefined ? (stored0 > reported ? stored0 : reported) : (stored0 ?? reported);
           if (floor !== undefined && block < floor) return;
           // A block an earlier version left is not one a read was taken
           // at: it goes, so it is never tested against beside this one.
           delete stored.issuedAtBlock;
           delete stored.heldAtBlock;
+          delete stored.reportedAtBlock;
         }
         stored.heldAtBlock = block.toString();
         stored.datedByRead = true;
@@ -998,6 +1048,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       delete record.issuedAtBlock;
       delete record.heldAtBlock;
       delete record.datedByRead;
+      delete record.reportedAtBlock;
+      if (stored.reportedAtBlock !== undefined) record.reportedAtBlock = stored.reportedAtBlock;
       if (stored.issuedAtBlock !== undefined) record.issuedAtBlock = stored.issuedAtBlock;
       if (stored.heldAtBlock !== undefined) record.heldAtBlock = stored.heldAtBlock;
       if (stored.datedByRead) record.datedByRead = true;
@@ -1009,14 +1061,16 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // head and, where that agrees, date the pass by it. From then on a loss
   // of it can be tested. Best effort: a read that fails or disagrees leaves
   // the pass as it was, for the next time it is seen.
-  async function dateOnSight(record: PassRecord, account: Address): Promise<void> {
-    if (typeof chain!.blockNumber !== "function" || record.lastIssuedTo === null || record.dark || datedAt(record) !== undefined) return;
+  // Returns whether the pass was dated.
+  async function dateOnSight(record: PassRecord, account: Address): Promise<boolean> {
+    if (typeof chain!.blockNumber !== "function" || record.lastIssuedTo === null || record.dark || datedAt(record) !== undefined) return false;
     try {
       const at = await entitledAtHead(record.tokenId, account);
       if (at?.entitled) await heldAt(record, at.block);
     } catch {
       // Left to the next sight.
     }
+    return datedAt(record) !== undefined;
   }
 
   // Acting on a loss costs the holder something a refusal does not: a retired
@@ -1045,11 +1099,8 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // dateOnSight), and tested from then on. An ERC-721 transfer or burn log
   // and another account's claim act on it as before. Under ERC-1155 a
   // transfer log only brings the read about, so there the block of the log
-  // stands in for the missing date (`logBlock`): a node cannot name a head at
-  // or after that block without having reached the transfer, and a loss read
-  // there is acted on. What that leaves, for a pass with no date only: a log
-  // from before its issuance, delivered late, read through a node that is
-  // also behind the issuance.
+  // is kept on the record and stands in for the missing date until the pass
+  // has one (see lossFloor and reportAt).
   //
   // The record is read again before acting, since another request may have
   // acted meanwhile. Returns what was done, or null when nothing was.
@@ -1063,7 +1114,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // longer exists (a burn nobody reported, or a node that has not reached
   // the mint): that is tested the same way, and the pass is voided.
   const losing = new Map<string, Promise<unknown>>();
-  async function loseIfVerified(record: PassRecord, account: Address, logBlock?: bigint): Promise<"retired" | "dark" | "burned" | null> {
+  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | "burned" | null> {
     const key = passRecordKey(record);
     const turn = (losing.get(key) ?? Promise.resolve()).then(
       async () => {
@@ -1071,7 +1122,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         let burned = false;
         let head: bigint | undefined;
         if (typeof chain!.blockNumber === "function") {
-          const dated = datedAt(record) ?? logBlock;
+          const dated = lossFloor(record);
           if (dated === undefined) return null;
           head = await chain!.blockNumber!();
           if (head < dated) return null;
@@ -1091,7 +1142,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         // have claimed again meanwhile, through a node ahead of the one that
         // answered here: the loss is tested against the date as it is now.
         if (head !== undefined) {
-          const now = datedAt(current) ?? logBlock;
+          const now = lossFloor(current);
           if (now === undefined || head < now) return null;
         }
         if (burned) {
@@ -1156,13 +1207,14 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // issued list: a transfer that names an account finds its pass even if
     // the list has lost it.
     const wanted = named ? [...new Map(named.map((a) => [a.toLowerCase(), a])).values()] : await stores.passes.accounts!(id);
-    const summary: HoldingsSummary = { checked: 0, retired: [], dark: [], revived: [], urlsRetired: [] };
+    const summary: HoldingsSummary = { checked: 0, retired: [], dark: [], revived: [], urlsRetired: [], dated: [] };
     const failed: Address[] = [];
     for (const account of wanted) {
       const record = await stores.passes.get(keyOf(id, account));
       // Never issued, or retired since: no pass of this account is out.
       if (!record || record.lastIssuedTo === null) continue;
       summary.checked++;
+      if (opts.blockNumber !== undefined) await reportAt(record, opts.blockNumber);
       let holds: boolean;
       let heldAtBlock = true;
       try {
@@ -1197,7 +1249,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (record.dark) continue;
         let did: "retired" | "dark" | "burned" | null;
         try {
-          did = await loseIfVerified(record, account, opts.blockNumber);
+          did = await loseIfVerified(record, account);
         } catch (error) {
           onError(error, { operation: "holdings:read", tokenId: id });
           failed.push(account);
@@ -1226,7 +1278,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           summary.urlsRetired.push(account);
         }
       } else {
-        await dateOnSight(record, account);
+        if (await dateOnSight(record, account)) summary.dated.push(account);
         if (opts.refresh) {
           // A transfer changed this account's balance and it still holds:
           // the pass may show the balance, so it is told. Only this field,

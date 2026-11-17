@@ -71,6 +71,13 @@ export interface PassRecord {
   ///  So a block without this mark is not tested against: the pass counts
   ///  as having no block until a read dates it again.
   datedByRead?: true;
+  /// ERC-1155 binding, and only on a record with no `datedByRead` block:
+  ///  the newest block of a transfer log that named this account (decimal
+  ///  string). A pass with no date has nothing to test a loss against, and
+  ///  under this binding a transfer log only brings a read about, so the
+  ///  block the log reported is kept and a loss read at that block or a
+  ///  later one is acted on. Removed when the pass is dated.
+  reportedAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.
