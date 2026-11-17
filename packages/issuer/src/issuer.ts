@@ -517,8 +517,20 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
 
   // The subject an action's link should be minted for right now, for the
   // pass of `account`. Throws when it could not be told.
+  const subjectTimeoutMs =
+    typeof config.capability.subjectTimeoutMs === "number" && Number.isFinite(config.capability.subjectTimeoutMs) && config.capability.subjectTimeoutMs > 0
+      ? config.capability.subjectTimeoutMs
+      : 5000;
   async function subjectNow(action: string, tokenId: string, account: Address): Promise<string | null> {
-    const raw = await config.actions[action]!.subject!({ token: token(tokenId), account, action });
+    // Given up after a while, like a throw: subjects are asked for one pass
+    // at a time, and an answer that never came would hold the pass's turn.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raw = await Promise.race([
+      (async () => config.actions[action]!.subject!({ token: token(tokenId), account, action }))(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`action "${action}": subject did not answer within ${subjectTimeoutMs} ms`)), subjectTimeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
     if (raw === null) return null;
     if (typeof raw !== "string" || raw === "" || raw.length > 128) throw new Error(`action "${action}": subject must be null or a string of 1 to 128 characters`);
     return raw;
@@ -859,11 +871,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // Not in the public configuration. There the manifest is served to anyone
   // and a request is not a claim by the holder: noting each one would be a
   // write per token per block that any visitor can cause. A public pass
-  // keeps the block it was issued at.
+  // keeps the block it was issued at; one with no block at all (issued by a
+  // version that did not date passes) is dated here, once.
   async function heldAt(record: PassRecord, block: bigint | undefined): Promise<void> {
-    if (block === undefined || config.mode === "public") return;
+    if (block === undefined) return;
     const before = datedAt(record);
-    if (before !== undefined && block <= before) return;
+    if (before !== undefined && (config.mode === "public" || block <= before)) return;
     const key = passRecordKey(record);
     await inTurn(key, async () => {
       const stored = await stores.passes.get(key);

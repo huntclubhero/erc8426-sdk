@@ -98,9 +98,9 @@ export interface ActionDefinition<Result = unknown> {
   ///  Called fresh on every render and on every use of the link; nothing is
   ///  cached. Return a short stable identifier (at most 128 characters). A
   ///  throw means it could not be told: the link is left as it is, a render
-  ///  omits it, and a use of it answers 503. It is asked for one pass at a
-  ///  time, so an answer that never comes holds that pass's renders and
-  ///  link uses: give its reads a timeout. Requires `capability: true`.
+  ///  omits it, and a use of it answers 503. An answer that has not come
+  ///  after `capability.subjectTimeoutMs` (default 5000) is given up the
+  ///  same way. Requires `capability: true`.
   subject?(ctx: SubjectContext): string | null | Promise<string | null>;
   /// Apply the effect. Throw an `ActionError` to refuse with a chosen status;
   ///  the return value is sent back as `result` (keep it JSON serializable).
@@ -136,6 +136,11 @@ export interface CapabilityConfig {
   ///  capability links standing in for check (1) on actions marked
   ///  `capability: true`. Requires mode "gated".
   enabled: boolean;
+  /// How long an action's `subject` may take to answer, in milliseconds.
+  ///  Default 5000. Subjects are asked for one pass at a time, so an answer
+  ///  that never came would otherwise hold every later render, link use and
+  ///  claim of that pass.
+  subjectTimeoutMs?: number;
   /// Render the page a device shows when a pass link is opened (a GET). The
   ///  GET MUST stay side-effect free, so the page should POST to `postUrl`
   ///  on a user gesture. Defaults to a minimal built-in HTML page for

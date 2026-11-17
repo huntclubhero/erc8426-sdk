@@ -191,6 +191,23 @@ describe("second pass: what the fixes themselves got wrong", () => {
     expect(puts).toBe(0);
   });
 
+  it("public mode: a pass with no block is dated by the next manifest request, once", async () => {
+    const h = hist({ mode: "public" });
+    const owner = newSigner();
+    h.chain.ownerFrom(1n, owner.address);
+    expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+    const legacy = (await rec(h))!;
+    delete legacy.issuedAtBlock;
+    await h.issuer.stores.passes.put(legacy);
+    h.chain.head = 105n;
+    expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+    const after = (await rec(h))!;
+    expect(after.issuedAtBlock ?? after.heldAtBlock).toBe("105");
+    h.chain.head = 110n;
+    expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+    expect((await rec(h))!.heldAtBlock).toBe("105");
+  });
+
   it("a claim read behind the block the pass is dated with says so, with both blocks, to the claimer and to onError", async () => {
     const h = hist();
     const seller = newSigner();
@@ -349,6 +366,35 @@ describe("second pass: ending a link does not write an old record back", () => {
     const links = await fresh;
     expect((await rec(h))!.linkSubjects).toEqual({ "vote-yes": "6" });
     expect((await h.post(pathOf(links["vote-yes"]), {})).status).toBe(200);
+  });
+
+  it("an answer about the subject that never comes is given up, and does not hold the pass", async () => {
+    let hang = false;
+    const h = buildHarness({
+      capability: { enabled: true, subjectTimeoutMs: 40 },
+      actions: {
+        "vote-yes": {
+          description: "Vote yes",
+          capability: true,
+          bound: "One vote per proposal",
+          subject: () => (hang ? new Promise<string>(() => undefined) : "5"),
+          execute: () => ({ ok: true }),
+        },
+      },
+    });
+    const owner = newSigner();
+    h.chain.setOwner(TOKEN_ID, owner.address);
+    expect((await claim(h, owner)).res.status).toBe(200);
+    const link = pathOf((await h.issuer.capabilityLinksFor(TOKEN_ID))["vote-yes"]);
+    hang = true;
+    // Untold, like a throw: the render leaves the link out, a use answers 503.
+    expect((await h.issuer.capabilityLinksFor(TOKEN_ID))["vote-yes"]).toBeUndefined();
+    expect((await h.post(link, {})).status).toBe(503);
+    hang = false;
+    // Nothing is held: the next request is served, and the link is the same.
+    expect(pathOf((await h.issuer.capabilityLinksFor(TOKEN_ID))["vote-yes"])).toBe(link);
+    expect((await h.post(link, {})).status).toBe(200);
+    expect((await claim(h, owner)).res.status).toBe(200);
   });
 
   it("a link whose subject closed stays ended when the subject cannot be told at that moment", async () => {
