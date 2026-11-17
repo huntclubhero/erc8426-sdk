@@ -216,7 +216,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
   const balanceOf = (account: Address) =>
     publicClient.readContract({ address: edition.contract, abi: editionAbi, functionName: "balanceOf", args: [account, edition.id] });
 
-  const render: Parameters<typeof createIssuer>[0]["render"] = async ({ token, owner, serial, links, superseded, supersededReason, updatedAt }) => {
+  const render: Parameters<typeof createIssuer>[0]["render"] = async ({ token, owner, serial, links, linkSubjects, superseded, supersededReason, updatedAt }) => {
     const [held, proposal] = await Promise.all([balanceOf(owner).catch(() => null), currentProposal().catch(() => null)]);
     const mine = proposal ? await ballot(proposal.proposalId, owner).catch(() => null) : null;
     const power = mine ? BigInt(mine.power) : 0n;
@@ -276,11 +276,18 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
       ],
       // Each link was minted by the issuer for the open proposal (the
       // action's `subject`) and ends with it. The URL carries no proposal:
-      // which one it votes on is in the issuer's record of the link.
+      // which one it votes on is in the issuer's record of the link, and
+      // that is the proposal the label names. A link is shown only when it
+      // is for the proposal this pass is describing: a render that reached a
+      // node behind the newest proposal shows none, and the link stays.
       links:
         superseded || !canLinkVote
           ? []
-          : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: `${VOTE_LABEL[a]} on proposal ${proposal!.proposalId}`, url: links[a]! })),
+          : VOTE_ACTIONS.filter((a) => links[a] && linkSubjects[a] === proposal!.proposalId).map((a) => ({
+              key: a,
+              label: `${VOTE_LABEL[a]} on proposal ${linkSubjects[a]}`,
+              url: links[a]!,
+            })),
       barcode: { format: "qr", message: assetId(token), altText: `Edition #${token.tokenId}` },
     };
     return content;
@@ -339,6 +346,15 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     async subject() {
       const p = await currentProposal();
       return p && p.votable ? p.proposalId : null;
+    },
+    // What ends a link: its own proposal has closed. The proposal is asked
+    // for by id. A node that has not reached its opening reverts
+    // (VoteEditionUnknownProposal), which throws here: that is "could not be
+    // told", and the link stays. "Not votable" alone is not "closed", since
+    // a proposal is not votable in the second it opens either.
+    async subjectClosed({ subject }) {
+      const p = await proposalById(BigInt(subject));
+      return !p.votable && p.closes < Math.floor(Date.now() / 1000);
     },
     async execute({ account, path, request, params, subject, notifyUpdate }) {
       // A link votes on the proposal it was minted for, from the issuer's

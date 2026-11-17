@@ -84,11 +84,16 @@ export interface ActionDefinition<Result = unknown> {
   ///  and close (a proposal, a round, a sitting): name the one that is open
   ///  for this pass now, or null when none is. The action's link is then
   ///  minted for that one thing, is bound to it in the issuer's record, and
-  ///  ENDS with it: once this function answers anything else, the link
-  ///  resolves to nothing and the pass is given a link for the next thing
-  ///  the next time it is rendered. A link that someone saw once therefore
-  ///  stops working when the thing it was for closes, where a link with no
-  ///  subject works for as long as the account holds.
+  ///  ENDS with it: once `subjectClosed` says that thing has closed, the
+  ///  link resolves to nothing and the pass is given a link for the next
+  ///  thing the next time it is rendered. A link that someone saw once
+  ///  therefore stops working when the thing it was for closes, where a link
+  ///  with no subject works for as long as the account holds.
+  ///
+  ///  This answer never ends a link. It says what a NEW link is minted for.
+  ///  A node behind the opening of the newest thing names the one before it,
+  ///  or none, and a link ended on that answer would be the holder's live
+  ///  link deleted on one stale read. Requires `subjectClosed`.
   ///
   ///  Ending a link is not a rotation: the pass keeps its serial, its other
   ///  links and its acquisition URLs, and the next link is delivered to the
@@ -102,6 +107,17 @@ export interface ActionDefinition<Result = unknown> {
   ///  after `capability.subjectTimeoutMs` (default 5000) is given up the
   ///  same way. Requires `capability: true`.
   subject?(ctx: SubjectContext): string | null | Promise<string | null>;
+  /// REQUIRED with `subject`: whether the thing a link was minted for has
+  ///  closed, which is what ends the link. Answer true only when that thing
+  ///  is known and its close has passed. Where it is not known (a node that
+  ///  has not reached its opening reports nothing by that name), answer
+  ///  false or throw: "not open" is not "closed". While this answers false
+  ///  the link stays, whatever `subject` names meanwhile; when it answers
+  ///  true the link ends and one is minted for what `subject` names, if
+  ///  anything. A throw, or no answer within `capability.subjectTimeoutMs`,
+  ///  means it could not be told: the link is left as it is, a render omits
+  ///  it, and a use of it answers 503.
+  subjectClosed?(ctx: SubjectContext & { subject: string }): boolean | Promise<boolean>;
   /// Apply the effect. Throw an `ActionError` to refuse with a chosen status;
   ///  the return value is sent back as `result` (keep it JSON serializable).
   ///  When a browser posted the confirm page's form, a string `message` on
@@ -518,6 +534,13 @@ export function resolveConfig(config: IssuerConfig): ResolvedIssuerConfig {
       throw new IssuerConfigError(`action "${name}" needs a description`);
     }
     if (def.subject !== undefined && typeof def.subject !== "function") throw new IssuerConfigError(`action "${name}": subject must be a function`);
+    if (def.subjectClosed !== undefined && typeof def.subjectClosed !== "function") throw new IssuerConfigError(`action "${name}": subjectClosed must be a function`);
+    if (def.subject && !def.subjectClosed) {
+      throw new IssuerConfigError(
+        `action "${name}" has a subject but no subjectClosed: a link ends when the thing it was minted for has closed, and only subjectClosed says so (a different answer from subject can come from a node that is behind, and ends nothing)`,
+      );
+    }
+    if (def.subjectClosed && !def.subject) throw new IssuerConfigError(`action "${name}" has subjectClosed but no subject`);
     if (def.subject && !def.capability) {
       throw new IssuerConfigError(`action "${name}" has a subject but is not a capability action: a subject binds the action's capability link, and a signed request names what it concerns itself`);
     }

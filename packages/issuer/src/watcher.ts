@@ -56,7 +56,7 @@ export function watchTransfers(options: WatchOptions): () => void {
         if (log.removed) continue;
         const { from, to, tokenId } = log.args as { from: Address; to: Address; tokenId: bigint };
         try {
-          await options.issuer.onTransfer(tokenId, from, to);
+          await options.issuer.onTransfer(tokenId, from, to, log.blockNumber ?? undefined);
         } catch (e) {
           onError(e);
         }

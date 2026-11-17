@@ -321,7 +321,9 @@ async function createRuntime(config: ServerConfig): Promise<Runtime> {
       ]);
       for (const log of transfers) {
         const { from: a, to: b, tokenId } = log.args as { from: Address; to: Address; tokenId: bigint };
-        await issuer.onTransfer(tokenId, a, b);
+        // With the log's block: a log from before the block the current pass
+        // is dated with says nothing about it (a seller who bought back).
+        await issuer.onTransfer(tokenId, a, b, log.blockNumber ?? undefined);
       }
       for (const log of updates) {
         const args = log.args as { tokenId?: bigint; fromTokenId?: bigint; toTokenId?: bigint };

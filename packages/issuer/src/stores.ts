@@ -64,6 +64,13 @@ export interface PassRecord {
   ///  from `issuedAtBlock` because it does not say when the URLs were
   ///  issued: a transfer log is still tested against `issuedAtBlock`.
   heldAtBlock?: string;
+  /// Set when `issuedAtBlock` and `heldAtBlock` are blocks a read was taken
+  ///  at and found the account entitled (0.5.3 on). A record without it was
+  ///  written by an earlier version: 0.5.0 stored a head no read was taken
+  ///  at, and nothing in a record tells that block from a later version's.
+  ///  So a block without this mark is not tested against: the pass counts
+  ///  as having no block until a read dates it again.
+  datedByRead?: true;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.

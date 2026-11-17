@@ -25,9 +25,14 @@ function harness(overrides: Partial<CreateIssuerOptions> = {}): Harness & { poll
     if (poll.failing) throw new Error("rpc unavailable");
     return poll.open;
   };
+  // A subject has closed once it is no longer the open one: every node here is current.
+  const subjectClosed = ({ subject }: { subject: string }) => {
+    if (poll.failing) throw new Error("rpc unavailable");
+    return subject !== poll.open;
+  };
   const h = buildHarness({
     actions: {
-      "vote-yes": { description: "Vote yes", capability: true, bound: "One vote per proposal, enforced elsewhere", subject, execute: vote },
+      "vote-yes": { description: "Vote yes", capability: true, bound: "One vote per proposal, enforced elsewhere", subject, subjectClosed, execute: vote },
       feed: { description: "Feed", capability: true, bound: "Idempotent", execute: () => ({ fed: true }) },
     },
     ...overrides,
@@ -204,7 +209,11 @@ describe("a capability link with a subject", () => {
 
   it("refuses a subject on an action that has no capability link, and a subject that is not a function", () => {
     const execute = () => ({ ok: true });
-    expect(() => buildHarness({ actions: { a: { description: "A", subject: () => "1", execute } } })).toThrow(IssuerConfigError);
+    expect(() => buildHarness({ actions: { a: { description: "A", subject: () => "1", subjectClosed: () => false, execute } } })).toThrow(IssuerConfigError);
     expect(() => buildHarness({ actions: { a: { description: "A", capability: true, bound: "b", subject: "1" as never, execute } } })).toThrow(/subject must be a function/);
+    // What ends a link is that its own subject has closed, so a subject needs the function that says so.
+    expect(() => buildHarness({ actions: { a: { description: "A", capability: true, bound: "b", subject: () => "1", execute } } })).toThrow(/has a subject but no subjectClosed/);
+    expect(() => buildHarness({ actions: { a: { description: "A", capability: true, bound: "b", subjectClosed: () => false, execute } } })).toThrow(/has subjectClosed but no subject/);
+    expect(() => buildHarness({ actions: { a: { description: "A", capability: true, bound: "b", subject: () => "1", subjectClosed: true as never, execute } } })).toThrow(/subjectClosed must be a function/);
   });
 });
