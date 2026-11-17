@@ -54,7 +54,7 @@ A vote can arrive three ways, and the contract is told which:
 
 One rule covers all three: a vote replaces the account's earlier vote only if it arrived a stronger way. So a link can cast a vote once and never change one, a signed vote replaces a link vote, and the holder's own transaction replaces either and is final. That is the bound ERC-8426 asks of a capability action, enforced on chain, and it means the holder can overrule the issuer.
 
-Every vote names its proposal: the link on the pass carries it (`?p=3`), the page a phone shows before anything happens says which proposal the tap is for, and a signed vote sends it beside the proof. A vote never lands on "whichever proposal is newest".
+Every vote is for one named proposal. A link on the pass is made by the issuer for the proposal that is open (the action's `subject`) and ends when it closes, so a link seen once casts nothing on a later proposal; the page a phone shows before anything happens says which proposal the tap is for; and a signed vote sends it beside the proof. A vote never lands on "whichever proposal is newest".
 
 "Open a new proposal" is a demo button (in a real deployment proposals come from governance). It exists because a visitor who claims after the last snapshot has no vote on that proposal, which is the lesson and also a dead end without it. One proposal is open at a time, for five minutes, so nobody can cut a vote short by opening another and holders hear of a new proposal at most that often.
 

@@ -57,6 +57,13 @@ export interface PassRecord {
   ///  pass: whatever the balance did then, the account was read as holding
   ///  afterwards and only then got its URLs.
   issuedAtBlock?: string;
+  /// The newest block at which a later claim by the same account read it as
+  ///  entitled (decimal string). A loss is acted on only when it is read at
+  ///  or after the later of this and `issuedAtBlock`, so a node that lags
+  ///  behind the holder's latest claim cannot take the pass. Kept apart
+  ///  from `issuedAtBlock` because it does not say when the URLs were
+  ///  issued: a transfer log is still tested against `issuedAtBlock`.
+  heldAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.
@@ -71,6 +78,9 @@ export interface PassRecord {
   ///  the holder's URL is derived from the seed with `linkSecret` and is
   ///  never stored, so a read of this record yields no link.
   links: Record<string, string>;
+  /// For an action with a `subject`: action name to the subject its current
+  ///  link in `links` was minted for. Absent for every other action.
+  linkSubjects?: Record<string, string>;
   /// Format key to the seed of its current download link, for providers the
   ///  issuer serves pass files for. Same derivation as `links`.
   downloads: Record<string, string>;
@@ -130,6 +140,10 @@ export interface LinkBinding {
   /// The action name (kind "action") or format key (kind "download").
   name: string;
   generation: number;
+  /// Kind "action", for an action with a `subject`: the one thing (a
+  ///  proposal, a round, a sitting) this link was minted for. The link acts
+  ///  on that thing only and ends with it.
+  subject?: string;
 }
 
 /// Keyed by link digest (lowercase hex SHA-256 of the token), not by token.

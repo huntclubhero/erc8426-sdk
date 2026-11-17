@@ -245,7 +245,13 @@ export interface IssuerInternals {
   authorize(input: AuthorizeInput): Promise<AuthorizeResult>;
   entitled(tokenId: string, account: Address, action: string): Promise<EntitlementResult>;
   ownerOf(tokenId: string): Promise<Address | null>;
-  recordIssuance(tokenId: string, account: Address): Promise<PassRecord>;
+  /// The owner read at a head the node has just named, with that block, for
+  ///  the public manifest: the block dates the pass. No block when the
+  ///  reader cannot name one (the read is then taken at its tag).
+  ownerAtHead(tokenId: string): Promise<{ owner: Address | null; block?: bigint }>;
+  /// `block`: the block the claim was admitted at, which dates the pass.
+  ///  Absent when the reader cannot name a block.
+  recordIssuance(tokenId: string, account: Address, block?: bigint): Promise<PassRecord>;
   /// `account` (the prover) selects the record under the ERC-1155 binding
   ///  and is ignored for ERC-721.
   rotateOnRequest(tokenId: string, account?: Address): Promise<PassRecord>;
@@ -254,14 +260,24 @@ export interface IssuerInternals {
   buildManifest(record: PassRecord, owner: Address): Promise<PassManifest>;
   renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent>;
   resolveLink(linkToken: string, kind: LinkBinding["kind"]): Promise<{ binding: LinkBinding; record: PassRecord } | null>;
+  /// For a resolved action link whose action has a `subject`: whether the
+  ///  subject the link was minted for is still the open one. "ended" also
+  ///  ends the link in the record (and mints the next one, if a subject is
+  ///  open). "unknown" when the subject could not be told.
+  ///  The subject is asked once.
+  linkSubject(record: PassRecord, action: string): Promise<{ state: "current"; subject: string } | { state: "ended" | "unknown" }>;
   onPassUpdate: Issuer["onPassUpdate"];
   /// What an action's `notifyUpdate` runs. ERC-721: the token's pass update.
   ///  ERC-1155: the acting account's pass only, never every holder's.
   notifyAction(tokenId: string, account: Address): Promise<void>;
   /// A fresh read on a request (a link, a download, or a verified proof)
-  ///  found the record's account not entitled. ERC-1155: retire the pass or take it dark now, as a
-  ///  holdings check would. ERC-721: nothing (the new owner's claim or the
-  ///  observed transfer rotates). Never throws.
+  ///  found the record's account not entitled: the issuer has observed the
+  ///  loss, and acts on it now if a read at a named block bears it out (see
+  ///  loseIfVerified). ERC-1155: the pass is retired or taken dark, as a
+  ///  holdings check would. ERC-721: the pass is retired as on an observed
+  ///  transfer (a sale no watcher has reported, the end of a rental, a
+  ///  revoked delegation of the holder of record), or voided when the token
+  ///  no longer exists. Never throws.
   lost(record: PassRecord): Promise<void>;
   /// ERC-1155: after a pass was rendered and handed to a provider for a
   ///  request, whether the record is still the live pass that was rendered.
@@ -392,6 +408,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     ...(record.account ? { account: record.account } : {}),
     name,
     generation: record.generation,
+    ...(kind === "action" && record.linkSubjects?.[name] !== undefined ? { subject: record.linkSubjects[name] } : {}),
   });
   const keyring = resolveLinkKeyring(options, config);
   const onError =
@@ -444,6 +461,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   async function fill(record: PassRecord): Promise<boolean> {
     let changed = await rebind(record);
     for (const action of config.capabilityActions) {
+      // A link with a subject is minted for the subject that is open when
+      // the pass is rendered (see syncSubjects), never ahead of it.
+      if (config.actions[action]?.subject) continue;
       if (record.links[action]) continue;
       const seed = newLinkSeed();
       await stores.links.put(await keyring.digestOfSeed(seed), bindingOf(record, "action", action));
@@ -495,12 +515,124 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return record;
   }
 
+  // The subject an action's link should be minted for right now, for the
+  // pass of `account`. Throws when it could not be told.
+  const subjectTimeoutMs =
+    typeof config.capability.subjectTimeoutMs === "number" && Number.isFinite(config.capability.subjectTimeoutMs) && config.capability.subjectTimeoutMs > 0
+      ? config.capability.subjectTimeoutMs
+      : 5000;
+  async function subjectNow(action: string, tokenId: string, account: Address): Promise<string | null> {
+    // Given up after a while, like a throw: subjects are asked for one pass
+    // at a time, and an answer that never came would hold the pass's turn.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raw = await Promise.race([
+      (async () => config.actions[action]!.subject!({ token: token(tokenId), account, action }))(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`action "${action}": subject did not answer within ${subjectTimeoutMs} ms`)), subjectTimeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (raw === null) return null;
+    if (typeof raw !== "string" || raw === "" || raw.length > 128) throw new Error(`action "${action}": subject must be null or a string of 1 to 128 characters`);
+    return raw;
+  }
+
+  // Bring the links of actions with a `subject` in line with what is open
+  // now. A link whose subject is no longer the open one has ENDED: its
+  // binding is deleted and its seed dropped, so it resolves to nothing from
+  // here on. Where a subject is open a link is minted for it. Nothing else
+  // about the pass changes: the same serial, generation, other links and
+  // acquisition URLs. That is why this is not a rotation, and why the next
+  // link goes to the same installed pass.
+  //
+  // One pass at a time (a turn per pass, see `inTurn`). Inside a turn the
+  // subjects are asked FIRST, with no record in hand: `subject` is the
+  // integrator's code and may take a chain read's time, and a record read
+  // before it and written after it would put an old pass back over a
+  // rotation, a transfer or a retirement that landed meanwhile. Then the
+  // stored record is read, changed and written with nothing awaited in
+  // between. Asking inside the turn keeps the answers in order too: an
+  // answer that was slow to come cannot be applied after a newer one. A
+  // record that is no longer the caller's (another serial or generation) is
+  // left alone and reported as `stale`. Across instances there is no compare
+  // and set on a record: two of them can each mint a link for one subject,
+  // and the later write wins.
+  //
+  // `record` (which the caller goes on to render) is given the result. A
+  // subject that could not be told leaves that action's link as it is and
+  // is named in `untold`, so a render can leave the link out.
+  const turns = new Map<string, Promise<unknown>>();
+  function inTurn<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const turn = (turns.get(key) ?? Promise.resolve()).then(run);
+    const settled = turn.catch(() => undefined);
+    turns.set(key, settled);
+    void settled.then(() => {
+      if (turns.get(key) === settled) turns.delete(key);
+    });
+    return turn;
+  }
+  async function syncSubjects(record: PassRecord, account: Address): Promise<{ untold: string[]; stale: boolean }> {
+    const scoped = config.capabilityActions.filter((a) => config.actions[a]?.subject);
+    if (scoped.length === 0) return { untold: [], stale: false };
+    const key = passRecordKey(record);
+    return inTurn(key, async () => {
+      const untold: string[] = [];
+      const open = new Map<string, string | null>();
+      for (const action of scoped) {
+        try {
+          open.set(action, await subjectNow(action, record.tokenId, account));
+        } catch (error) {
+          onError(error, { operation: "subject", tokenId: record.tokenId });
+          untold.push(action);
+        }
+      }
+      const stored = await stores.passes.get(key);
+      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation) return { untold, stale: true };
+      // Nothing is awaited from here to the put.
+      const endedSeeds: string[] = [];
+      const minted: [string, string][] = [];
+      for (const [action, now] of open) {
+        const seed = stored.links[action];
+        if (seed ? stored.linkSubjects?.[action] === now : now === null) continue;
+        if (seed) {
+          endedSeeds.push(seed);
+          delete stored.links[action];
+          if (stored.linkSubjects) delete stored.linkSubjects[action];
+        }
+        if (now !== null) {
+          const next = newLinkSeed();
+          stored.linkSubjects = { ...(stored.linkSubjects ?? {}), [action]: now };
+          stored.links[action] = next;
+          minted.push([action, next]);
+        }
+      }
+      if (endedSeeds.length > 0 || minted.length > 0) {
+        if (stored.linkSubjects && Object.keys(stored.linkSubjects).length === 0) delete stored.linkSubjects;
+        // The record first: from this moment an ended link resolves to
+        // nothing even if deleting its binding below fails.
+        await stores.passes.put(stored);
+        for (const [action, seed] of minted) await stores.links.put(await keyring.digestOfSeed(seed), bindingOf(stored, "action", action));
+        await stores.links.delete(await Promise.all(endedSeeds.map((seed) => keyring.digestOfSeed(seed))));
+      }
+      record.links = stored.links;
+      if (stored.linkSubjects) record.linkSubjects = stored.linkSubjects;
+      else delete record.linkSubjects;
+      return { untold, stale: false };
+    });
+  }
+
   async function renderContent(record: PassRecord, owner: Address, superseded: SupersededReason | false): Promise<PassContent> {
+    let links: Record<string, string> = {};
+    if (!superseded) {
+      // Only a pass that is issued carries links worth minting.
+      const untold = record.lastIssuedTo !== null && !record.dark ? (await syncSubjects(record, record.lastIssuedTo)).untold : [];
+      links = await linkUrls(record);
+      for (const action of untold) delete links[action];
+    }
     const content = await options.render({
       token: token(record.tokenId),
       owner,
       serial: record.serial,
-      links: superseded ? {} : await linkUrls(record),
+      links,
       superseded: Boolean(superseded),
       ...(superseded ? { supersededReason: superseded } : {}),
       ...(record.dark && !superseded ? { dark: true } : {}),
@@ -547,7 +679,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //  - "transfer": the holder of record is cleared until the next claim.
   //  - "claim": a new account's first claim; it becomes the holder.
   //  - "owner_request": the holder of record is unchanged.
-  async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
+  //  `block` dates the pass of a "claim" (the block the claimer was admitted
+  //  at). A "transfer" leaves nobody issued, so no date; an "owner_request"
+  //  keeps the holder and the date.
+  async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null, block?: bigint): Promise<PassRecord> {
     // So the deletes below hit the rows that exist under the current secret.
     if (await rebind(record)) await stores.passes.put(record);
     const { migratedFrom: _settled, ...base } = record;
@@ -560,8 +695,14 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       downloads: {},
       rotatedAt: nowSeconds(),
     };
+    delete next.linkSubjects;
     // A retired pass is gone, not dark: the next claim starts a new one.
     if (reason === "transfer") delete next.dark;
+    if (reason !== "owner_request") {
+      if (reason === "claim" && block !== undefined) next.issuedAtBlock = block.toString();
+      else delete next.issuedAtBlock;
+      delete next.heldAtBlock;
+    }
     await fill(next);
     // The record is the source of truth for which tokens are current, so it
     // is written first: from this moment the old tokens resolve to nothing
@@ -589,6 +730,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       downloads: {},
       rotatedAt: nowSeconds(),
     };
+    delete next.linkSubjects;
     await stores.passes.put(next);
     await stores.links.delete(await digestsOf(record));
     const holder = record.lastIssuedTo;
@@ -626,8 +768,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //    retired, since in the gated configuration they are possession proofs
   //    for the download. The serial stays, and the pass is pushed with
   //    `dark` set.
+  // ERC-721: always retired, as an observed transfer.
   async function lose(record: PassRecord): Promise<"retired" | "dark"> {
-    if (config.lostEntitlement === "retire") {
+    if (!is1155 || config.lostEntitlement === "retire") {
       await rotateRecord(record, "transfer", null);
       return "retired";
     }
@@ -649,27 +792,102 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   }
 
   // The newest block the chain reader has, and whether `account` is entitled
-  // at exactly that block. Null when the reader cannot name a block. A read
-  // the node cannot answer at the block it just named (a load balanced
-  // provider that answers the two calls from different nodes) throws.
+  // at exactly that block. Null only when the reader cannot name a block at
+  // all (it has no `blockNumber`). A head that could not be fetched, or a
+  // read the node cannot answer at the block it just named (a load balanced
+  // provider that answers the two calls from different nodes), throws.
+  async function readAtHead(t: TokenRef, account: Address, action: string): Promise<{ block: bigint; result: EntitlementResult } | null> {
+    if (typeof chain?.blockNumber !== "function") return null;
+    const head = await chain.blockNumber();
+    const result = await checkEntitlement(entitlement, { token: t, account, action, reader: chain, now: now(), blockNumber: head });
+    return { block: head, result };
+  }
   async function entitledAtHead(id: string, account: Address): Promise<{ block: bigint; entitled: boolean } | null> {
-    const head = await chain?.blockNumber?.().catch(() => undefined);
-    if (head === undefined) return null;
-    const read = await checkEntitlement(entitlement, { token: token(id), account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head });
-    return { block: head, entitled: read.entitled };
+    const at = await readAtHead(token(id), account, ACQUIRE_ACTION);
+    return at && { block: at.block, entitled: at.result.entitled };
   }
 
-  // Date a pass that is being issued or brought back: the block at which the
-  // account was read as entitled. It is what a later loss is tested against
-  // (see loseIfVerified), and what keeps an older transfer log from being
-  // held against the pass (see checkHoldings). The block is recorded only
-  // when the read was taken AT that block and said entitled: a head number
-  // fetched beside a read at `latest` can fall on either side of the block
-  // that read saw. Best effort: with no block the pass is undated.
-  async function dateIssuance(record: PassRecord, account: Address): Promise<void> {
-    const at = await entitledAtHead(record.tokenId, account).catch(() => null);
-    if (at?.entitled) record.issuedAtBlock = at.block.toString();
-    else delete record.issuedAtBlock;
+  // The read that admits a claim. A pass is dated by the block at
+  // which its account was read as entitled: that block is what a later loss
+  // is tested against (see loseIfVerified), and what keeps an older transfer
+  // log from being held against the pass (see checkHoldings). So the read
+  // that admits is the read that dates: the head is named first, the read is
+  // taken at it, and the one answer both admits the account and dates its
+  // pass. A second read taken to date a pass admitted at `latest` could
+  // reach a node behind the first, say "not entitled" for an account that
+  // holds, and leave the pass with no block and so with no test.
+  //
+  // The claim's nonce is spent by the time this runs, and a failed claim
+  // costs the holder a new signature, so a read the node could not answer at
+  // the head it named is tried again before the request is given up (503).
+  //
+  // The node that names the head can itself be behind the block the account
+  // received its unit in, and then the read at that head says "not
+  // entitled" for an account that holds: the holder who claims right after
+  // a mint. So a "not entitled" at the head is compared with one read at
+  // the reader's own tag. Where that one agrees, the account is refused.
+  // Where it says entitled the nodes disagree, which is no answer: it is
+  // tried again, and given up as a read that could not be taken, never as a
+  // refusal and never as a loss.
+  const ADMIT_ATTEMPTS = 3;
+  async function tryRead<T>(read: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await read();
+      } catch (error) {
+        if (attempt >= ADMIT_ATTEMPTS) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
+  }
+  function admitAtHead(request: { token: TokenRef; account: Address; action: string }): Promise<{ block: bigint; result: EntitlementResult } | null> {
+    return tryRead(async () => {
+      const at = await readAtHead(request.token, request.account, request.action);
+      if (!at || at.result.entitled) return at;
+      const latest = await checkEntitlement(entitlement, { token: request.token, account: request.account, action: request.action, reader: chain!, now: now() });
+      if (!latest.entitled) return at;
+      throw new Error(`the read at block ${at.block} and the read at the reader's tag disagree`);
+    });
+  }
+
+  // The block a loss is tested against: the later of the block the pass was
+  // issued at and the block of its holder's latest claim. Undefined for a
+  // pass with neither (the reader cannot name a block, or the pass was
+  // issued by a version that did not date passes).
+  function datedAt(record: PassRecord): bigint | undefined {
+    const issued = record.issuedAtBlock === undefined ? undefined : BigInt(record.issuedAtBlock);
+    const held = record.heldAtBlock === undefined ? undefined : BigInt(record.heldAtBlock);
+    if (issued === undefined) return held;
+    return held !== undefined && held > issued ? held : issued;
+  }
+
+  // A claim by the account the pass is already issued to: the same pass,
+  // read as entitled at `block`. Noted, so that a node behind this claim
+  // cannot take the pass (a rental that ended unread and was taken up
+  // again, a pass issued before passes were dated). Written in the pass's
+  // turn on a record read there, and only this one field: the record the
+  // caller holds was read before other awaits and may be behind.
+  //
+  // Not in the public configuration. There the manifest is served to anyone
+  // and a request is not a claim by the holder: noting each one would be a
+  // write per token per block that any visitor can cause. A public pass
+  // keeps the block it was issued at; one with no block at all (issued by a
+  // version that did not date passes) is dated here, once.
+  async function heldAt(record: PassRecord, block: bigint | undefined): Promise<void> {
+    if (block === undefined) return;
+    const before = datedAt(record);
+    if (before !== undefined && (config.mode === "public" || block <= before)) return;
+    const key = passRecordKey(record);
+    await inTurn(key, async () => {
+      const stored = await stores.passes.get(key);
+      if (!stored || stored.serial !== record.serial || stored.generation !== record.generation || stored.lastIssuedTo === null) return;
+      const dated = datedAt(stored);
+      if (dated === undefined || block > dated) {
+        stored.heldAtBlock = block.toString();
+        await stores.passes.put(stored);
+      }
+      if (stored.heldAtBlock !== undefined) record.heldAtBlock = stored.heldAtBlock;
+    });
   }
 
   // Acting on a loss costs the holder something a refusal does not: a retired
@@ -696,15 +914,25 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // the same loss together act on it once. Across instances there is no
   // compare and set on a record: two of them can both act, which costs a
   // second push and nothing else.
+  //
+  // Both bindings. Under ERC-721 the same read can find that the token no
+  // longer exists (a burn nobody reported, or a node that has not reached
+  // the mint): that is tested the same way, and the pass is voided.
   const losing = new Map<string, Promise<unknown>>();
-  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | null> {
+  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | "burned" | null> {
     const key = passRecordKey(record);
     const turn = (losing.get(key) ?? Promise.resolve()).then(
       async () => {
-        const at = await entitledAtHead(record.tokenId, account);
-        if (at) {
-          if (at.entitled) return null;
-          if (record.issuedAtBlock !== undefined && at.block < BigInt(record.issuedAtBlock)) return null;
+        const t = token(record.tokenId);
+        let burned = false;
+        if (typeof chain!.blockNumber === "function") {
+          const head = await chain!.blockNumber!();
+          const dated = datedAt(record);
+          if (dated !== undefined && head < dated) return null;
+          if (!is1155 && (await chain!.ownerOf(t, head)) === null) burned = true;
+          else if ((await checkEntitlement(entitlement, { token: t, account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head })).entitled) return null;
+        } else if (!is1155 && (await chain!.ownerOf(t)) === null) {
+          burned = true;
         } else if ((await internals.entitled(record.tokenId, account, ACQUIRE_ACTION)).entitled) {
           // No block to test against: a second read is all there is. It
           // catches one stray answer from a provider that spreads calls over
@@ -713,6 +941,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         }
         const current = await stores.passes.get(key);
         if (!current || current.lastIssuedTo === null || current.dark || current.serial !== record.serial) return null;
+        if (burned) {
+          await burnRecord(current);
+          return "burned";
+        }
         return lose(current);
       },
     );
@@ -724,17 +956,31 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return turn;
   }
 
-  // A dark pass whose account holds again: the same card, live.
-  async function revive(record: PassRecord): Promise<void> {
+  // A dark pass whose account holds again: the same card, live. `block` is
+  // the block the account was read as holding at, absent when the reader
+  // cannot name one. It is a new issuance as far as an older transfer log is
+  // concerned: a log from before it, delivered late, must not be held
+  // against the pass that came back.
+  async function revive(record: PassRecord, block: bigint | undefined): Promise<void> {
     delete record.dark;
     record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
-    // The account was just read as holding, so this is a new issuance as far
-    // as an older transfer log is concerned: a log from before it, delivered
-    // late, must not be held against the pass that came back.
-    if (record.lastIssuedTo) await dateIssuance(record, record.lastIssuedTo);
+    if (block !== undefined && record.lastIssuedTo) record.issuedAtBlock = block.toString();
     else delete record.issuedAtBlock;
+    delete record.heldAtBlock;
     await stores.passes.put(record);
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, false, "revive");
+  }
+
+  // Bring a dark pass back on a read taken at a named head, which dates it
+  // (as a claim is dated, see admitAtHead). Where that read does not say
+  // entitled the pass stays dark and the next check tries again. Throws
+  // when the read could not be taken. Returns whether the pass came back.
+  async function reviveIfHeld(record: PassRecord): Promise<boolean> {
+    if (!record.lastIssuedTo) return false;
+    const at = await entitledAtHead(record.tokenId, record.lastIssuedTo);
+    if (at && !at.entitled) return false;
+    await revive(record, at?.block);
+    return true;
   }
 
   async function checkHoldings(
@@ -798,7 +1044,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         summary.retired.push(account);
       } else if (!holds) {
         if (record.dark) continue;
-        let did: "retired" | "dark" | null;
+        let did: "retired" | "dark" | "burned" | null;
         try {
           did = await loseIfVerified(record, account);
         } catch (error) {
@@ -806,10 +1052,17 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           failed.push(account);
           continue;
         }
-        if (did) summary[did].push(account);
+        if (did === "retired" || did === "dark") summary[did].push(account);
       } else if (record.dark) {
-        await revive(record);
-        summary.revived.push(account);
+        let back: boolean;
+        try {
+          back = await reviveIfHeld(record);
+        } catch (error) {
+          onError(error, { operation: "holdings:read", tokenId: id });
+          failed.push(account);
+          continue;
+        }
+        if (back) summary.revived.push(account);
       } else if (!heldAtBlock) {
         // Holds now, did not at the block of the transfer.
         if (retire) {
@@ -855,7 +1108,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // away, here least of all, where one node answers for every holder.
       return (await loseIfVerified(mine, account)) ? "lost" : "updated";
     }
-    if (mine.dark) await revive(mine);
+    if (mine.dark) await reviveIfHeld(mine);
     else await notify(mine, account, false, "update");
     return "updated";
   }
@@ -903,19 +1156,25 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return { message, nonce, issuedAt: issuedAt.toISOString(), expiresAt: expirationTime.toISOString() };
     },
 
-    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now }),
+    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now, readAtHead: admitAtHead }),
 
     entitled: (tokenId, account, action) =>
       checkEntitlement(entitlement, { token: token(tokenId), account, action, reader: chain, now: now() }),
 
     ownerOf: (tokenId) => chain.ownerOf(token(tokenId)),
 
+    async ownerAtHead(tokenId) {
+      if (typeof chain.blockNumber !== "function") return { owner: await chain.ownerOf(token(tokenId)) };
+      const block = await chain.blockNumber();
+      return { owner: await chain.ownerOf(token(tokenId), block), block };
+    },
+
     // Gated acquisition: "Acquisition by a proven account that is not the
     // account the implementation last issued passes to is that account's
     // first claim: acquisition URLs MUST rotate before the manifest is
     // returned." The very first issuance only records the account: no earlier
     // holder has URLs to retire.
-    async recordIssuance(tokenId, account) {
+    async recordIssuance(tokenId, account, block) {
       if (is1155) {
         // One record per id and account, so a claim never touches another
         // holder's pass. The prover was just read as entitled. A record
@@ -923,17 +1182,22 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         // claim: the links it holds were minted at creation or at the
         // retirement and nobody has seen them. A dark pass comes back.
         let mine = await loadOrCreate(tokenId, account);
-        if (mine.lastIssuedTo !== null && !mine.dark) return mine;
+        if (mine.lastIssuedTo !== null && !mine.dark) {
+          await heldAt(mine, block);
+          return mine;
+        }
         // A dark pass under an issuer that now has capability links does
         // not come back on the same card: retire it, then a first claim.
         if (mine.dark && config.lostEntitlement === "retire") mine = await rotateRecord(mine, "transfer", null);
         const wasDark = mine.dark === true && mine.lastIssuedTo !== null;
         mine.lastIssuedTo = account;
-        // Date the issuance (see dateIssuance).
-        await dateIssuance(mine, account);
-        if (wasDark) await revive(mine);
+        // Dated by the block the claim was admitted at (see admitAtHead).
+        if (wasDark) await revive(mine, block);
         else {
           delete mine.dark;
+          if (block !== undefined) mine.issuedAtBlock = block.toString();
+          else delete mine.issuedAtBlock;
+          delete mine.heldAtBlock;
           await stores.passes.put(mine);
         }
         return mine;
@@ -941,24 +1205,64 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const record = await loadOrCreate(tokenId);
       if (record.lastIssuedTo === null) {
         record.lastIssuedTo = account;
+        // Dated by the block the claim was admitted at (see admitAtHead).
+        if (block !== undefined) record.issuedAtBlock = block.toString();
+        else delete record.issuedAtBlock;
+        delete record.heldAtBlock;
         await stores.passes.put(record);
         return record;
       }
-      if (isAddressEqual(record.lastIssuedTo, account)) return record;
+      if (isAddressEqual(record.lastIssuedTo, account)) {
+        await heldAt(record, block);
+        return record;
+      }
+      // Another account's claim can take this pass (below), so it is held to
+      // the same test as every other loss: the claimer's block must not be
+      // behind the block the pass is dated with. A seller who claims through
+      // a node that has not seen the sale is admitted at that node's head,
+      // where the buyer does not hold yet; that says nothing about a pass
+      // the buyer claimed after it.
+      const dated = datedAt(record);
+      if (block !== undefined && dated !== undefined && block < dated) {
+        // Transient on a live chain: the next try names a later head. It
+        // does not pass by itself where the chain was reset under a kept
+        // store (a dev chain restarted, a testnet wiped): the pass records
+        // of the old chain have to go too.
+        const message = `the claim was read at block ${block}, behind block ${dated} that the current pass is dated with; try again (if this chain was reset, its pass records must be reset with it)`;
+        onError(new Error(message), { operation: "claim:behind", tokenId });
+        throw new IssuerError("read_failed", message);
+      }
       // Under an additive policy (delegation) the holder of record may still
       // be entitled: then this is not a new holder, just another entitled
       // account, and it shares the holder's pass rather than voiding it. The
       // pass stays issued to the holder of record, so its links keep acting
       // on that account's entitlement. Only when the holder of record is no
       // longer entitled (a sale, an exclusive rental) is this a first claim.
+      // Read at the block the claimer was admitted at, where there is one,
+      // so both accounts are judged by one state of the chain.
       let previousStillEntitled: boolean;
       try {
-        previousStillEntitled = (await internals.entitled(tokenId, record.lastIssuedTo, ACQUIRE_ACTION)).entitled;
+        // Tried again like the admitting read: the nonce is spent, and a
+        // node that lacks the block it was just asked about a moment ago
+        // usually has it on the next try.
+        const holder = record.lastIssuedTo;
+        previousStillEntitled = (
+          await tryRead(() =>
+            checkEntitlement(entitlement, {
+              token: token(tokenId),
+              account: holder,
+              action: ACQUIRE_ACTION,
+              reader: chain,
+              now: now(),
+              ...(block === undefined ? {} : { blockNumber: block }),
+            }),
+          )
+        ).entitled;
       } catch {
         throw new IssuerError("read_failed", "the fresh entitlement read of the previous holder could not be taken");
       }
       if (previousStillEntitled) return record;
-      return rotateRecord(record, "claim", account);
+      return rotateRecord(record, "claim", account, block);
     },
 
     async holderOf(tokenId, account) {
@@ -1001,6 +1305,17 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return (await keyring.token(seed)) === linkToken ? { binding, record } : null;
     },
 
+    async linkSubject(record, action) {
+      const seed = record.links[action];
+      const holder = record.lastIssuedTo;
+      if (!seed || record.linkSubjects?.[action] === undefined || holder === null) return { state: "ended" };
+      const { untold, stale } = await syncSubjects(record, holder);
+      if (untold.includes(action)) return { state: "unknown" };
+      // Still the link that was presented: its subject is the open one.
+      if (stale || record.links[action] !== seed) return { state: "ended" };
+      return { state: "current", subject: record.linkSubjects![action]! };
+    },
+
     async notifyAction(tokenId, account) {
       if (!is1155) {
         await internals.onPassUpdate(tokenId);
@@ -1026,7 +1341,13 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return false;
     },
     async lost(record) {
-      if (!is1155 || record.lastIssuedTo === null || record.dark) return;
+      if (record.lastIssuedTo === null || record.dark) return;
+      // ERC-721: a pass with no block, under a reader that can name one, was
+      // issued by a version that did not date passes. There is nothing to
+      // test a loss against, so a refused request does not retire it; it
+      // stays refused, as it was before this path acted at all, until its
+      // holder's next claim dates it or a transfer is observed.
+      if (!is1155 && datedAt(record) === undefined && typeof chain.blockNumber === "function") return;
       try {
         await loseIfVerified(record, record.lastIssuedTo);
       } catch (error) {
@@ -1108,12 +1429,20 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           failed.push(id);
           continue;
         }
-        if (owner === null) {
-          await burnRecord(record);
-          summary.burned.push(id);
-        } else if (!stillEntitled) {
-          await rotateRecord(record, "transfer", null);
-          summary.rotated.push(id);
+        if (owner === null || !stillEntitled) {
+          // One read does not take a pass away (see loseIfVerified). Where
+          // the loss is not borne out nothing is pushed either: content is
+          // never sent to an account a read just found not entitled.
+          let did: "retired" | "dark" | "burned" | null;
+          try {
+            did = await loseIfVerified(record, holder);
+          } catch (error) {
+            onError(error, { operation: "update:read", tokenId: id });
+            failed.push(id);
+            continue;
+          }
+          if (did === "burned") summary.burned.push(id);
+          else if (did) summary.rotated.push(id);
         } else {
           await notify(record, holder, false, "update");
         }
@@ -1182,7 +1511,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       if (is1155 && !account) throw new IssuerError("invalid_request", "capabilityLinksFor needs the account under the ERC-1155 binding");
       let record = await stores.passes.get(keyOf(normalizeTokenId(tokenId), account));
       if (record) record = await settle(record);
-      return record ? await linkUrls(record) : {};
+      if (!record) return {};
+      const untold = record.lastIssuedTo !== null && !record.dark ? (await syncSubjects(record, record.lastIssuedTo)).untold : [];
+      const links = await linkUrls(record);
+      for (const action of untold) delete links[action];
+      return links;
     },
   };
 }

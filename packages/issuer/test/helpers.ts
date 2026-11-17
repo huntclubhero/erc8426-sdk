@@ -49,6 +49,9 @@ export class FakeChain implements ChainReader {
   delegations = new Set<string>();
   failing = false;
   reads = 0;
+  /// Block time, epoch milliseconds: what the contract's `userOf` counts a
+  ///  rental's end by. `buildHarness` points it at the harness clock.
+  clock: () => number = () => Date.UTC(2026, 7, 7, 15, 4, 5);
 
   setOwner(tokenId: string, owner: Address | null): void {
     if (owner === null) this.owners.delete(tokenId);
@@ -69,8 +72,11 @@ export class FakeChain implements ChainReader {
   async userOf(token: TokenRef): Promise<{ user: Address | null; expires: bigint }> {
     this.reads++;
     if (this.failing) throw new Error("rpc unavailable");
+    // As the ERC-4907 reference: `expires >= block.timestamp ? user : 0`,
+    // with `userExpires` answering the stored value either way.
     const u = this.users.get(token.tokenId);
-    return u ? { user: u.user, expires: u.expires } : { user: null, expires: 0n };
+    if (!u) return { user: null, expires: 0n };
+    return { user: u.expires >= BigInt(Math.floor(this.clock() / 1000)) ? u.user : null, expires: u.expires };
   }
   async checkDelegateForERC721(input: { to: Address; from: Address }): Promise<boolean> {
     this.reads++;
@@ -126,6 +132,7 @@ export interface Harness {
 export function buildHarness(overrides: Partial<CreateIssuerOptions> = {}): Harness {
   const clock = createClock();
   const chain = new FakeChain();
+  chain.clock = clock.now;
   const executed: ActionContext[] = [];
   const notified: Notified[] = [];
   const errors: unknown[] = [];

@@ -29,6 +29,7 @@ export {
   type IssuerConfig,
   type IssuerMode,
   type LinkPageContext,
+  type SubjectContext,
   type LostEntitlementMode,
   type RateLimitConfig,
   type RepeatConfig,

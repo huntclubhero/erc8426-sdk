@@ -16,7 +16,12 @@ import { erc1155Abi, erc4907Abi, erc721Abi, type TokenRef } from "@erc8426/core"
 export interface ChainReader {
   /// The current owner, or null when the token has none (never minted or
   ///  burned: `ownerOf` reverted or returned the zero address).
-  ownerOf(token: TokenRef): Promise<Address | null>;
+  ///  `blockNumber`, here and on every read below, takes the read at that
+  ///  block in place of the reader's tag. The issuer passes it for the read
+  ///  that admits a claim and for the read that shows a loss, both taken at
+  ///  a head the node has just named (see `blockNumber()`); a reader that
+  ///  ignores it makes those reads plain reads at its tag.
+  ownerOf(token: TokenRef, blockNumber?: bigint): Promise<Address | null>;
   /// ERC-1155 `balanceOf(account, id)` for the id the token names. Zero is
   ///  an answer (the account holds none); a read that could not be taken
   ///  throws. Needed only by the `minimumBalance` policy (working draft of
@@ -24,13 +29,19 @@ export interface ChainReader {
   ///  `blockNumber`, when given, takes the read at that block in place of
   ///  the reader's tag (the holdings check for an observed transfer).
   balanceOf?(token: TokenRef, account: Address, blockNumber?: bigint): Promise<bigint>;
-  /// The newest block the node has. Optional. The ERC-1155 binding notes it
-  ///  when a pass is issued, so that a transfer log from an earlier block is
-  ///  not held against a pass that was claimed after it.
+  /// The newest block the node has. Optional. With it the issuer dates a
+  ///  pass by the block its account was read as entitled at, and acts on a
+  ///  loss only when it is read at that block or a later one, so a node that
+  ///  lags cannot take a pass away. Under the ERC-1155 binding it also keeps
+  ///  a transfer log from an earlier block from being held against a pass
+  ///  that was claimed after it. A reader that takes its reads at a tag
+  ///  other than `latest` MUST NOT provide it: a head is the newest block,
+  ///  and a read at it would bypass the tag (`publicClientChainReader`
+  ///  leaves it out for "safe" and "finalized").
   blockNumber?(): Promise<bigint>;
   /// ERC-4907 rental state. `user` is null when there is no user. Needed only
   ///  by the `rental4907` policy.
-  userOf?(token: TokenRef): Promise<{ user: Address | null; expires: bigint }>;
+  userOf?(token: TokenRef, blockNumber?: bigint): Promise<{ user: Address | null; expires: bigint }>;
   /// delegate.xyz v2 `checkDelegateForERC721`. Needed only by the
   ///  `delegateRegistry` policy.
   checkDelegateForERC721?(input: {
@@ -39,6 +50,7 @@ export interface ChainReader {
     from: Address;
     token: TokenRef;
     rights: Hex;
+    blockNumber?: bigint;
   }): Promise<boolean>;
 }
 
@@ -52,7 +64,11 @@ export interface ChainReader {
 ///  the conforming choice; it is exposed to a reorganization deeper than
 ///  the action's own confirmation, which the spec's Rationale accepts as
 ///  the smaller risk. "safe" and "finalized" remain selectable for an
-///  issuer that documents why it departs from the spec.
+///  issuer that documents why it departs from the spec. Such a reader names
+///  no head (`blockNumber` is absent): every read, the one that admits a
+///  claim included, is taken at the chosen tag and never at a newer block,
+///  and passes are not dated, so a loss is acted on after a second read at
+///  the tag and not after a read at a named block.
 export type ReadBlockTag = "latest" | "safe" | "finalized";
 
 /// The part of a viem PublicClient the reader uses. Typed structurally so
@@ -131,15 +147,17 @@ function nonZero(address: unknown): Address | null {
 ///  `eth_call`; nothing is cached, which is the point.
 export function publicClientChainReader(client: ReadContractClient, options: { blockTag?: ReadBlockTag } = {}): ChainReader {
   const blockTag = options.blockTag ?? "latest";
+  // A read at a named block, or at the reader's tag.
+  const at = (blockNumber: bigint | undefined) => (blockNumber === undefined ? { blockTag } : { blockNumber });
   return {
-    async ownerOf(token) {
+    async ownerOf(token, blockNumber) {
       try {
         const owner = await client.readContract({
           address: token.contract,
           abi: readAbi,
           functionName: "ownerOf",
           args: [BigInt(token.tokenId)],
-          blockTag,
+          ...at(blockNumber),
         });
         return nonZero(owner);
       } catch (error) {
@@ -160,13 +178,15 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
         abi: erc1155Abi,
         functionName: "balanceOf",
         args: [account, BigInt(token.tokenId)],
-        ...(blockNumber === undefined ? { blockTag } : { blockNumber }),
+        ...at(blockNumber),
       });
       if (typeof balance !== "bigint") throw new Error(`unexpected read result: ${String(balance)}`);
       return balance;
     },
 
-    ...(typeof client.getBlockNumber === "function"
+    // Only a reader at `latest` names its head. A head is the newest block,
+    // so a read taken at it would bypass a `safe` or `finalized` tag.
+    ...(typeof client.getBlockNumber === "function" && blockTag === "latest"
       ? {
           // cacheTime 0: viem otherwise answers from a cached number, and a
           // stale one would date a pass earlier than it was issued.
@@ -174,12 +194,12 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
         }
       : {}),
 
-    async userOf(token) {
+    async userOf(token, blockNumber) {
       const args = [BigInt(token.tokenId)] as const;
       try {
         const [user, expires] = await Promise.all([
-          client.readContract({ address: token.contract, abi: readAbi, functionName: "userOf", args, blockTag }),
-          client.readContract({ address: token.contract, abi: readAbi, functionName: "userExpires", args, blockTag }),
+          client.readContract({ address: token.contract, abi: readAbi, functionName: "userOf", args, ...at(blockNumber) }),
+          client.readContract({ address: token.contract, abi: readAbi, functionName: "userExpires", args, ...at(blockNumber) }),
         ]);
         return { user: nonZero(user), expires: BigInt(expires as bigint) };
       } catch (error) {
@@ -191,7 +211,7 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       }
     },
 
-    async checkDelegateForERC721({ registry, to, from, token, rights }) {
+    async checkDelegateForERC721({ registry, to, from, token, rights, blockNumber }) {
       // A revert here is not an answer about delegation (the registry does
       // not revert for a missing delegation), so every failure is rethrown.
       const result = await client.readContract({
@@ -199,7 +219,7 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
         abi: delegateRegistryAbi,
         functionName: "checkDelegateForERC721",
         args: [to, from, token.contract, BigInt(token.tokenId), rights],
-        blockTag,
+        ...at(blockNumber),
       });
       return result === true;
     },

@@ -231,12 +231,17 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // entitled to that action, so the pass is touched only when the account is
   // not entitled to hold it either. Never throws: the refusal stands, and
   // the next read acts if this one could not.
+  //
+  // ERC-721: the same, when the account is the one the token's pass is
+  // issued to. Any other account's refusal says nothing about that pass.
   async function actOnLoss(result: { error: AuthError; account?: Address }, tokenId: string, action: string): Promise<void> {
-    if (config.standard !== "erc1155" || result.error !== "not_owner" || !result.account) return;
+    if (result.error !== "not_owner" || !result.account) return;
     try {
       if (action !== ACQUIRE_ACTION && (await x.entitled(tokenId, result.account, ACQUIRE_ACTION)).entitled) return;
-      const record = await x.stores.passes.get(passKeyFor(tokenId, result.account));
-      if (record) await x.lost(record);
+      const is1155 = config.standard === "erc1155";
+      const record = await x.stores.passes.get(passKeyFor(tokenId, is1155 ? result.account : null));
+      if (!record) return;
+      if (is1155 || (record.lastIssuedTo !== null && isAddressEqual(record.lastIssuedTo, result.account))) await x.lost(record);
     } catch {
       // Left to the next read.
     }
@@ -302,7 +307,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
 
   async function execute(
     def: ActionDefinition,
-    input: { tokenId: string; action: string; account: Address; via: string; path: "signed" | "capability"; params: unknown; request: Request },
+    input: { tokenId: string; action: string; account: Address; via: string; path: "signed" | "capability"; params: unknown; subject?: string; request: Request },
   ): Promise<Response> {
     try {
       const result = await def.execute({
@@ -312,6 +317,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         via: input.via,
         path: input.path,
         params: input.params,
+        ...(input.subject === undefined ? {} : { subject: input.subject }),
         request: input.request,
         notifyUpdate: async () => {
           await x.notifyAction(input.tokenId, input.account);
@@ -338,15 +344,17 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (config.mode === "public") {
       // Public configuration: served to anyone, rendered for the current
       // owner by a fresh read. A holder change seen here is an observed
-      // transfer, so recordIssuance rotates.
+      // transfer, so recordIssuance rotates. The read is taken at a head
+      // the node has just named, and that block dates the pass.
       let owner: Address | null;
+      let block: bigint | undefined;
       try {
-        owner = await x.ownerOf(tokenId);
+        ({ owner, block } = await x.ownerAtHead(tokenId));
       } catch {
         return error("read_failed");
       }
       if (owner === null) return error("unknown_capability", { message: "token does not exist" });
-      const record = await x.recordIssuance(tokenId, owner);
+      const record = await x.recordIssuance(tokenId, owner, block);
       return json(200, await x.buildManifest(record, owner));
     }
 
@@ -358,7 +366,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
-    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
+    // The read that admits the claim is taken at a head the node has just
+    // named, and that block dates the pass (see recordIssuance).
+    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION, atHead: true });
     if (!result.ok) {
       await actOnLoss(result, tokenId, ACQUIRE_ACTION);
       return refuse(result.error, challenge);
@@ -366,7 +376,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // A first claim rotates before the manifest is built. Another entitled
     // account under an additive policy shares the holder of record's pass,
     // so the pass is always rendered for the holder of record.
-    const record = await x.recordIssuance(tokenId, result.account);
+    const record = await x.recordIssuance(tokenId, result.account, result.block);
     const built = await x.buildManifest(record, record.lastIssuedTo ?? result.account);
     // As on a download: a manifest built for a pass that went dark or was
     // retired meanwhile is not handed out.
@@ -499,6 +509,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       bound: def.bound ?? "",
       postUrl: x.linkUrl(linkToken),
       request,
+      ...(record.linkSubjects?.[binding.name] === undefined ? {} : { subject: record.linkSubjects[binding.name] }),
     };
     if (config.capability.confirmPage) return withLinkPageHeaders(await config.capability.confirmPage(ctx));
     if (wantsHtml(request)) return withLinkPageHeaders(defaultConfirmPage(ctx));
@@ -535,6 +546,16 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (!resolved) return error("unknown_capability");
     const { binding, record, def } = resolved;
     const holder = record.lastIssuedTo;
+    // A link minted for one subject (a proposal, a round) ends with it. The
+    // subject is asked fresh, and a link whose subject is no longer the
+    // open one is a link that no longer resolves.
+    let subject: string | undefined;
+    if (def.subject && holder) {
+      const s = await x.linkSubject(record, binding.name);
+      if (s.state === "unknown") return error("read_failed");
+      if (s.state !== "current") return error("unknown_capability", { message: "this link has ended: what it was for has closed" });
+      subject = s.subject;
+    }
     let entitled: EntitlementResult | null = null;
     if (holder) {
       try {
@@ -562,8 +583,8 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       // unchanged owner: the residual the capability configuration discloses.
       if (!entitled.entitled) {
         // The issuer just took the read that shows the loss, so it acts on
-        // it now (ERC-1155): otherwise this link would answer again when
-        // the balance came back.
+        // it now, under both bindings: otherwise this link would answer
+        // again when the entitlement came back.
         await x.lost(record);
         return error("not_owner");
       }
@@ -574,6 +595,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
         via: entitled.via,
         path: "capability",
         params: body.params,
+        ...(subject === undefined ? {} : { subject }),
         request,
       });
     });

@@ -1,4 +1,4 @@
-import { BaseError, ContractFunctionRevertedError, parseAbi, type Address, type Hex } from "viem";
+import { parseAbi, type Address, type Hex } from "viem";
 import { after } from "next/server";
 import { assetId, walletPassAbi, type PassContent } from "@erc8426/core";
 import {
@@ -108,19 +108,24 @@ export interface BallotView {
 
 const escapeHtml = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/// The proposal a vote request names: `?p=` on a pass link (the capability
-/// path), `params.proposalId` beside a proof (the signed path). Null when it
-/// names none or names nonsense.
-function namedProposal(path: "signed" | "capability", request: Request, params: unknown): string | null {
-  const raw = path === "capability" ? new URL(request.url).searchParams.get("p") : (params as { proposalId?: unknown } | null)?.proposalId;
+/// The proposal a signed vote names: `params.proposalId` beside the proof.
+/// Null when it names none or names nonsense. A pass link names nothing: the
+/// issuer minted it for one proposal and says which (the action's `subject`).
+function namedProposal(params: unknown): string | null {
+  const raw = (params as { proposalId?: unknown } | null)?.proposalId;
   const text = typeof raw === "number" || typeof raw === "bigint" ? raw.toString() : typeof raw === "string" ? raw : "";
   return /^[1-9][0-9]{0,30}$/.test(text) ? text : null;
 }
 
+// By class name, not instanceof: a dev server can load viem twice (once for
+// the route, once for the client it was handed), and an error from one copy
+// is not an instance of the other copy's class. Then every refusal the
+// contract gave by name came out as 502 action_failed.
 function revertName(e: unknown): string | undefined {
-  if (!(e instanceof BaseError)) return undefined;
-  const reverted = e.walk((x) => x instanceof ContractFunctionRevertedError);
-  return reverted instanceof ContractFunctionRevertedError ? reverted.data?.errorName : undefined;
+  const walk = (e as { walk?: (fn: (x: unknown) => boolean) => unknown } | null)?.walk;
+  if (typeof walk !== "function") return undefined;
+  const reverted = walk.call(e, (x) => (x as { name?: string } | null)?.name === "ContractFunctionRevertedError") as { data?: { errorName?: string } } | null;
+  return reverted?.data?.errorName;
 }
 
 export interface EditionRuntime {
@@ -266,17 +271,16 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
           key: "about",
           label: "About this pass",
           value:
-            "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature. Anyone who has seen one of them can cast this account's first vote on this proposal and on each later one, for as long as the account holds and until the holder resets the links. Links stop being accepted before a vote closes, and the holder can replace a link vote with a signed vote on the demo site in the time that is left.",
+            "This pass belongs to one account's holding of this edition. Every holder has their own. One unit is one vote, counted from what the account held when the proposal opened, so a unit cannot vote twice by moving. The links below cast this account's vote without a signature. Each is made for one proposal and stops working when that proposal closes, so anyone who has seen one of them can cast this account's first vote on that proposal and on no other. A copy of this whole pass is different: it is sent each new link, until the holder resets the pass. Links stop being accepted before a vote closes, and the holder can replace a link vote with a signed vote on the demo site in the time that is left.",
         },
       ],
-      // Each link names the proposal it was printed for. A link names an
-      // action, and "vote yes" on its own would land on whichever proposal
-      // is newest when it is tapped, which may not be the one this pass
-      // shows.
+      // Each link was minted by the issuer for the open proposal (the
+      // action's `subject`) and ends with it. The URL carries no proposal:
+      // which one it votes on is in the issuer's record of the link.
       links:
         superseded || !canLinkVote
           ? []
-          : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: `${VOTE_LABEL[a]} on proposal ${proposal!.proposalId}`, url: `${links[a]!}?p=${proposal!.proposalId}` })),
+          : VOTE_ACTIONS.filter((a) => links[a]).map((a) => ({ key: a, label: `${VOTE_LABEL[a]} on proposal ${proposal!.proposalId}`, url: links[a]! })),
       barcode: { format: "qr", message: assetId(token), altText: `Edition #${token.tokenId}` },
     };
     return content;
@@ -328,12 +332,21 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
     description: `${VOTE_LABEL[action]} on the open proposal`,
     capability: true,
     bound:
-      "At most one vote per account per proposal, enforced on chain. The link is the same for every proposal, so over its life it can cast the account's first vote on each proposal opened while the account holds, until the holder resets it. Each vote's weight is the account's balance at that proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast. Links stop being accepted for the last fifth of a voting period, and the holder can replace a link vote with a signed vote until the proposal closes. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
-    async execute({ account, path, request, params, notifyUpdate }) {
-      // The request says which proposal. It is never "the newest one": a
-      // new proposal can open between a pass being read and a link tapped.
-      const proposalId = namedProposal(path, request, params);
-      if (!proposalId) throw new ActionError(400, "proposal_required", "The request does not say which proposal the vote is for. Open the pass again and use its current link.");
+      "At most one vote per account per proposal, enforced on chain. A link is made for one proposal and ends when that proposal closes, so over its life it can cast the account's first vote on that one proposal. Each vote's weight is the account's balance at that proposal's snapshot, so a unit that moves to another account cannot vote again. A link vote cannot change a vote already cast. Links stop being accepted for the last fifth of a voting period, and the holder can replace a link vote with a signed vote until the proposal closes. A vote moves no tokens and no value, and cannot transfer, approve or change any balance or entitlement.",
+    // The proposal this pass's link is for: the open one, until it closes.
+    // Through the last fifth of the period, when the contract refuses link
+    // votes, the link still resolves, so a late tap is told why.
+    async subject() {
+      const p = await currentProposal();
+      return p && p.votable ? p.proposalId : null;
+    },
+    async execute({ account, path, request, params, subject, notifyUpdate }) {
+      // A link votes on the proposal it was minted for, from the issuer's
+      // record. A signed request says which proposal. It is never "the
+      // newest one": a new proposal can open between a pass being read and
+      // a vote being cast.
+      const proposalId = path === "capability" ? (subject ?? null) : namedProposal(params);
+      if (!proposalId) throw new ActionError(400, "proposal_required", "The request does not say which proposal the vote is for.");
       const proposal = { proposalId };
       const support = action === "vote-yes";
       // Each relayed vote is a transaction the operator pays for.
@@ -403,7 +416,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
       // What a phone shows when a vote link on the pass is tapped. It says
       // which proposal the vote is for, and nothing happens until Confirm.
       async confirmPage(ctx) {
-        const proposalId = namedProposal("capability", ctx.request, null);
+        const proposalId = ctx.subject ?? null;
         const found = proposalId ? await proposalById(BigInt(proposalId)).catch(() => null) : null;
         const support = ctx.action === "vote-yes" ? "Yes" : "No";
         const shell = (title: string, body: string) =>
@@ -431,7 +444,7 @@ async function createEditionRuntime(rt: Runtime, edition: EditionEnv): Promise<E
         }
         return shell(
           `Vote ${support}`,
-          `<h1>Vote ${support}?</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><form method="post" action="${escapeHtml(`${ctx.postUrl}?p=${found.proposalId}`)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><input type="hidden" name="attempt" value="${escapeHtml(newAttempt())}"><button type="submit">Confirm: vote ${support}</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,
+          `<h1>Vote ${support}?</h1><p>Proposal ${escapeHtml(found.proposalId)}: <strong>${escapeHtml(found.title)}</strong></p><form method="post" action="${escapeHtml(ctx.postUrl)}"><input type="hidden" name="action" value="${escapeHtml(ctx.action)}"><input type="hidden" name="attempt" value="${escapeHtml(newAttempt())}"><button type="submit">Confirm: vote ${support}</button></form><p><small>${escapeHtml(ctx.bound)}</small></p>`,
         );
       },
     },

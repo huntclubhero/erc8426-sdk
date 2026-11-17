@@ -14,7 +14,7 @@ import { NeedWallet, useWallet } from "./wallet";
 /// The rental page: the one case of ERC-8426 where an account loses its pass
 /// with no transfer. Rent a key for a few minutes, add it to a wallet, open
 /// the door from the card, then watch what happens when the rental ends by
-/// the clock, and again when the owner takes the key back.
+/// the clock, and again when the same key is rented to you a second time.
 
 interface KeyView {
   tokenId: string;
@@ -159,7 +159,7 @@ export function RentalDetail() {
         again ? "Rented again" : "Rented",
         true,
         again
-          ? `The house rented key ${id} to you again for ${String(r.body?.seconds)} seconds. The owner had not taken it back in between. Try the link you already had.`
+          ? `The house rented key ${id} to you again for ${String(r.body?.seconds)} seconds. The owner had not taken it back in between. If you used your old link after check out, the issuer retired it then, and it stays retired: unlock the pass again to get this rental's link and card.`
           : `The house minted key ${id} and rented it to you for ${String(r.body?.seconds)} seconds (ERC-4907 setUser). You hold no token: the house owns the key, you are its user until check out.`,
       );
     });
@@ -197,9 +197,9 @@ export function RentalDetail() {
       if (res?.ok) {
         log("Door unlocked from the pass link", true, `HTTP 200, no signature. The issuer read the chain fresh and you are the key's user. Opened ${String(body?.result?.unlocks ?? "?")} times with this key.`);
       } else if (res?.status === 403) {
-        log("Link refused", false, `HTTP 403 ${body?.error ?? ""}. The link is still known to the issuer, but the fresh read says you are not entitled now: the rental has ended. Nothing told the issuer, it found out by reading the chain for this tap.`);
+        log("Link refused", false, `HTTP 403 ${body?.error ?? ""}. The fresh read says you are not entitled now: the rental has ended. Nothing told the issuer, it found out by reading the chain for this tap, and that read is the moment it retires this link. Tap again and it is gone (404).`);
       } else if (res?.status === 404) {
-        log("Link retired", false, `HTTP 404 ${body?.error ?? ""}. The issuer has retired this link for good: it observed that you lost the key, so a new rental would get a new link and a new card.`);
+        log("Link retired", false, `HTTP 404 ${body?.error ?? ""}. The issuer has retired this link for good: it observed that you lost the key when it read the chain for a request after check out. A new rental gets a new link and a new card.`);
       } else {
         log("Link not followed", false, `HTTP ${res?.status ?? 0} ${body?.error ?? ""}${body?.message ? `: ${body.message}` : ""}`);
       }
@@ -212,7 +212,7 @@ export function RentalDetail() {
       const r = await house({ do: "owner-claims", tokenId });
       const status = Number(r.body?.status ?? r.status);
       if (r.ok && status === 200) {
-        log("The owner took the key back", true, "The owner's wallet asked for its pass with a signed proof and got it (HTTP 200). That is the issuer observing that the renter lost the key: the renter's links and download addresses are retired, and the renter's installed card is told it is no longer active.");
+        log("The owner took the key back", true, "The owner's wallet asked for its pass with a signed proof and got it (HTTP 200). If no request had reached the issuer since check out, this is where it observes that the renter lost the key: the renter's links and download addresses are retired, and the renter's installed card is told it is no longer active.");
       } else {
         log("The owner was refused", false, `HTTP ${status} ${String(r.body?.error ?? "")}. During an active rental the owner is not entitled: only the guest's pass opens the door.`);
       }
@@ -367,7 +367,7 @@ export function RentalDetail() {
             {myLink ? (
               <>
                 <p className="muted small">
-                  This is the link printed on your pass. It opens the door with one tap and no signature, which is why it has to stop working when you stop being entitled. Use it during the rental, after check out, and after the owner takes the key back: the three
+                  This is the link printed on your pass. It opens the door with one tap and no signature, which is why it has to stop working when you stop being entitled. Use it during the rental, once after check out, and once more: the three
                   answers are different.
                 </p>
                 <div className="button-row">
@@ -381,8 +381,8 @@ export function RentalDetail() {
             )}
             <ol className="muted small">
               <li>During the rental: the door opens (200).</li>
-              <li>After check out: refused by the fresh read (403). The link is still known.</li>
-              <li>After the owner takes the key back: retired (404).</li>
+              <li>The first use after check out: refused by the fresh read (403). That read retires the link.</li>
+              <li>Every use after that, a new rental included: retired (404).</li>
             </ol>
           </section>
 

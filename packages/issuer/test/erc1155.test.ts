@@ -22,12 +22,12 @@ class FakeChain1155 extends FakeChain {
   setBalanceAt(block: bigint, id: string, account: Address, balance: bigint): void {
     this.atBlock.set(`${block}:${this.key(id, account)}`, balance);
   }
-  /// The newest block. Undefined stands for a reader that cannot tell.
+  /// The newest block. Undefined stands for a reader that cannot name one:
+  ///  it has no `blockNumber` at all.
   head: bigint | undefined = undefined;
-  blockNumber = async (): Promise<bigint> => {
-    if (this.head === undefined) throw new Error("no block number");
-    return this.head;
-  };
+  get blockNumber(): (() => Promise<bigint>) | undefined {
+    return this.head === undefined ? undefined : async () => this.head!;
+  }
   async balanceOf(token: TokenRef, account: Address, blockNumber?: bigint): Promise<bigint> {
     this.reads++;
     if (this.failing) throw new Error("rpc unavailable");
