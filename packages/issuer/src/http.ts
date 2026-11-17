@@ -344,15 +344,17 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (config.mode === "public") {
       // Public configuration: served to anyone, rendered for the current
       // owner by a fresh read. A holder change seen here is an observed
-      // transfer, so recordIssuance rotates.
+      // transfer, so recordIssuance rotates. The read is taken at a head
+      // the node has just named, and that block dates the pass.
       let owner: Address | null;
+      let block: bigint | undefined;
       try {
-        owner = await x.ownerOf(tokenId);
+        ({ owner, block } = await x.ownerAtHead(tokenId));
       } catch {
         return error("read_failed");
       }
       if (owner === null) return error("unknown_capability", { message: "token does not exist" });
-      const record = await x.recordIssuance(tokenId, owner);
+      const record = await x.recordIssuance(tokenId, owner, block);
       return json(200, await x.buildManifest(record, owner));
     }
 
@@ -581,8 +583,8 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
       // unchanged owner: the residual the capability configuration discloses.
       if (!entitled.entitled) {
         // The issuer just took the read that shows the loss, so it acts on
-        // it now (ERC-1155): otherwise this link would answer again when
-        // the balance came back.
+        // it now, under both bindings: otherwise this link would answer
+        // again when the entitlement came back.
         await x.lost(record);
         return error("not_owner");
       }

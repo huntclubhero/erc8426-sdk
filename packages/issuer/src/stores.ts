@@ -57,6 +57,13 @@ export interface PassRecord {
   ///  pass: whatever the balance did then, the account was read as holding
   ///  afterwards and only then got its URLs.
   issuedAtBlock?: string;
+  /// The newest block at which a later claim by the same account read it as
+  ///  entitled (decimal string). A loss is acted on only when it is read at
+  ///  or after the later of this and `issuedAtBlock`, so a node that lags
+  ///  behind the holder's latest claim cannot take the pass. Kept apart
+  ///  from `issuedAtBlock` because it does not say when the URLs were
+  ///  issued: a transfer log is still tested against `issuedAtBlock`.
+  heldAtBlock?: string;
   /// Random pass serial (PassContent.serial). Stable for one holder so
   ///  platform updates land on the same card, replaced when the holder
   ///  changes. Never derived from the token id or the holder.

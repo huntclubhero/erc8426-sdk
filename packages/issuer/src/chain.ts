@@ -61,7 +61,11 @@ export interface ChainReader {
 ///  the conforming choice; it is exposed to a reorganization deeper than
 ///  the action's own confirmation, which the spec's Rationale accepts as
 ///  the smaller risk. "safe" and "finalized" remain selectable for an
-///  issuer that documents why it departs from the spec.
+///  issuer that documents why it departs from the spec. Such a reader names
+///  no head (`blockNumber` is absent): every read, the one that admits a
+///  claim included, is taken at the chosen tag and never at a newer block,
+///  and passes are not dated, so a loss is acted on after a second read at
+///  the tag and not after a read at a named block.
 export type ReadBlockTag = "latest" | "safe" | "finalized";
 
 /// The part of a viem PublicClient the reader uses. Typed structurally so
@@ -177,7 +181,9 @@ export function publicClientChainReader(client: ReadContractClient, options: { b
       return balance;
     },
 
-    ...(typeof client.getBlockNumber === "function"
+    // Only a reader at `latest` names its head. A head is the newest block,
+    // so a read taken at it would bypass a `safe` or `finalized` tag.
+    ...(typeof client.getBlockNumber === "function" && blockTag === "latest"
       ? {
           // cacheTime 0: viem otherwise answers from a cached number, and a
           // stale one would date a pass earlier than it was issued.

@@ -36,8 +36,8 @@ export interface AuthorizeInput {
   ///  request and never for the wrong account.
   freshRead?: { account: Address; result: EntitlementResult };
   /// Take check (2) at a head the node has just named and report that block
-  ///  (`block` on the result). Set for a claim under the ERC-1155 binding,
-  ///  so that the read that admits the account is the read that dates its
+  ///  (`block` on the result). Set for a claim, under both bindings, so
+  ///  that the read that admits the account is the read that dates its
   ///  pass. Ignored where `freshRead` applies or no block can be named.
   atHead?: boolean;
 }
