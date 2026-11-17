@@ -32,11 +32,16 @@ export interface EntitlementRequest {
   reader: ChainReader;
   /// Wall clock, epoch milliseconds, for expiry checks.
   now: number;
-  /// Take the read at this block and not at the reader's own tag. Set only
-  ///  by the ERC-1155 holdings check for a transfer it was told about, to
-  ///  see a balance that left and came back before the check ran. Never set
-  ///  for an authorization: that read is always the fresh one. A policy
-  ///  that cannot read at a block ignores it.
+  /// Take every read at this block and not at the reader's own tag. Set
+  ///  for the read that admits a claim and for the read that shows a loss,
+  ///  each at a head the node has just named, so that a pass is dated by
+  ///  the block its account was read as entitled at and a later loss is
+  ///  tested against that block. Also set by the ERC-1155 holdings check
+  ///  for a transfer it was told about, to see a balance that left and came
+  ///  back before the check ran. Every other authorization is read at the
+  ///  reader's tag. A policy SHOULD pass it to each of its reads: one that
+  ///  ignores it is read at the reader's tag, and the block test that
+  ///  protects a pass from a lagging node then proves less.
   blockNumber?: bigint;
 }
 
@@ -60,8 +65,8 @@ export async function checkEntitlement(policy: EntitlementPolicy, request: Entit
 export function ownerOnly(): EntitlementPolicy {
   return {
     name: "owner",
-    async evaluate({ token, account, reader }) {
-      const owner = await reader.ownerOf(token);
+    async evaluate({ token, account, reader, blockNumber }) {
+      const owner = await reader.ownerOf(token, blockNumber);
       return owner !== null && isAddressEqual(owner, account) ? { decision: "allow", via: "owner" } : { decision: "abstain" };
     },
   };
@@ -112,13 +117,28 @@ export interface Rental4907Options {
   ///  (the renter gets the pass) and rotate. Uncovered actions fall back to
   ///  the owner alone.
   actions?: string[];
+  /// What ends a rental.
+  ///  - "contract" (the default): the contract's own answer. `userOf` is
+  ///    the user while the rental runs and zero once it is over, counted by
+  ///    block time, and it counts the `expires` second itself as running.
+  ///    The issuer's clock is not consulted, so the issuer never says
+  ///    "ended" for an account the chain still answers for. This matters
+  ///    once a read can retire a pass: a clock can run ahead of the newest
+  ///    block, and a node that has not seen an extension still reports the
+  ///    old `expires`.
+  ///  - "clock": the rental is also over once `userExpires` has passed by
+  ///    the issuer's clock. Only for a contract whose `userOf` keeps
+  ///    answering the user after expiry, which ERC-4907 does not allow. It
+  ///    can end a rental up to a block early.
+  expiry?: "contract" | "clock";
 }
 
 /// ERC-4907 rentals. Documented policy:
-///  - A rental is active when `userOf` is non-zero AND `userExpires` is in
-///    the future by the issuer's clock. Both are read fresh on every call.
-///    (Conforming ERC-4907 contracts already return zero from `userOf` after
-///    expiry; the expiry check guards contracts that do not.)
+///  - A rental is active when the contract's `userOf` is non-zero, read
+///    fresh on every call. A conforming ERC-4907 contract returns zero from
+///    `userOf` once `userExpires` has passed by block time, so the end of a
+///    rental is the chain's answer and not the issuer's clock (see
+///    `expiry` for a contract that does not).
 ///  - During an active rental, for a covered action, the user is entitled.
 ///    With `exclusive` (the default) every other account, the owner
 ///    included, is vetoed ("deny"), which also overrides delegation in
@@ -128,13 +148,15 @@ export interface Rental4907Options {
 export function rental4907(options: Rental4907Options = {}): EntitlementPolicy {
   const exclusive = options.exclusive ?? true;
   const covered = options.actions ? new Set(options.actions) : null;
+  if (options.expiry !== undefined && options.expiry !== "contract" && options.expiry !== "clock") throw new Error(`invalid expiry: ${String(options.expiry)}`);
+  const byClock = options.expiry === "clock";
   return {
     name: "rental4907",
-    async evaluate({ token, account, action, reader, now }) {
+    async evaluate({ token, account, action, reader, now, blockNumber }) {
       if (!reader.userOf) throw new Error("rental4907 needs a ChainReader with userOf (publicClientChainReader provides it)");
-      const [owner, rental] = await Promise.all([reader.ownerOf(token), reader.userOf(token)]);
+      const [owner, rental] = await Promise.all([reader.ownerOf(token, blockNumber), reader.userOf(token, blockNumber)]);
       const isOwner = owner !== null && isAddressEqual(owner, account);
-      const active = rental.user !== null && rental.expires * 1000n > BigInt(now);
+      const active = rental.user !== null && (byClock ? rental.expires * 1000n > BigInt(now) : true);
       const applies = covered === null || covered.has(action);
       if (active && applies) {
         if (isAddressEqual(rental.user!, account)) return { decision: "allow", via: "rental" };
@@ -165,14 +187,14 @@ export function delegateRegistry(options: DelegateRegistryOptions = {}): Entitle
   const rights = options.rights ?? (`0x${"0".repeat(64)}` as Hex);
   return {
     name: "delegateRegistry",
-    async evaluate({ token, account, reader }) {
+    async evaluate({ token, account, reader, blockNumber }) {
       if (!reader.checkDelegateForERC721) {
         throw new Error("delegateRegistry needs a ChainReader with checkDelegateForERC721 (publicClientChainReader provides it)");
       }
-      const owner = await reader.ownerOf(token);
+      const owner = await reader.ownerOf(token, blockNumber);
       if (owner === null) return { decision: "abstain" };
       if (isAddressEqual(owner, account)) return { decision: "allow", via: "owner" };
-      const delegated = await reader.checkDelegateForERC721({ registry, to: account, from: owner, token, rights });
+      const delegated = await reader.checkDelegateForERC721({ registry, to: account, from: owner, token, rights, ...(blockNumber === undefined ? {} : { blockNumber }) });
       return delegated ? { decision: "allow", via: "delegate" } : { decision: "abstain" };
     },
   };

@@ -5,9 +5,8 @@ import { rental4907, type ChainReader, type CreateIssuerOptions, type PassRecord
 
 import { CONTRACT, FakeChain, TOKEN_ID, buildHarness, claim, newSigner, type Harness } from "./helpers.js";
 
-/// Claims from a review of 0.5.1 (Magicians t/29358 post 29), each written
-///  as the behaviour that should hold. A test that fails here reproduces the
-///  claim.
+/// From a review of 0.5.1 (Magicians t/29358 post 29). Each test is written
+///  as the behaviour that should hold, and each failed on 0.5.1.
 
 const ID = "77";
 
@@ -183,54 +182,227 @@ describe("post 29, claim 1: the read that admits a claim is the read that dates 
   });
 });
 
-// Claims 2 and 3 are reproduced below and NOT fixed: each is written as the
-// behaviour that should hold and marked `fails`, so the suite says when one
-// of them stops reproducing. They wait on a decision (whether the ERC-721
-// path retires on the issuer's own read) and on a reader that can take
-// ownerOf and userOf at a named block.
-describe("post 29, claim 2: the ERC-721 path acts on one read in onPassUpdate", () => {
-  it.fails("a renter who rents again keeps the pass when a node that has not seen the new setUser answers the PassUpdate", async () => {
-    const h = buildHarness({ entitlement: rental4907() });
+/// An ERC-721 chain whose reader can name its newest block, and that can be
+/// answered by a node that is behind: `lag` is that node's newest block and
+/// the owner and rental user as it knows them. It cannot answer for a block
+/// it has not reached.
+class Chain721 extends FakeChain {
+  head = 100n;
+  lag: { head: bigint; owner: Address | null; user: Address | null } | null = null;
+  blockNumber = async (): Promise<bigint> => (this.lag ? this.lag.head : this.head);
+  override async ownerOf(token: TokenRef, blockNumber?: bigint): Promise<Address | null> {
+    if (!this.lag) return super.ownerOf(token);
+    this.reads++;
+    if (blockNumber !== undefined && blockNumber > this.lag.head) throw new Error("header not found");
+    return this.lag.owner;
+  }
+  override async userOf(token: TokenRef, blockNumber?: bigint): Promise<{ user: Address | null; expires: bigint }> {
+    if (!this.lag) return super.userOf(token);
+    this.reads++;
+    if (blockNumber !== undefined && blockNumber > this.lag.head) throw new Error("header not found");
+    return { user: this.lag.user, expires: 0n };
+  }
+}
+
+type H721 = Harness & { chain: Chain721 };
+
+function harness721(overrides: Partial<CreateIssuerOptions> = {}): H721 {
+  const chain = new Chain721();
+  const h = buildHarness({ chain, ...overrides });
+  chain.clock = h.clock.now;
+  return { ...h, chain };
+}
+
+const record721 = (h: H721): Promise<PassRecord | null> => h.issuer.stores.passes.get(TOKEN_ID);
+const linksOf = async (h: H721): Promise<Record<string, string>> => {
+  const out: Record<string, string> = {};
+  for (const [action, u] of Object.entries(await h.issuer.capabilityLinksFor(TOKEN_ID))) out[action] = new URL(u).pathname;
+  return out;
+};
+
+describe("post 29: the issuer's own read is the moment a rental ends (ERC-721, ERC-4907)", () => {
+  it("retires the renter's link at the first read after the end, and a new rental of the same account does not wake it", async () => {
+    const h = harness721({ entitlement: rental4907() });
     const house = newSigner();
     const guest = newSigner();
     const nowSeconds = () => BigInt(Math.floor(h.clock.now() / 1000));
     h.chain.setOwner(TOKEN_ID, house.address);
-    const firstExpiry = nowSeconds() + 180n;
-    h.chain.setUser(TOKEN_ID, guest.address, firstExpiry);
-    expect((await claim(h, guest)).res.status).toBe(200);
-    const serial = (await h.issuer.stores.passes.get(TOKEN_ID))!.serial;
-    // The rental ends by the clock. Nobody claims.
-    h.clock.advance(200_000);
-    // The guest rents again: setUser emits PassUpdate. The node the issuer
-    // reaches for it has not seen that setUser and gives the old expiry.
+    // Block 100: the guest rents for three minutes and claims the pass.
     h.chain.setUser(TOKEN_ID, guest.address, nowSeconds() + 180n);
-    const real = h.chain.userOf.bind(h.chain);
-    h.chain.userOf = async () => ({ user: guest.address, expires: firstExpiry });
-    await h.issuer.onPassUpdate(TOKEN_ID).catch(() => undefined);
-    h.chain.userOf = real;
-    const record = (await h.issuer.stores.passes.get(TOKEN_ID))!;
-    expect(record.lastIssuedTo, "the pass was retired").toBe(guest.address);
-    expect(record.serial).toBe(serial);
+    expect((await claim(h, guest)).res.status).toBe(200);
+    expect((await record721(h))!.issuedAtBlock).toBe("100");
+    const first = await linksOf(h);
+    const firstSerial = (await record721(h))!.serial;
+    expect((await h.post(first.feed!, {})).status).toBe(200);
+
+    // The rental ends by the clock: no transaction, no event.
+    h.clock.advance(200_000);
+    h.chain.head = 150n;
+    const pushes = h.notified.length;
+    // The guest taps the link. The read refuses it, and that read is the
+    // issuer observing the end of the rental: the link is retired by it.
+    expect((await h.post(first.feed!, {})).status).toBe(403);
+    expect((await h.post(first.feed!, {})).status).toBe(404);
+    expect((await record721(h))!.lastIssuedTo).toBeNull();
+    // The installed card is told it is over.
+    const told = h.notified.slice(pushes);
+    expect(told.length).toBeGreaterThan(0);
+    for (const n of told) {
+      expect(n.ctx.content.serial).toBe(firstSerial);
+      expect(n.ctx.content.voided).toBe(true);
+    }
+
+    // Block 160: the same guest rents again. The house never claimed.
+    h.chain.setUser(TOKEN_ID, guest.address, nowSeconds() + 180n);
+    h.chain.head = 160n;
+    // The link from the first rental does not wake up.
+    expect((await h.post(first.feed!, {})).status).toBe(404);
+    // The guest claims again: a new pass, new links, dated at this block.
+    expect((await claim(h, guest)).res.status).toBe(200);
+    const again = (await record721(h))!;
+    expect(again.serial).not.toBe(firstSerial);
+    expect(again.issuedAtBlock).toBe("160");
+    const second = await linksOf(h);
+    expect(second.feed).not.toBe(first.feed);
+
+    // The PassUpdate that setUser emitted reaches the issuer, and the node
+    // it asks is at 159: it has not seen the new rental.
+    h.chain.lag = { head: 159n, owner: house.address, user: null };
+    const summary = await h.issuer.onPassUpdate(TOKEN_ID);
+    expect(summary.rotated).toEqual([]);
+    expect(summary.burned).toEqual([]);
+    h.chain.lag = null;
+    expect((await record721(h))!.serial).toBe(again.serial);
+    expect((await record721(h))!.lastIssuedTo).toBe(guest.address);
+    expect((await h.post(second.feed!, {})).status).toBe(200);
   });
 
-  it.fails("a buyer who claims at once keeps the pass when a node that has not seen the sale answers a PassUpdate", async () => {
-    const h = buildHarness();
-    const seller = newSigner();
-    const buyer = newSigner();
-    h.chain.setOwner(TOKEN_ID, buyer.address);
-    expect((await claim(h, buyer)).res.status).toBe(200);
-    const serial = (await h.issuer.stores.passes.get(TOKEN_ID))!.serial;
-    const real = h.chain.ownerOf.bind(h.chain);
-    h.chain.ownerOf = async () => seller.address;
-    await h.issuer.onPassUpdate(TOKEN_ID).catch(() => undefined);
-    h.chain.ownerOf = real;
-    const record = (await h.issuer.stores.passes.get(TOKEN_ID))!;
-    expect(record.lastIssuedTo, "the pass was retired").toBe(buyer.address);
-    expect(record.serial).toBe(serial);
+  it("retires the renter's download and signed access at the end too, and the owner's claim starts clean", async () => {
+    const h = harness721({ entitlement: rental4907() });
+    const house = newSigner();
+    const guest = newSigner();
+    h.chain.setOwner(TOKEN_ID, house.address);
+    h.chain.setUser(TOKEN_ID, guest.address, BigInt(Math.floor(h.clock.now() / 1000)) + 180n);
+    const first = await claim(h, guest);
+    const download = new URL(first.body.formats.apple).pathname;
+    expect((await h.get(download)).status).toBe(200);
+    h.clock.advance(200_000);
+    h.chain.head = 150n;
+    expect((await h.get(download)).status).toBe(403);
+    expect((await h.get(download)).status).toBe(404);
+    expect((await record721(h))!.lastIssuedTo).toBeNull();
+    expect((await claim(h, house)).res.status).toBe(200);
+    expect((await record721(h))!.lastIssuedTo).toBe(house.address);
+  });
+
+  it("the renter's own refused proof is the same finding, and a stranger's refused proof is not", async () => {
+    const h = harness721({ entitlement: rental4907() });
+    const house = newSigner();
+    const guest = newSigner();
+    const stranger = newSigner();
+    h.chain.setOwner(TOKEN_ID, house.address);
+    h.chain.setUser(TOKEN_ID, guest.address, BigInt(Math.floor(h.clock.now() / 1000)) + 180n);
+    expect((await claim(h, guest)).res.status).toBe(200);
+    expect((await claim(h, stranger)).res.status).toBe(403);
+    expect((await record721(h))!.lastIssuedTo).toBe(guest.address);
+    h.clock.advance(200_000);
+    h.chain.head = 150n;
+    expect((await claim(h, stranger)).res.status).toBe(403);
+    expect((await record721(h))!.lastIssuedTo).toBe(guest.address);
+    expect((await claim(h, guest)).res.status).toBe(403);
+    expect((await record721(h))!.lastIssuedTo).toBeNull();
+  });
+
+  it("an extension seen late does not end the rental: a node that has not seen the new setUser still answers the user", async () => {
+    const h = harness721({ entitlement: rental4907() });
+    const house = newSigner();
+    const guest = newSigner();
+    const start = BigInt(Math.floor(h.clock.now() / 1000));
+    h.chain.setOwner(TOKEN_ID, house.address);
+    h.chain.setUser(TOKEN_ID, guest.address, start + 180n);
+    expect((await claim(h, guest)).res.status).toBe(200);
+    const links = await linksOf(h);
+    // Block 130, before the end: the house extends the rental. The issuer's
+    // clock then passes the old end.
+    h.chain.setUser(TOKEN_ID, guest.address, start + 600n);
+    h.chain.head = 130n;
+    h.clock.advance(200_000);
+    // A node at 129 answers. By its block time the old rental still runs,
+    // so the contract's answer there is the user. An issuer that compared
+    // its own clock with the old `expires` would call the rental over.
+    h.chain.lag = { head: 129n, owner: house.address, user: guest.address };
+    expect((await h.post(links.feed!, {})).status).toBe(200);
+    await h.issuer.onPassUpdate(TOKEN_ID);
+    h.chain.lag = null;
+    expect((await record721(h))!.lastIssuedTo).toBe(guest.address);
   });
 });
 
-describe("post 29, claim 3: rental4907 ends the rental by the issuer's clock", () => {
+describe("post 29: the ERC-721 path does not act on one read", () => {
+  it("a buyer who claims at once keeps the pass when a node that has not seen the sale answers a PassUpdate", async () => {
+    const h = harness721();
+    const seller = newSigner();
+    const buyer = newSigner();
+    const third = newSigner();
+    h.chain.head = 200n;
+    h.chain.setOwner(TOKEN_ID, buyer.address);
+    expect((await claim(h, buyer)).res.status).toBe(200);
+    const serial = (await record721(h))!.serial;
+    expect((await record721(h))!.issuedAtBlock).toBe("200");
+    h.chain.lag = { head: 199n, owner: seller.address, user: null };
+    expect((await h.issuer.onPassUpdate(TOKEN_ID)).rotated).toEqual([]);
+    h.chain.lag = null;
+    expect((await record721(h))!.lastIssuedTo).toBe(buyer.address);
+    expect((await record721(h))!.serial).toBe(serial);
+    // A sale read at a later block is acted on.
+    h.chain.setOwner(TOKEN_ID, third.address);
+    h.chain.head = 201n;
+    expect((await h.issuer.onPassUpdate(TOKEN_ID)).rotated).toEqual([TOKEN_ID]);
+    expect((await record721(h))!.lastIssuedTo).toBeNull();
+  });
+
+  it("a pass claimed right after the mint is not voided by a node that has not reached the mint", async () => {
+    const h = harness721();
+    const minter = newSigner();
+    h.chain.head = 200n;
+    h.chain.setOwner(TOKEN_ID, minter.address);
+    expect((await claim(h, minter)).res.status).toBe(200);
+    const pushes = h.notified.length;
+    h.chain.lag = { head: 199n, owner: null, user: null };
+    expect((await h.issuer.onPassUpdate(TOKEN_ID)).burned).toEqual([]);
+    h.chain.lag = null;
+    expect(h.notified).toHaveLength(pushes);
+    expect((await record721(h))!.lastIssuedTo).toBe(minter.address);
+    // A burn read at a later block is acted on.
+    h.chain.setOwner(TOKEN_ID, null);
+    h.chain.head = 201n;
+    expect((await h.issuer.onPassUpdate(TOKEN_ID)).burned).toEqual([TOKEN_ID]);
+  });
+
+  it("a claim whose head is named by a node behind the sale is not refused as not the owner", async () => {
+    const h = harness721();
+    const seller = newSigner();
+    const buyer = newSigner();
+    h.chain.head = 200n;
+    h.chain.setOwner(TOKEN_ID, buyer.address);
+    // The head and the read at it come from a node at 199 on the first try.
+    const named = h.chain.blockNumber;
+    const owner = h.chain.ownerOf.bind(h.chain);
+    let behind = true;
+    h.chain.blockNumber = async () => (behind ? 199n : named());
+    h.chain.ownerOf = async (token: TokenRef, blockNumber?: bigint) => {
+      if (blockNumber === 199n) {
+        behind = false;
+        return seller.address;
+      }
+      return owner(token, blockNumber);
+    };
+    expect((await claim(h, buyer)).res.status).toBe(200);
+    expect((await record721(h))!.issuedAtBlock).toBe("200");
+  });
+});
+
+describe("post 29: rental4907 ends a rental by the contract's answer", () => {
   const token: TokenRef = { chainId: 1, contract: CONTRACT, tokenId: TOKEN_ID, standard: "erc721" } as TokenRef;
   const house = newSigner();
   const guest = newSigner();
@@ -241,13 +413,25 @@ describe("post 29, claim 3: rental4907 ends the rental by the issuer's clock", (
     ownerOf: async () => house.address,
     userOf: async () => ({ user: guest.address, expires }),
   } as unknown as ChainReader;
-  const ask = (now: number, account: Address) => rental4907().evaluate({ token, account, action: "acquire", reader, now });
+  const ask = (now: number, account: Address, options: Parameters<typeof rental4907>[0] = {}) =>
+    rental4907(options).evaluate({ token, account, action: "acquire", reader, now });
 
-  it.fails("agrees with the contract at the expires second itself", async () => {
+  it("agrees with the contract at the expires second itself", async () => {
     expect((await ask(Number(expires) * 1000, guest.address)).decision).toBe("allow");
+    expect((await ask(Number(expires) * 1000, house.address)).decision).toBe("deny");
   });
 
-  it.fails("agrees with the contract after the expires second while no later block exists", async () => {
+  it("agrees with the contract after the expires second while no later block exists", async () => {
     expect((await ask(Number(expires) * 1000 + 2500, guest.address)).decision).toBe("allow");
+  });
+
+  it('with expiry "clock" the issuer\'s clock also ends it, for a contract that keeps answering the user', async () => {
+    expect((await ask(Number(expires) * 1000 - 1, guest.address, { expiry: "clock" })).decision).toBe("allow");
+    expect((await ask(Number(expires) * 1000, guest.address, { expiry: "clock" })).decision).toBe("abstain");
+    expect((await ask(Number(expires) * 1000, house.address, { expiry: "clock" })).decision).toBe("allow");
+  });
+
+  it("refuses an unknown expiry setting", () => {
+    expect(() => rental4907({ expiry: "block" as never })).toThrow(/invalid expiry/);
   });
 });

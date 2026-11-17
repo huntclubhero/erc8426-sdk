@@ -151,17 +151,8 @@ describe("identical repeats on POST /links/:link", () => {
     const again = await postRaw(h, links.feed!, wrong);
     await same(refused, again);
     expect(again.headers.get("x-wallet-pass-repeat")).toBe("true");
-    // not_owner (a sold token behind a live link), repeated as not_owner.
-    h.chain.setOwner(TOKEN_ID, newSigner().address);
-    const body = JSON.stringify({ action: "feed" });
-    const sold = await postRaw(h, links.feed!, body);
-    expect(sold.status).toBe(403);
-    const soldAgain = await postRaw(h, links.feed!, body);
-    await same(sold, soldAgain);
-    expect(soldAgain.headers.get("x-wallet-pass-repeat")).toBe("true");
     // A 503 is answered before the store (the fresh read is taken first),
     // so it is never recorded: the retry runs fresh once the chain answers.
-    h.chain.setOwner(TOKEN_ID, owner.address);
     h.chain.failing = true;
     const other = JSON.stringify({ action: "feed", params: { n: 2 } });
     expect((await postRaw(h, links.feed!, other)).status).toBe(503);
@@ -170,6 +161,14 @@ describe("identical repeats on POST /links/:link", () => {
     expect(retried.status).toBe(200);
     expect(retried.headers.get("x-wallet-pass-repeat")).toBeNull();
     expect(h.executed).toHaveLength(1);
+    // not_owner (a sold token behind a live link). The read that refuses is
+    // the issuer observing the loss, so the link is retired by it: the
+    // repeat finds no link at all.
+    h.chain.setOwner(TOKEN_ID, newSigner().address);
+    const body = JSON.stringify({ action: "feed" });
+    const sold = await postRaw(h, links.feed!, body);
+    expect(sold.status).toBe(403);
+    expect((await postRaw(h, links.feed!, body)).status).toBe(404);
   });
 
   it("rotation wins: a link that no longer resolves is refused before the repeat store is consulted, and a changed binding is a new key", async () => {
@@ -236,15 +235,14 @@ describe("identical repeats on POST /links/:link", () => {
     expect(after.headers.get("x-wallet-pass-repeat")).toBeNull();
     expect(h.chain.reads).toBeGreaterThan(reads);
     expect(h.executed).toHaveLength(1);
-    // And the 403 repeats as itself, without a second read, while the world stays the same.
-    const again = await postRaw(h, links.feed!, body);
-    expect(again.status).toBe(403);
-    // Back to the seller inside the window: the world is as it was for the
-    // first request, so its recorded 200 is served and nothing runs again.
+    // That read was the issuer observing the loss: the link is retired.
+    expect((await postRaw(h, links.feed!, body)).status).toBe(404);
+    // Back to the seller inside the window: the old link does not wake up,
+    // and the recorded 200 is not served for it. The seller claims again.
     h.chain.setOwner(TOKEN_ID, seller.address);
     const back = await postRaw(h, links.feed!, body);
-    expect(back.status).toBe(200);
-    expect(back.headers.get("x-wallet-pass-repeat")).toBe("true");
+    expect(back.status).toBe(404);
+    expect(back.headers.get("x-wallet-pass-repeat")).toBeNull();
     expect(h.executed).toHaveLength(1);
   });
 

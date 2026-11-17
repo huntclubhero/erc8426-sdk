@@ -245,8 +245,8 @@ export interface IssuerInternals {
   authorize(input: AuthorizeInput): Promise<AuthorizeResult>;
   entitled(tokenId: string, account: Address, action: string): Promise<EntitlementResult>;
   ownerOf(tokenId: string): Promise<Address | null>;
-  /// `block` (ERC-1155): the block the claim was admitted at, which dates
-  ///  the pass. Absent when the reader cannot name a block.
+  /// `block`: the block the claim was admitted at, which dates the pass.
+  ///  Absent when the reader cannot name a block.
   recordIssuance(tokenId: string, account: Address, block?: bigint): Promise<PassRecord>;
   /// `account` (the prover) selects the record under the ERC-1155 binding
   ///  and is ignored for ERC-721.
@@ -261,9 +261,13 @@ export interface IssuerInternals {
   ///  ERC-1155: the acting account's pass only, never every holder's.
   notifyAction(tokenId: string, account: Address): Promise<void>;
   /// A fresh read on a request (a link, a download, or a verified proof)
-  ///  found the record's account not entitled. ERC-1155: retire the pass or take it dark now, as a
-  ///  holdings check would. ERC-721: nothing (the new owner's claim or the
-  ///  observed transfer rotates). Never throws.
+  ///  found the record's account not entitled: the issuer has observed the
+  ///  loss, and acts on it now if a read at a named block bears it out (see
+  ///  loseIfVerified). ERC-1155: the pass is retired or taken dark, as a
+  ///  holdings check would. ERC-721: the pass is retired as on an observed
+  ///  transfer (a sale no watcher has reported, the end of a rental, a
+  ///  revoked delegation of the holder of record), or voided when the token
+  ///  no longer exists. Never throws.
   lost(record: PassRecord): Promise<void>;
   /// ERC-1155: after a pass was rendered and handed to a provider for a
   ///  request, whether the record is still the live pass that was rendered.
@@ -549,7 +553,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //  - "transfer": the holder of record is cleared until the next claim.
   //  - "claim": a new account's first claim; it becomes the holder.
   //  - "owner_request": the holder of record is unchanged.
-  async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null): Promise<PassRecord> {
+  //  `block` dates the pass of a "claim" (the block the claimer was admitted
+  //  at). A "transfer" leaves nobody issued, so no date; an "owner_request"
+  //  keeps the holder and the date.
+  async function rotateRecord(record: PassRecord, reason: RotationReason, holder: Address | null, block?: bigint): Promise<PassRecord> {
     // So the deletes below hit the rows that exist under the current secret.
     if (await rebind(record)) await stores.passes.put(record);
     const { migratedFrom: _settled, ...base } = record;
@@ -564,6 +571,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     };
     // A retired pass is gone, not dark: the next claim starts a new one.
     if (reason === "transfer") delete next.dark;
+    if (reason !== "owner_request") {
+      if (reason === "claim" && block !== undefined) next.issuedAtBlock = block.toString();
+      else delete next.issuedAtBlock;
+    }
     await fill(next);
     // The record is the source of truth for which tokens are current, so it
     // is written first: from this moment the old tokens resolve to nothing
@@ -628,8 +639,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   //    retired, since in the gated configuration they are possession proofs
   //    for the download. The serial stays, and the pass is pushed with
   //    `dark` set.
+  // ERC-721: always retired, as an observed transfer.
   async function lose(record: PassRecord): Promise<"retired" | "dark"> {
-    if (config.lostEntitlement === "retire") {
+    if (!is1155 || config.lostEntitlement === "retire") {
       await rotateRecord(record, "transfer", null);
       return "retired";
     }
@@ -666,7 +678,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return at && { block: at.block, entitled: at.result.entitled };
   }
 
-  // The read that admits a claim (ERC-1155). A pass is dated by the block at
+  // The read that admits a claim. A pass is dated by the block at
   // which its account was read as entitled: that block is what a later loss
   // is tested against (see loseIfVerified), and what keeps an older transfer
   // log from being held against the pass (see checkHoldings). So the read
@@ -728,15 +740,24 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // the same loss together act on it once. Across instances there is no
   // compare and set on a record: two of them can both act, which costs a
   // second push and nothing else.
+  //
+  // Both bindings. Under ERC-721 the same read can find that the token no
+  // longer exists (a burn nobody reported, or a node that has not reached
+  // the mint): that is tested the same way, and the pass is voided.
   const losing = new Map<string, Promise<unknown>>();
-  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | null> {
+  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | "burned" | null> {
     const key = passRecordKey(record);
     const turn = (losing.get(key) ?? Promise.resolve()).then(
       async () => {
-        const at = await entitledAtHead(record.tokenId, account);
-        if (at) {
-          if (at.entitled) return null;
-          if (record.issuedAtBlock !== undefined && at.block < BigInt(record.issuedAtBlock)) return null;
+        const t = token(record.tokenId);
+        let burned = false;
+        if (typeof chain!.blockNumber === "function") {
+          const head = await chain!.blockNumber!();
+          if (record.issuedAtBlock !== undefined && head < BigInt(record.issuedAtBlock)) return null;
+          if (!is1155 && (await chain!.ownerOf(t, head)) === null) burned = true;
+          else if ((await checkEntitlement(entitlement, { token: t, account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head })).entitled) return null;
+        } else if (!is1155 && (await chain!.ownerOf(t)) === null) {
+          burned = true;
         } else if ((await internals.entitled(record.tokenId, account, ACQUIRE_ACTION)).entitled) {
           // No block to test against: a second read is all there is. It
           // catches one stray answer from a provider that spreads calls over
@@ -745,6 +766,10 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         }
         const current = await stores.passes.get(key);
         if (!current || current.lastIssuedTo === null || current.dark || current.serial !== record.serial) return null;
+        if (burned) {
+          await burnRecord(current);
+          return "burned";
+        }
         return lose(current);
       },
     );
@@ -843,7 +868,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         summary.retired.push(account);
       } else if (!holds) {
         if (record.dark) continue;
-        let did: "retired" | "dark" | null;
+        let did: "retired" | "dark" | "burned" | null;
         try {
           did = await loseIfVerified(record, account);
         } catch (error) {
@@ -851,7 +876,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           failed.push(account);
           continue;
         }
-        if (did) summary[did].push(account);
+        if (did === "retired" || did === "dark") summary[did].push(account);
       } else if (record.dark) {
         let back: boolean;
         try {
@@ -955,7 +980,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return { message, nonce, issuedAt: issuedAt.toISOString(), expiresAt: expirationTime.toISOString() };
     },
 
-    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now, ...(is1155 ? { readAtHead: admitAtHead } : {}) }),
+    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now, readAtHead: admitAtHead }),
 
     entitled: (tokenId, account, action) =>
       checkEntitlement(entitlement, { token: token(tokenId), account, action, reader: chain, now: now() }),
@@ -994,6 +1019,9 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       const record = await loadOrCreate(tokenId);
       if (record.lastIssuedTo === null) {
         record.lastIssuedTo = account;
+        // Dated by the block the claim was admitted at (see admitAtHead).
+        if (block !== undefined) record.issuedAtBlock = block.toString();
+        else delete record.issuedAtBlock;
         await stores.passes.put(record);
         return record;
       }
@@ -1004,14 +1032,25 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // pass stays issued to the holder of record, so its links keep acting
       // on that account's entitlement. Only when the holder of record is no
       // longer entitled (a sale, an exclusive rental) is this a first claim.
+      // Read at the block the claimer was admitted at, where there is one,
+      // so both accounts are judged by one state of the chain.
       let previousStillEntitled: boolean;
       try {
-        previousStillEntitled = (await internals.entitled(tokenId, record.lastIssuedTo, ACQUIRE_ACTION)).entitled;
+        previousStillEntitled = (
+          await checkEntitlement(entitlement, {
+            token: token(tokenId),
+            account: record.lastIssuedTo,
+            action: ACQUIRE_ACTION,
+            reader: chain,
+            now: now(),
+            ...(block === undefined ? {} : { blockNumber: block }),
+          })
+        ).entitled;
       } catch {
         throw new IssuerError("read_failed", "the fresh entitlement read of the previous holder could not be taken");
       }
       if (previousStillEntitled) return record;
-      return rotateRecord(record, "claim", account);
+      return rotateRecord(record, "claim", account, block);
     },
 
     async holderOf(tokenId, account) {
@@ -1079,7 +1118,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return false;
     },
     async lost(record) {
-      if (!is1155 || record.lastIssuedTo === null || record.dark) return;
+      if (record.lastIssuedTo === null || record.dark) return;
       try {
         await loseIfVerified(record, record.lastIssuedTo);
       } catch (error) {
@@ -1161,12 +1200,20 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
           failed.push(id);
           continue;
         }
-        if (owner === null) {
-          await burnRecord(record);
-          summary.burned.push(id);
-        } else if (!stillEntitled) {
-          await rotateRecord(record, "transfer", null);
-          summary.rotated.push(id);
+        if (owner === null || !stillEntitled) {
+          // One read does not take a pass away (see loseIfVerified). Where
+          // the loss is not borne out nothing is pushed either: content is
+          // never sent to an account a read just found not entitled.
+          let did: "retired" | "dark" | "burned" | null;
+          try {
+            did = await loseIfVerified(record, holder);
+          } catch (error) {
+            onError(error, { operation: "update:read", tokenId: id });
+            failed.push(id);
+            continue;
+          }
+          if (did === "burned") summary.burned.push(id);
+          else if (did) summary.rotated.push(id);
         } else {
           await notify(record, holder, false, "update");
         }

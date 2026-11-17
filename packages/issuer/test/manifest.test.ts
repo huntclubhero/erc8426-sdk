@@ -260,10 +260,14 @@ describe("gated acquisition", () => {
     const owner = newSigner();
     h.chain.setOwner(TOKEN_ID, owner.address);
     const { body } = await claim(h, owner);
-    h.chain.setOwner(TOKEN_ID, newSigner().address);
-    expect((await h.get(body.formats.apple)).status).toBe(403);
     h.chain.failing = true;
     expect((await h.get(body.formats.apple)).status).toBe(503);
+    h.chain.failing = false;
+    h.chain.setOwner(TOKEN_ID, newSigner().address);
+    expect((await h.get(body.formats.apple)).status).toBe(403);
+    // The issuer observed the loss by that read and retired the URL.
+    expect((await h.get(body.formats.apple)).status).toBe(404);
+    expect((await h.issuer.stores.passes.get(TOKEN_ID))!.lastIssuedTo).toBeNull();
   });
 
   it("answers an invalid token id 400 invalid_request", async () => {

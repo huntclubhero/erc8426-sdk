@@ -231,12 +231,17 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
   // entitled to that action, so the pass is touched only when the account is
   // not entitled to hold it either. Never throws: the refusal stands, and
   // the next read acts if this one could not.
+  //
+  // ERC-721: the same, when the account is the one the token's pass is
+  // issued to. Any other account's refusal says nothing about that pass.
   async function actOnLoss(result: { error: AuthError; account?: Address }, tokenId: string, action: string): Promise<void> {
-    if (config.standard !== "erc1155" || result.error !== "not_owner" || !result.account) return;
+    if (result.error !== "not_owner" || !result.account) return;
     try {
       if (action !== ACQUIRE_ACTION && (await x.entitled(tokenId, result.account, ACQUIRE_ACTION)).entitled) return;
-      const record = await x.stores.passes.get(passKeyFor(tokenId, result.account));
-      if (record) await x.lost(record);
+      const is1155 = config.standard === "erc1155";
+      const record = await x.stores.passes.get(passKeyFor(tokenId, is1155 ? result.account : null));
+      if (!record) return;
+      if (is1155 || (record.lastIssuedTo !== null && isAddressEqual(record.lastIssuedTo, result.account))) await x.lost(record);
     } catch {
       // Left to the next read.
     }
@@ -358,9 +363,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
-    // ERC-1155: the read that admits the claim is taken at a head the node
-    // has just named, and that block dates the pass (see recordIssuance).
-    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION, ...(config.standard === "erc1155" ? { atHead: true } : {}) });
+    // The read that admits the claim is taken at a head the node has just
+    // named, and that block dates the pass (see recordIssuance).
+    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION, atHead: true });
     if (!result.ok) {
       await actOnLoss(result, tokenId, ACQUIRE_ACTION);
       return refuse(result.error, challenge);
