@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased: a second review of the ERC-1155 draft, and the end of a rental
+## 0.5.2 (issuer): a second review of the ERC-1155 draft, and the end of a rental
 
-A reader of 0.5.1 on the ERC-8426 thread found one more way to lose a pass that is held, and answered the questions the rental demo raised. Each code point was first reproduced by a test on 0.5.1, then fixed. The change was then reviewed again before it was pushed, and seven more points from that review were reproduced and fixed the same way (`packages/issuer/test/review-second-pass.test.ts`). `@erc8426/issuer` and the example app change; no contract changes.
+A reader of 0.5.1 on the ERC-8426 thread found one more way to lose a pass that is held, and answered the questions the rental demo raised. Each code point was first reproduced by a test on 0.5.1, then fixed. The change was then reviewed again before it was pushed, and seven more points from that review were reproduced and fixed the same way (`packages/issuer/test/review-second-pass.test.ts`). Only `@erc8426/issuer` changes (and the example app); the other packages stay at 0.5.0 and contracts at 0.4.1.
 
 **Changes an ERC-721 issuer can see**
 
