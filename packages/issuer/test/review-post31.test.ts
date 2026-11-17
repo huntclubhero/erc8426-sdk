@@ -405,8 +405,7 @@ describe("a stored pass with no block a read was taken at (ERC-1155)", () => {
     expect(record.serial).toBe(serial);
     expect(record.dark).toBeUndefined();
     expect(h.notified).toEqual([]);
-    // A transfer log is not held back by the missing date: the block of the
-    // log is read, as before, but only for an account that holds now.
+    // And the account's own claim is refused, as for anyone who does not hold.
     expect((await claim(h, alice, ID)).res.status).toBe(403);
   });
 
@@ -482,7 +481,7 @@ describe("ERC-721: transfer logs and the block a pass is dated with", () => {
     const a = newSigner();
     h.chain.setOwner(TOKEN_ID, a.address);
     expect((await claim(h, a)).res.status).toBe(200);
-    // Burned at 101 (seen by a refused request), minted again to A at 103.
+    // Burned at 101 (seen by a PassUpdate read), minted again to A at 103.
     h.chain.setOwner(TOKEN_ID, null);
     h.chain.head = 102n;
     await h.issuer.onPassUpdate(TOKEN_ID);
@@ -589,5 +588,218 @@ describe("render is told what each link is bound to", () => {
     const kept = seen.at(-1)!;
     expect(kept.links["vote-yes"]).toBe(live.links["vote-yes"]);
     expect(kept.linkSubjects).toEqual({ "vote-yes": "6" });
+  });
+});
+
+/// From a cold review of the fixes above, before they were pushed. Each test
+/// failed on the first version of the fix.
+
+/// An ERC-721 chain with a history of owners, read through one node that
+/// can be behind: it answers for the blocks it has and no others.
+class History721 extends FakeChain {
+  private steps: { from: bigint; owner: Address | null }[] = [];
+  node = 100n;
+  setOwnerFrom(block: bigint, owner: Address | null): void {
+    this.steps.push({ from: block, owner });
+  }
+  private at(block: bigint): Address | null {
+    let owner: Address | null = null;
+    for (const s of this.steps) if (s.from <= block) owner = s.owner;
+    return owner;
+  }
+  blockNumber = async (): Promise<bigint> => this.node;
+  override async ownerOf(_token: TokenRef, blockNumber?: bigint): Promise<Address | null> {
+    this.reads++;
+    if (blockNumber === undefined) return this.at(this.node);
+    if (blockNumber > this.node) throw new Error("header not found");
+    return this.at(blockNumber);
+  }
+}
+
+/// A record as 0.5.1 and 0.5.2 wrote it: its blocks, and no mark.
+const unmark = (record: PassRecord): void => {
+  delete record.datedByRead;
+};
+
+describe("review of the fix: a pass from an earlier version and a transfer log that arrives on time (ERC-1155)", () => {
+  for (const shape of ["a block with no mark", "no block"] as const) {
+    it(`a sale the watcher reports retires the pass or takes it dark (${shape})`, async () => {
+      for (const make of [signedOnly, harness1155]) {
+        const h = make();
+        const alice = newSigner();
+        const bob = newSigner();
+        h.chain.setBalanceFrom(100n, ID, alice.address, 1n);
+        h.chain.fresh = 101n;
+        h.chain.lagging = 101n;
+        const first = await claim(h, alice, ID);
+        expect(first.res.status).toBe(200);
+        const stored = (await recordOf(h, alice.address))!;
+        if (shape === "no block") asEarlier(stored);
+        else unmark(stored);
+        await h.issuer.stores.passes.put(stored);
+        // Alice sells her unit at 105. Every node is current.
+        h.chain.setBalanceFrom(105n, ID, alice.address, 0n);
+        h.chain.setBalanceFrom(105n, ID, bob.address, 1n);
+        h.chain.fresh = 106n;
+        h.chain.lagging = 106n;
+        expect(await h.issuer.onTransfer(ID, alice.address, bob.address, 105n)).toBe(true);
+        const record = (await recordOf(h, alice.address))!;
+        expect(record.dark === true || record.lastIssuedTo === null).toBe(true);
+        expect((await h.get(new URL(first.body.formats.apple).pathname)).status).toBe(404);
+      }
+    });
+
+    it(`the log's block is the floor: a node behind the log takes nothing (${shape})`, async () => {
+      const h = signedOnly();
+      const alice = newSigner();
+      h.chain.setBalanceFrom(100n, ID, alice.address, 1n);
+      h.chain.fresh = 101n;
+      h.chain.lagging = 101n;
+      expect((await claim(h, alice, ID)).res.status).toBe(200);
+      const stored = (await recordOf(h, alice.address))!;
+      if (shape === "no block") asEarlier(stored);
+      else unmark(stored);
+      await h.issuer.stores.passes.put(stored);
+      // A log of block 105 names Alice, and the node asked is at 99, where
+      // she held nothing yet. She holds at 105 and after.
+      h.chain.lagging = 99n;
+      h.chain.latestFrom = "lagging";
+      h.chain.headFrom = "lagging";
+      await h.issuer.onTransfer(ID, newSigner().address, alice.address, 105n).catch(() => undefined);
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+    });
+  }
+});
+
+describe("review of the fix: an unmarked block still keeps a claim from behind it out (ERC-721)", () => {
+  for (const mode of ["public", "gated"] as const) {
+    it(`a request answered by a node behind the sale does not hand the buyer's pass to the seller (${mode})`, async () => {
+      const chain = new History721();
+      const h = buildHarness({ mode, chain });
+      const a = newSigner();
+      const b = newSigner();
+      // A owned from 90 and sold to B at 115. B's pass was issued at 120.
+      chain.setOwnerFrom(90n, a.address);
+      chain.setOwnerFrom(115n, b.address);
+      chain.node = 120n;
+      if (mode === "public") expect((await h.get(`/wallet-pass/${TOKEN_ID}`)).status).toBe(200);
+      else expect((await claim(h, b)).res.status).toBe(200);
+      const stored = (await h.issuer.stores.passes.get(TOKEN_ID))!;
+      expect(stored.issuedAtBlock).toBe("120");
+      unmark(stored);
+      await h.issuer.stores.passes.put(stored);
+      // One request reaches a node at 110, where A still owns.
+      chain.node = 110n;
+      const res = mode === "public" ? await h.get(`/wallet-pass/${TOKEN_ID}`) : (await claim(h, a)).res;
+      expect(res.status).toBe(503);
+      const after = (await h.issuer.stores.passes.get(TOKEN_ID))!;
+      expect(after.lastIssuedTo).toBe(b.address);
+      expect(after.serial).toBe(stored.serial);
+    });
+  }
+});
+
+describe("review of the fix: a pass is not dated below a block an earlier version stored", () => {
+  it("ERC-1155: a sweep through a node from an earlier holding period dates nothing, and the next lagging sweep takes nothing", async () => {
+    for (const make of [signedOnly, harness1155]) {
+      const h = make();
+      const alice = newSigner();
+      // Held 50 to 79, nothing 80 to 114, holds from 115. Claimed at 120.
+      h.chain.setBalanceFrom(50n, ID, alice.address, 1n);
+      h.chain.setBalanceFrom(80n, ID, alice.address, 0n);
+      h.chain.setBalanceFrom(115n, ID, alice.address, 1n);
+      h.chain.fresh = 120n;
+      h.chain.lagging = 120n;
+      expect((await claim(h, alice, ID)).res.status).toBe(200);
+      const stored = (await recordOf(h, alice.address))!;
+      unmark(stored);
+      await h.issuer.stores.passes.put(stored);
+      h.chain.lagging = 70n;
+      h.chain.latestFrom = "lagging";
+      h.chain.headFrom = "lagging";
+      await h.issuer.checkHoldings(ID);
+      const swept = (await recordOf(h, alice.address))!;
+      expect(swept.datedByRead).toBeUndefined();
+      expect(swept.issuedAtBlock).toBe("120");
+      h.chain.lagging = 100n;
+      const second = await h.issuer.checkHoldings(ID);
+      expect([...second.retired, ...second.dark]).toEqual([]);
+      const record = (await recordOf(h, alice.address))!;
+      expect(record.dark).toBeUndefined();
+      expect(record.lastIssuedTo).toBe(alice.address);
+      // A sweep through a current node dates it, and marks it.
+      h.chain.lagging = 125n;
+      h.chain.fresh = 125n;
+      await h.issuer.checkHoldings(ID);
+      const dated = (await recordOf(h, alice.address))!;
+      expect(dated.datedByRead).toBe(true);
+      expect(dated.heldAtBlock).toBe("125");
+    }
+  });
+
+  it("ERC-721: a PassUpdate through such a node dates nothing, and a refused request through a lagging node takes nothing", async () => {
+    const chain = new History721();
+    const h = buildHarness({ chain });
+    const a = newSigner();
+    const b = newSigner();
+    chain.setOwnerFrom(50n, a.address);
+    chain.setOwnerFrom(80n, b.address);
+    chain.setOwnerFrom(115n, a.address);
+    chain.node = 120n;
+    const first = await claim(h, a);
+    expect(first.res.status).toBe(200);
+    const stored = (await h.issuer.stores.passes.get(TOKEN_ID))!;
+    unmark(stored);
+    await h.issuer.stores.passes.put(stored);
+    chain.node = 70n;
+    await h.issuer.onPassUpdate(TOKEN_ID);
+    expect((await h.issuer.stores.passes.get(TOKEN_ID))!.datedByRead).toBeUndefined();
+    chain.node = 100n;
+    expect((await h.get(new URL(first.body.formats.apple).pathname)).status).toBe(403);
+    expect((await h.issuer.stores.passes.get(TOKEN_ID))!.lastIssuedTo).toBe(a.address);
+  });
+});
+
+describe("review of the fix: a loss is tested against the date of the record as it is when the issuer acts", () => {
+  it("a download that was waiting on its read while the holder claimed again does not take the pass through a node behind that claim", async () => {
+    const h = signedOnly();
+    const alice = newSigner();
+    h.chain.setBalanceFrom(100n, ID, alice.address, 1n);
+    h.chain.lagging = 100n;
+    const first = await claim(h, alice, ID);
+    expect(first.res.status).toBe(200);
+    // Out at 103 and back at 108, seen by nobody.
+    h.chain.setBalanceFrom(103n, ID, alice.address, 0n);
+    h.chain.setBalanceFrom(108n, ID, alice.address, 1n);
+    h.chain.fresh = 110n;
+    h.chain.lagging = 105n;
+    // A download starts, and its read at the reader's tag is slow.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const real = h.chain.balanceOf.bind(h.chain);
+    let gated = true;
+    h.chain.balanceOf = async (token, account, blockNumber) => {
+      if (blockNumber === undefined && gated) {
+        gated = false;
+        await gate;
+      }
+      return real(token, account, blockNumber);
+    };
+    h.chain.latestFrom = "lagging";
+    const download = h.get(new URL(first.body.formats.apple).pathname);
+    await new Promise((r) => setTimeout(r, 10));
+    // Meanwhile she claims again through a current node: dated 110.
+    h.chain.headFrom = "fresh";
+    expect((await claim(h, alice, ID)).res.status).toBe(200);
+    expect((await recordOf(h, alice.address))!.heldAtBlock).toBe("110");
+    // The download's reads are answered by the node at 105.
+    h.chain.headFrom = "lagging";
+    release();
+    expect((await download).status).toBe(403);
+    const record = (await recordOf(h, alice.address))!;
+    expect(record.dark).toBeUndefined();
+    expect(record.lastIssuedTo).toBe(alice.address);
   });
 });

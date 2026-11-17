@@ -920,6 +920,21 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return held !== undefined && held > issued ? held : issued;
   }
 
+  // The block an earlier version left on a record that has no mark: the
+  // later of its two. Not a block a loss is tested against (0.5.0 stored a
+  // head no read was taken at), but a head the issuer had seen by the time
+  // it issued the pass, so it still serves as a floor in two places: a
+  // claim by another account that was read below it is behind the issuance
+  // (see recordIssuance), and the pass is not dated again below it (see
+  // heldAt). Undefined for a marked record and for one with no block.
+  function unmarkedBlock(record: PassRecord): bigint | undefined {
+    if (record.datedByRead) return undefined;
+    const issued = record.issuedAtBlock === undefined ? undefined : BigInt(record.issuedAtBlock);
+    const held = record.heldAtBlock === undefined ? undefined : BigInt(record.heldAtBlock);
+    if (issued === undefined) return held;
+    return held !== undefined && held > issued ? held : issued;
+  }
+
   // The block the pass's URLs were issued at, where a read was taken at it:
   // what a transfer log is tested against. A log from that block or an
   // earlier one says nothing about this pass, since the account was read as
@@ -963,9 +978,18 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       if (!stored || stored.serial !== record.serial || stored.generation !== record.generation || stored.lastIssuedTo === null) return;
       const dated = datedAt(stored);
       if (dated === undefined || block > dated) {
-        // A block an earlier version left is not one a read was taken at:
-        // it goes, so it is never tested against beside this one.
-        if (!stored.datedByRead) delete stored.issuedAtBlock;
+        if (!stored.datedByRead) {
+          // Not below a block an earlier version stored: a node that far
+          // behind can read the account as entitled from an earlier holding
+          // period, and a pass dated there would be taken by the next node
+          // that is behind its real issuance.
+          const floor = unmarkedBlock(stored);
+          if (floor !== undefined && block < floor) return;
+          // A block an earlier version left is not one a read was taken
+          // at: it goes, so it is never tested against beside this one.
+          delete stored.issuedAtBlock;
+          delete stored.heldAtBlock;
+        }
         stored.heldAtBlock = block.toString();
         stored.datedByRead = true;
         await stores.passes.put(stored);
@@ -1018,8 +1042,14 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // request, a holdings check, a PassUpdate. Its requests stay refused by
   // the fresh read all the same. It is dated by its holder's next claim, or
   // the next time one of those paths finds the account entitled (see
-  // dateOnSight), and tested from then on; a transfer log, a burn log and
-  // another account's claim act on it as before.
+  // dateOnSight), and tested from then on. An ERC-721 transfer or burn log
+  // and another account's claim act on it as before. Under ERC-1155 a
+  // transfer log only brings the read about, so there the block of the log
+  // stands in for the missing date (`logBlock`): a node cannot name a head at
+  // or after that block without having reached the transfer, and a loss read
+  // there is acted on. What that leaves, for a pass with no date only: a log
+  // from before its issuance, delivered late, read through a node that is
+  // also behind the issuance.
   //
   // The record is read again before acting, since another request may have
   // acted meanwhile. Returns what was done, or null when nothing was.
@@ -1033,16 +1063,17 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   // longer exists (a burn nobody reported, or a node that has not reached
   // the mint): that is tested the same way, and the pass is voided.
   const losing = new Map<string, Promise<unknown>>();
-  async function loseIfVerified(record: PassRecord, account: Address): Promise<"retired" | "dark" | "burned" | null> {
+  async function loseIfVerified(record: PassRecord, account: Address, logBlock?: bigint): Promise<"retired" | "dark" | "burned" | null> {
     const key = passRecordKey(record);
     const turn = (losing.get(key) ?? Promise.resolve()).then(
       async () => {
         const t = token(record.tokenId);
         let burned = false;
+        let head: bigint | undefined;
         if (typeof chain!.blockNumber === "function") {
-          const dated = datedAt(record);
+          const dated = datedAt(record) ?? logBlock;
           if (dated === undefined) return null;
-          const head = await chain!.blockNumber!();
+          head = await chain!.blockNumber!();
           if (head < dated) return null;
           if (!is1155 && (await chain!.ownerOf(t, head)) === null) burned = true;
           else if ((await checkEntitlement(entitlement, { token: t, account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head })).entitled) return null;
@@ -1056,6 +1087,13 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         }
         const current = await stores.passes.get(key);
         if (!current || current.lastIssuedTo === null || current.dark || current.serial !== record.serial) return null;
+        // The record in hand was read before these awaits. The holder may
+        // have claimed again meanwhile, through a node ahead of the one that
+        // answered here: the loss is tested against the date as it is now.
+        if (head !== undefined) {
+          const now = datedAt(current) ?? logBlock;
+          if (now === undefined || head < now) return null;
+        }
         if (burned) {
           await burnRecord(current);
           return "burned";
@@ -1159,7 +1197,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (record.dark) continue;
         let did: "retired" | "dark" | "burned" | null;
         try {
-          did = await loseIfVerified(record, account);
+          did = await loseIfVerified(record, account, opts.blockNumber);
         } catch (error) {
           onError(error, { operation: "holdings:read", tokenId: id });
           failed.push(account);
@@ -1341,7 +1379,11 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // a node that has not seen the sale is admitted at that node's head,
       // where the buyer does not hold yet; that says nothing about a pass
       // the buyer claimed after it.
-      const dated = datedAt(record);
+      // An earlier version's block has no mark and is not what a loss is
+      // tested against, but it is a head the issuer had seen when it issued
+      // the pass, so a claim read below it is behind that issuance all the
+      // same.
+      const dated = datedAt(record) ?? unmarkedBlock(record);
       if (block !== undefined && dated !== undefined && block < dated) {
         // Transient on a live chain: the next try names a later head. It
         // does not pass by itself where the chain was reset under a kept
