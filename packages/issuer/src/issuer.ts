@@ -245,7 +245,9 @@ export interface IssuerInternals {
   authorize(input: AuthorizeInput): Promise<AuthorizeResult>;
   entitled(tokenId: string, account: Address, action: string): Promise<EntitlementResult>;
   ownerOf(tokenId: string): Promise<Address | null>;
-  recordIssuance(tokenId: string, account: Address): Promise<PassRecord>;
+  /// `block` (ERC-1155): the block the claim was admitted at, which dates
+  ///  the pass. Absent when the reader cannot name a block.
+  recordIssuance(tokenId: string, account: Address, block?: bigint): Promise<PassRecord>;
   /// `account` (the prover) selects the record under the ERC-1155 binding
   ///  and is ignored for ERC-721.
   rotateOnRequest(tokenId: string, account?: Address): Promise<PassRecord>;
@@ -649,27 +651,57 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
   }
 
   // The newest block the chain reader has, and whether `account` is entitled
-  // at exactly that block. Null when the reader cannot name a block. A read
-  // the node cannot answer at the block it just named (a load balanced
-  // provider that answers the two calls from different nodes) throws.
+  // at exactly that block. Null only when the reader cannot name a block at
+  // all (it has no `blockNumber`). A head that could not be fetched, or a
+  // read the node cannot answer at the block it just named (a load balanced
+  // provider that answers the two calls from different nodes), throws.
+  async function readAtHead(t: TokenRef, account: Address, action: string): Promise<{ block: bigint; result: EntitlementResult } | null> {
+    if (typeof chain?.blockNumber !== "function") return null;
+    const head = await chain.blockNumber();
+    const result = await checkEntitlement(entitlement, { token: t, account, action, reader: chain, now: now(), blockNumber: head });
+    return { block: head, result };
+  }
   async function entitledAtHead(id: string, account: Address): Promise<{ block: bigint; entitled: boolean } | null> {
-    const head = await chain?.blockNumber?.().catch(() => undefined);
-    if (head === undefined) return null;
-    const read = await checkEntitlement(entitlement, { token: token(id), account, action: ACQUIRE_ACTION, reader: chain!, now: now(), blockNumber: head });
-    return { block: head, entitled: read.entitled };
+    const at = await readAtHead(token(id), account, ACQUIRE_ACTION);
+    return at && { block: at.block, entitled: at.result.entitled };
   }
 
-  // Date a pass that is being issued or brought back: the block at which the
-  // account was read as entitled. It is what a later loss is tested against
-  // (see loseIfVerified), and what keeps an older transfer log from being
-  // held against the pass (see checkHoldings). The block is recorded only
-  // when the read was taken AT that block and said entitled: a head number
-  // fetched beside a read at `latest` can fall on either side of the block
-  // that read saw. Best effort: with no block the pass is undated.
-  async function dateIssuance(record: PassRecord, account: Address): Promise<void> {
-    const at = await entitledAtHead(record.tokenId, account).catch(() => null);
-    if (at?.entitled) record.issuedAtBlock = at.block.toString();
-    else delete record.issuedAtBlock;
+  // The read that admits a claim (ERC-1155). A pass is dated by the block at
+  // which its account was read as entitled: that block is what a later loss
+  // is tested against (see loseIfVerified), and what keeps an older transfer
+  // log from being held against the pass (see checkHoldings). So the read
+  // that admits is the read that dates: the head is named first, the read is
+  // taken at it, and the one answer both admits the account and dates its
+  // pass. A second read taken to date a pass admitted at `latest` could
+  // reach a node behind the first, say "not entitled" for an account that
+  // holds, and leave the pass with no block and so with no test.
+  //
+  // The claim's nonce is spent by the time this runs, and a failed claim
+  // costs the holder a new signature, so a read the node could not answer at
+  // the head it named is tried again before the request is given up (503).
+  //
+  // The node that names the head can itself be behind the block the account
+  // received its unit in, and then the read at that head says "not
+  // entitled" for an account that holds: the holder who claims right after
+  // a mint. So a "not entitled" at the head is compared with one read at
+  // the reader's own tag. Where that one agrees, the account is refused.
+  // Where it says entitled the nodes disagree, which is no answer: it is
+  // tried again, and given up as a read that could not be taken, never as a
+  // refusal and never as a loss.
+  const ADMIT_ATTEMPTS = 3;
+  async function admitAtHead(request: { token: TokenRef; account: Address; action: string }): Promise<{ block: bigint; result: EntitlementResult } | null> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const at = await readAtHead(request.token, request.account, request.action);
+        if (!at || at.result.entitled) return at;
+        const latest = await checkEntitlement(entitlement, { token: request.token, account: request.account, action: request.action, reader: chain!, now: now() });
+        if (!latest.entitled) return at;
+        throw new Error(`the read at block ${at.block} and the read at the reader's tag disagree`);
+      } catch (error) {
+        if (attempt >= ADMIT_ATTEMPTS) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+      }
+    }
   }
 
   // Acting on a loss costs the holder something a refusal does not: a retired
@@ -724,17 +756,30 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     return turn;
   }
 
-  // A dark pass whose account holds again: the same card, live.
-  async function revive(record: PassRecord): Promise<void> {
+  // A dark pass whose account holds again: the same card, live. `block` is
+  // the block the account was read as holding at, absent when the reader
+  // cannot name one. It is a new issuance as far as an older transfer log is
+  // concerned: a log from before it, delivered late, must not be held
+  // against the pass that came back.
+  async function revive(record: PassRecord, block: bigint | undefined): Promise<void> {
     delete record.dark;
     record.updatedAt = Math.max(nowSeconds(), record.updatedAt);
-    // The account was just read as holding, so this is a new issuance as far
-    // as an older transfer log is concerned: a log from before it, delivered
-    // late, must not be held against the pass that came back.
-    if (record.lastIssuedTo) await dateIssuance(record, record.lastIssuedTo);
+    if (block !== undefined && record.lastIssuedTo) record.issuedAtBlock = block.toString();
     else delete record.issuedAtBlock;
     await stores.passes.put(record);
     if (record.lastIssuedTo) await notify(record, record.lastIssuedTo, false, "revive");
+  }
+
+  // Bring a dark pass back on a read taken at a named head, which dates it
+  // (as a claim is dated, see admitAtHead). Where that read does not say
+  // entitled the pass stays dark and the next check tries again. Throws
+  // when the read could not be taken. Returns whether the pass came back.
+  async function reviveIfHeld(record: PassRecord): Promise<boolean> {
+    if (!record.lastIssuedTo) return false;
+    const at = await entitledAtHead(record.tokenId, record.lastIssuedTo);
+    if (at && !at.entitled) return false;
+    await revive(record, at?.block);
+    return true;
   }
 
   async function checkHoldings(
@@ -808,8 +853,15 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         }
         if (did) summary[did].push(account);
       } else if (record.dark) {
-        await revive(record);
-        summary.revived.push(account);
+        let back: boolean;
+        try {
+          back = await reviveIfHeld(record);
+        } catch (error) {
+          onError(error, { operation: "holdings:read", tokenId: id });
+          failed.push(account);
+          continue;
+        }
+        if (back) summary.revived.push(account);
       } else if (!heldAtBlock) {
         // Holds now, did not at the block of the transfer.
         if (retire) {
@@ -855,7 +907,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       // away, here least of all, where one node answers for every holder.
       return (await loseIfVerified(mine, account)) ? "lost" : "updated";
     }
-    if (mine.dark) await revive(mine);
+    if (mine.dark) await reviveIfHeld(mine);
     else await notify(mine, account, false, "update");
     return "updated";
   }
@@ -903,7 +955,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
       return { message, nonce, issuedAt: issuedAt.toISOString(), expiresAt: expirationTime.toISOString() };
     },
 
-    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now }),
+    authorize: (input) => runFloor(input, { config, nonces: stores.nonces, verifier, chain, entitlement, now, ...(is1155 ? { readAtHead: admitAtHead } : {}) }),
 
     entitled: (tokenId, account, action) =>
       checkEntitlement(entitlement, { token: token(tokenId), account, action, reader: chain, now: now() }),
@@ -915,7 +967,7 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
     // first claim: acquisition URLs MUST rotate before the manifest is
     // returned." The very first issuance only records the account: no earlier
     // holder has URLs to retire.
-    async recordIssuance(tokenId, account) {
+    async recordIssuance(tokenId, account, block) {
       if (is1155) {
         // One record per id and account, so a claim never touches another
         // holder's pass. The prover was just read as entitled. A record
@@ -929,11 +981,12 @@ export function createIssuer(options: CreateIssuerOptions): Issuer {
         if (mine.dark && config.lostEntitlement === "retire") mine = await rotateRecord(mine, "transfer", null);
         const wasDark = mine.dark === true && mine.lastIssuedTo !== null;
         mine.lastIssuedTo = account;
-        // Date the issuance (see dateIssuance).
-        await dateIssuance(mine, account);
-        if (wasDark) await revive(mine);
+        // Dated by the block the claim was admitted at (see admitAtHead).
+        if (wasDark) await revive(mine, block);
         else {
           delete mine.dark;
+          if (block !== undefined) mine.issuedAtBlock = block.toString();
+          else delete mine.issuedAtBlock;
           await stores.passes.put(mine);
         }
         return mine;

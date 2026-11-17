@@ -15,6 +15,11 @@ export interface AuthorizeDeps {
   entitlement: EntitlementPolicy;
   /// Epoch milliseconds.
   now: () => number;
+  /// Check (2) taken at a head the node has just named, for a request that
+  ///  sets `atHead`. Resolves to null when the reader cannot name a block
+  ///  (the read is then taken at the reader's own tag); throws when the read
+  ///  could not be taken.
+  readAtHead?: (request: { token: TokenRef; account: Address; action: string; now: number }) => Promise<{ result: EntitlementResult; block: bigint } | null>;
 }
 
 /// A presented proof and what the verifier is being asked to do with it. The
@@ -30,6 +35,11 @@ export interface AuthorizeInput {
   ///  is the challenge's claimed account, so the read is taken once per
   ///  request and never for the wrong account.
   freshRead?: { account: Address; result: EntitlementResult };
+  /// Take check (2) at a head the node has just named and report that block
+  ///  (`block` on the result). Set for a claim under the ERC-1155 binding,
+  ///  so that the read that admits the account is the read that dates its
+  ///  pass. Ignored where `freshRead` applies or no block can be named.
+  atHead?: boolean;
 }
 
 export type AuthorizeResult =
@@ -41,6 +51,9 @@ export type AuthorizeResult =
       via: string;
       token: TokenRef;
       challenge: ParsedChallenge;
+      /// The block check (2) was read at, when the request set `atHead` and
+      ///  the reader could name one.
+      block?: bigint;
     }
   | {
       ok: false;
@@ -125,22 +138,30 @@ export async function authorize(input: AuthorizeInput, deps: AuthorizeDeps): Pro
   // window. A read that could not be taken fails closed as retryable and is
   // never reported as a verdict on the account.
   let entitled: EntitlementResult;
+  let block: bigint | undefined;
   if (input.freshRead && isAddressEqual(input.freshRead.account, parsed.address)) {
     entitled = input.freshRead.result;
   } else {
     try {
-      entitled = await checkEntitlement(deps.entitlement, {
-        token: served,
-        account: parsed.address,
-        action: input.action,
-        reader: deps.chain,
-        now: nowMs,
-      });
+      const atHead =
+        input.atHead && deps.readAtHead ? await deps.readAtHead({ token: served, account: parsed.address, action: input.action, now: nowMs }) : null;
+      if (atHead) {
+        entitled = atHead.result;
+        block = atHead.block;
+      } else {
+        entitled = await checkEntitlement(deps.entitlement, {
+          token: served,
+          account: parsed.address,
+          action: input.action,
+          reader: deps.chain,
+          now: nowMs,
+        });
+      }
     } catch {
       return { ok: false, error: "read_failed" };
     }
   }
   if (!entitled.entitled) return { ok: false, error: "not_owner", account: parsed.address };
 
-  return { ok: true, account: parsed.address, via: entitled.via, token: served, challenge: parsed };
+  return { ok: true, account: parsed.address, via: entitled.via, token: served, challenge: parsed, ...(block === undefined ? {} : { block }) };
 }

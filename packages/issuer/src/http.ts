@@ -358,7 +358,9 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     if (proof.kind === "malformed") return error(proof.error, { message: proof.message });
     // Only an acquire proof resolves the manifest: a proof for any other
     // action fails the binding check.
-    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION });
+    // ERC-1155: the read that admits the claim is taken at a head the node
+    // has just named, and that block dates the pass (see recordIssuance).
+    const result = await x.authorize({ ...proof.proof, tokenId, action: ACQUIRE_ACTION, ...(config.standard === "erc1155" ? { atHead: true } : {}) });
     if (!result.ok) {
       await actOnLoss(result, tokenId, ACQUIRE_ACTION);
       return refuse(result.error, challenge);
@@ -366,7 +368,7 @@ export function createRouter(x: IssuerInternals): (request: Request) => Promise<
     // A first claim rotates before the manifest is built. Another entitled
     // account under an additive policy shares the holder of record's pass,
     // so the pass is always rendered for the holder of record.
-    const record = await x.recordIssuance(tokenId, result.account);
+    const record = await x.recordIssuance(tokenId, result.account, result.block);
     const built = await x.buildManifest(record, record.lastIssuedTo ?? result.account);
     // As on a download: a manifest built for a pass that went dark or was
     // retired meanwhile is not handed out.
